@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    println!("FIPS - Federated Interoperable Peering System");
 }
