@@ -15,6 +15,9 @@ use thiserror::Error;
 /// Human-readable part for npub (NIP-19).
 const NPUB_HRP: Hrp = Hrp::parse_unchecked("npub");
 
+/// Human-readable part for nsec (NIP-19).
+const NSEC_HRP: Hrp = Hrp::parse_unchecked("nsec");
+
 /// Domain separation string for authentication challenges.
 const AUTH_DOMAIN: &[u8] = b"fips-auth-v1";
 
@@ -50,6 +53,15 @@ pub enum IdentityError {
 
     #[error("invalid npub: expected 32 bytes, got {0}")]
     InvalidNpubLength(usize),
+
+    #[error("invalid nsec: expected 'nsec' prefix, got '{0}'")]
+    InvalidNsecPrefix(String),
+
+    #[error("invalid nsec: expected 32 bytes, got {0}")]
+    InvalidNsecLength(usize),
+
+    #[error("invalid hex encoding: {0}")]
+    InvalidHex(#[from] hex::FromHexError),
 }
 
 /// 32-byte node identifier derived from SHA-256(npub).
@@ -296,6 +308,12 @@ impl Identity {
         Ok(Self::from_secret_key(secret_key))
     }
 
+    /// Create an identity from an nsec string (bech32) or hex-encoded secret.
+    pub fn from_secret_str(s: &str) -> Result<Self, IdentityError> {
+        let secret_key = decode_secret(s)?;
+        Ok(Self::from_secret_key(secret_key))
+    }
+
     /// Return the x-only public key.
     pub fn pubkey(&self) -> XOnlyPublicKey {
         self.keypair.x_only_public_key().0
@@ -438,6 +456,42 @@ pub fn decode_npub(npub: &str) -> Result<XOnlyPublicKey, IdentityError> {
 
     let pubkey = XOnlyPublicKey::from_slice(&data)?;
     Ok(pubkey)
+}
+
+/// Encode a secret key as a bech32 nsec string (NIP-19).
+pub fn encode_nsec(secret_key: &SecretKey) -> String {
+    bech32::encode::<Bech32>(NSEC_HRP, &secret_key.secret_bytes())
+        .expect("nsec encoding cannot fail")
+}
+
+/// Decode an nsec string to a secret key.
+pub fn decode_nsec(nsec: &str) -> Result<SecretKey, IdentityError> {
+    let (hrp, data) = bech32::decode(nsec)?;
+
+    if hrp != NSEC_HRP {
+        return Err(IdentityError::InvalidNsecPrefix(hrp.to_string()));
+    }
+
+    if data.len() != 32 {
+        return Err(IdentityError::InvalidNsecLength(data.len()));
+    }
+
+    let secret_key = SecretKey::from_slice(&data)?;
+    Ok(secret_key)
+}
+
+/// Decode a secret key from either nsec (bech32) or hex format.
+pub fn decode_secret(s: &str) -> Result<SecretKey, IdentityError> {
+    if s.starts_with("nsec1") {
+        decode_nsec(s)
+    } else {
+        let bytes = hex::decode(s)?;
+        if bytes.len() != 32 {
+            return Err(IdentityError::InvalidNsecLength(bytes.len()));
+        }
+        let secret_key = SecretKey::from_slice(&bytes)?;
+        Ok(secret_key)
+    }
 }
 
 #[cfg(test)]
@@ -707,5 +761,92 @@ mod tests {
         let display = format!("{}", peer);
         assert!(display.starts_with("npub1"));
         assert_eq!(display, identity.npub());
+    }
+
+    #[test]
+    fn test_nsec_roundtrip() {
+        let secret_bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        let secret_key = SecretKey::from_slice(&secret_bytes).unwrap();
+        let nsec = encode_nsec(&secret_key);
+
+        assert!(nsec.starts_with("nsec1"));
+        assert_eq!(nsec.len(), 63);
+
+        let decoded = decode_nsec(&nsec).unwrap();
+        assert_eq!(decoded.secret_bytes(), secret_bytes);
+    }
+
+    #[test]
+    fn test_decode_nsec_invalid_prefix() {
+        // Use a valid npub (from a generated identity) to test prefix rejection
+        let identity = Identity::generate();
+        let npub = identity.npub();
+        let result = decode_nsec(&npub);
+        assert!(matches!(result, Err(IdentityError::InvalidNsecPrefix(_))));
+    }
+
+    #[test]
+    fn test_decode_secret_nsec() {
+        let secret_bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        let secret_key = SecretKey::from_slice(&secret_bytes).unwrap();
+        let nsec = encode_nsec(&secret_key);
+
+        let decoded = decode_secret(&nsec).unwrap();
+        assert_eq!(decoded.secret_bytes(), secret_bytes);
+    }
+
+    #[test]
+    fn test_decode_secret_hex() {
+        let hex_str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let decoded = decode_secret(hex_str).unwrap();
+
+        let expected: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+        assert_eq!(decoded.secret_bytes(), expected);
+    }
+
+    #[test]
+    fn test_identity_from_secret_str_nsec() {
+        let secret_bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        let secret_key = SecretKey::from_slice(&secret_bytes).unwrap();
+        let nsec = encode_nsec(&secret_key);
+
+        let identity = Identity::from_secret_str(&nsec).unwrap();
+        let identity_from_bytes = Identity::from_secret_bytes(&secret_bytes).unwrap();
+
+        assert_eq!(identity.node_id(), identity_from_bytes.node_id());
+    }
+
+    #[test]
+    fn test_identity_from_secret_str_hex() {
+        let hex_str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let secret_bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        let identity = Identity::from_secret_str(hex_str).unwrap();
+        let identity_from_bytes = Identity::from_secret_bytes(&secret_bytes).unwrap();
+
+        assert_eq!(identity.node_id(), identity_from_bytes.node_id());
     }
 }
