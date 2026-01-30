@@ -4,7 +4,7 @@
 //! The spanning tree provides a routing topology where each node maintains
 //! a path to a common root, enabling greedy distance-based routing.
 
-use crate::{IdentityError, NodeId};
+use crate::{Identity, IdentityError, NodeId};
 use secp256k1::schnorr::Signature;
 use secp256k1::XOnlyPublicKey;
 use std::collections::HashMap;
@@ -117,6 +117,19 @@ impl ParentDeclaration {
     /// Set the signature after signing.
     pub fn set_signature(&mut self, signature: Signature) {
         self.signature = Some(signature);
+    }
+
+    /// Sign this declaration with the given identity.
+    ///
+    /// The identity's node_id must match this declaration's node_id.
+    /// Returns an error if the node_ids don't match.
+    pub fn sign(&mut self, identity: &Identity) -> Result<(), TreeError> {
+        if identity.node_id() != &self.node_id {
+            return Err(TreeError::InvalidSignature(self.node_id));
+        }
+        let signature = identity.sign(&self.signing_bytes());
+        self.signature = Some(signature);
+        Ok(())
     }
 
     /// Check if this is a root declaration (parent == self).
@@ -366,8 +379,13 @@ impl TreeState {
     /// Create initial tree state for a node (as root candidate).
     ///
     /// The node starts as its own root until it learns of a smaller node_id.
+    /// Initial sequence is 1 per protocol spec; timestamp is current Unix time.
     pub fn new(my_node_id: NodeId) -> Self {
-        let my_declaration = ParentDeclaration::self_root(my_node_id, 0, 0);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let my_declaration = ParentDeclaration::self_root(my_node_id, 1, timestamp);
         let my_coords = TreeCoordinate::root(my_node_id);
 
         Self {
@@ -501,6 +519,18 @@ impl TreeState {
     pub fn should_switch_parent(&self, _candidate: &NodeId) -> bool {
         // Stub: would evaluate parent switch criteria
         false
+    }
+
+    /// Sign this node's declaration with the given identity.
+    ///
+    /// The identity's node_id must match this TreeState's node_id.
+    pub fn sign_declaration(&mut self, identity: &Identity) -> Result<(), TreeError> {
+        self.my_declaration.sign(identity)
+    }
+
+    /// Check if this node's declaration is signed.
+    pub fn is_declaration_signed(&self) -> bool {
+        self.my_declaration.is_signed()
     }
 }
 

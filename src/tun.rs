@@ -224,6 +224,72 @@ impl TunWriter {
     }
 }
 
+/// TUN packet reader loop.
+///
+/// Reads packets from the TUN device, logs them, and sends ICMPv6
+/// Destination Unreachable responses for packets we can't route.
+///
+/// This is designed to run in a dedicated thread since TUN reads are blocking.
+/// The loop exits when the TUN interface is deleted (EFAULT) or an unrecoverable
+/// error occurs.
+pub fn run_tun_reader(
+    mut device: TunDevice,
+    mtu: u16,
+    our_addr: FipsAddress,
+    tun_tx: TunTx,
+) {
+    use crate::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+
+    let name = device.name().to_string();
+    let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
+
+    info!(name = %name, "TUN reader starting");
+
+    loop {
+        match device.read_packet(&mut buf) {
+            Ok(n) if n > 0 => {
+                let packet = &buf[..n];
+                log_ipv6_packet(packet);
+
+                // Currently no routing capability - send ICMPv6 Destination Unreachable
+                // for all packets that qualify for an error response
+                if should_send_icmp_error(packet) {
+                    if let Some(response) = build_dest_unreachable(
+                        packet,
+                        DestUnreachableCode::NoRoute,
+                        our_addr.to_ipv6(),
+                    ) {
+                        debug!(
+                            name = %name,
+                            len = response.len(),
+                            "Sending ICMPv6 Destination Unreachable"
+                        );
+                        if tun_tx.send(response).is_err() {
+                            info!(name = %name, "TUN writer channel closed, reader stopping");
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                // Zero-length read, continue
+            }
+            Err(e) => {
+                // "Bad address" (EFAULT) is expected during shutdown when interface is deleted
+                let err_str = format!("{}", e);
+                if err_str.contains("Bad address") {
+                    info!(name = %name, "TUN interface deleted, reader stopping");
+                } else {
+                    error!(name = %name, error = %e, "TUN read error");
+                }
+                break;
+            }
+        }
+    }
+
+    info!(name = %name, "TUN reader stopped");
+}
+
 /// Log basic information about an IPv6 packet at DEBUG level.
 pub fn log_ipv6_packet(packet: &[u8]) {
     if packet.len() < 40 {

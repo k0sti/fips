@@ -9,11 +9,13 @@ use crate::cache::CoordCache;
 use crate::peer::Peer;
 use crate::transport::{Link, LinkId, TransportId};
 use crate::tree::TreeState;
-use crate::tun::{TunDevice, TunError, TunState};
+use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeId};
 use std::collections::HashMap;
 use std::fmt;
+use std::thread::{self, JoinHandle};
 use thiserror::Error;
+use tracing::{info, warn};
 
 /// Errors related to node operations.
 #[derive(Debug, Error)]
@@ -156,8 +158,14 @@ pub struct Node {
     // === TUN Interface ===
     /// TUN device state.
     tun_state: TunState,
-    /// TUN device (if active).
-    tun_device: Option<TunDevice>,
+    /// TUN interface name (for cleanup).
+    tun_name: Option<String>,
+    /// TUN packet sender channel.
+    tun_tx: Option<TunTx>,
+    /// TUN reader thread handle.
+    tun_reader_handle: Option<JoinHandle<()>>,
+    /// TUN writer thread handle.
+    tun_writer_handle: Option<JoinHandle<()>>,
 }
 
 impl Node {
@@ -179,12 +187,24 @@ impl Node {
             TunState::Disabled
         };
 
+        // Initialize tree state with signed self-declaration
+        let mut tree_state = TreeState::new(node_id);
+        tree_state
+            .sign_declaration(&identity)
+            .expect("signing own declaration should never fail");
+
+        info!(
+            node_id = %node_id,
+            address = %identity.address(),
+            "Node initialized as root"
+        );
+
         Ok(Self {
             identity,
             config,
             state: NodeState::Created,
             is_leaf_only,
-            tree_state: TreeState::new(node_id),
+            tree_state,
             bloom_state,
             coord_cache: CoordCache::with_defaults(),
             transport_ids: Vec::new(),
@@ -195,7 +215,10 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             tun_state,
-            tun_device: None,
+            tun_name: None,
+            tun_tx: None,
+            tun_reader_handle: None,
+            tun_writer_handle: None,
         })
     }
 
@@ -207,12 +230,25 @@ impl Node {
         } else {
             TunState::Disabled
         };
+
+        // Initialize tree state with signed self-declaration
+        let mut tree_state = TreeState::new(node_id);
+        tree_state
+            .sign_declaration(&identity)
+            .expect("signing own declaration should never fail");
+
+        info!(
+            node_id = %node_id,
+            address = %identity.address(),
+            "Node initialized as root"
+        );
+
         Self {
             identity,
             config,
             state: NodeState::Created,
             is_leaf_only: false,
-            tree_state: TreeState::new(node_id),
+            tree_state,
             bloom_state: BloomState::new(node_id),
             coord_cache: CoordCache::with_defaults(),
             transport_ids: Vec::new(),
@@ -223,7 +259,10 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             tun_state,
-            tun_device: None,
+            tun_name: None,
+            tun_tx: None,
+            tun_reader_handle: None,
+            tun_writer_handle: None,
         }
     }
 
@@ -319,48 +358,6 @@ impl Node {
         self.tun_state
     }
 
-    /// Get the TUN device if active.
-    pub fn tun_device(&self) -> Option<&TunDevice> {
-        self.tun_device.as_ref()
-    }
-
-    /// Get mutable TUN device if active.
-    pub fn tun_device_mut(&mut self) -> Option<&mut TunDevice> {
-        self.tun_device.as_mut()
-    }
-
-    /// Take ownership of the TUN device.
-    ///
-    /// This removes the TUN device from the node, transferring ownership
-    /// to the caller. Useful for moving the device into a reader task.
-    pub fn take_tun_device(&mut self) -> Option<TunDevice> {
-        self.tun_device.take()
-    }
-
-    /// Initialize the TUN interface.
-    ///
-    /// Creates and configures the TUN device based on the node's configuration.
-    /// Requires CAP_NET_ADMIN capability (run with sudo or setcap).
-    ///
-    /// Returns Ok(true) if TUN was initialized, Ok(false) if TUN is disabled.
-    pub async fn init_tun(&mut self) -> Result<bool, NodeError> {
-        if !self.config.tun.enabled {
-            return Ok(false);
-        }
-
-        let address = *self.identity.address();
-        match TunDevice::create(&self.config.tun, address).await {
-            Ok(device) => {
-                self.tun_device = Some(device);
-                self.tun_state = TunState::Active;
-                Ok(true)
-            }
-            Err(e) => {
-                self.tun_state = TunState::Failed;
-                Err(e.into())
-            }
-        }
-    }
 
     // === Resource Limits ===
 
@@ -525,37 +522,116 @@ impl Node {
 
     // === State Transitions ===
 
-    /// Start the node (stub).
+    /// Start the node.
     ///
-    /// In a full implementation, this would:
-    /// - Initialize transports
-    /// - Bind TUN interface
-    /// - Start event loop
-    pub fn start(&mut self) -> Result<(), NodeError> {
+    /// Initializes the TUN interface (if configured), spawns I/O threads,
+    /// and transitions to the Running state.
+    pub async fn start(&mut self) -> Result<(), NodeError> {
         if !self.state.can_start() {
             return Err(NodeError::AlreadyStarted);
         }
         self.state = NodeState::Starting;
-        // Actual startup would initialize transports, TUN, etc.
+
+        // Initialize TUN interface if configured
+        if self.config.tun.enabled {
+            let address = *self.identity.address();
+            match TunDevice::create(&self.config.tun, address).await {
+                Ok(device) => {
+                    let mtu = device.mtu();
+                    let name = device.name().to_string();
+                    let our_addr = *device.address();
+
+                    info!(
+                        name = %name,
+                        mtu,
+                        address = %device.address(),
+                        "TUN device active"
+                    );
+
+                    // Create writer (dups the fd for independent write access)
+                    let (writer, tun_tx) = device.create_writer()?;
+
+                    info!(mtu, name = %name, "Starting TUN reader and writer");
+
+                    // Spawn writer thread
+                    let writer_handle = thread::spawn(move || {
+                        writer.run();
+                    });
+
+                    // Clone tun_tx for the reader
+                    let reader_tun_tx = tun_tx.clone();
+
+                    // Spawn reader thread
+                    let reader_handle = thread::spawn(move || {
+                        run_tun_reader(device, mtu, our_addr, reader_tun_tx);
+                    });
+
+                    self.tun_state = TunState::Active;
+                    self.tun_name = Some(name);
+                    self.tun_tx = Some(tun_tx);
+                    self.tun_reader_handle = Some(reader_handle);
+                    self.tun_writer_handle = Some(writer_handle);
+                }
+                Err(e) => {
+                    self.tun_state = TunState::Failed;
+                    warn!(error = %e, "Failed to initialize TUN, continuing without it");
+                }
+            }
+        }
+
+        // TODO: Initialize transports here
+
         self.state = NodeState::Running;
+        info!(state = %self.state, "Node started");
         Ok(())
     }
 
-    /// Stop the node (stub).
+    /// Stop the node.
     ///
-    /// In a full implementation, this would:
-    /// - Close all peers
-    /// - Close all links
-    /// - Stop all transports
-    /// - Unbind TUN interface
-    pub fn stop(&mut self) -> Result<(), NodeError> {
+    /// Shuts down TUN interface, stops I/O threads, and transitions to
+    /// the Stopped state.
+    pub async fn stop(&mut self) -> Result<(), NodeError> {
         if !self.state.can_stop() {
             return Err(NodeError::NotStarted);
         }
         self.state = NodeState::Stopping;
-        // Actual shutdown would close transports, links, etc.
+        info!(state = %self.state, "Node stopping");
+
+        // Shutdown TUN interface
+        if let Some(name) = self.tun_name.take() {
+            info!(name = %name, "Shutting down TUN interface");
+
+            // Drop the tun_tx to signal the writer to stop
+            self.tun_tx.take();
+
+            // Delete the interface (causes reader to get EFAULT)
+            if let Err(e) = shutdown_tun_interface(&name).await {
+                warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
+            }
+
+            // Wait for threads to finish
+            if let Some(handle) = self.tun_reader_handle.take() {
+                let _ = handle.join();
+            }
+            if let Some(handle) = self.tun_writer_handle.take() {
+                let _ = handle.join();
+            }
+
+            self.tun_state = TunState::Disabled;
+        }
+
+        // TODO: Shutdown transports here
+
         self.state = NodeState::Stopped;
+        info!(state = %self.state, "Node stopped");
         Ok(())
+    }
+
+    /// Get the TUN packet sender channel.
+    ///
+    /// Returns None if TUN is not active or the node hasn't been started.
+    pub fn tun_tx(&self) -> Option<&TunTx> {
+        self.tun_tx.as_ref()
     }
 }
 
@@ -620,36 +696,39 @@ mod tests {
         assert!(node.bloom_state().is_leaf_only());
     }
 
-    #[test]
-    fn test_node_state_transitions() {
+    #[tokio::test]
+    async fn test_node_state_transitions() {
         let mut node = make_node();
 
         assert!(!node.is_running());
         assert!(node.state().can_start());
 
-        node.start().unwrap();
+        node.start().await.unwrap();
         assert!(node.is_running());
         assert!(!node.state().can_start());
 
-        node.stop().unwrap();
+        node.stop().await.unwrap();
         assert!(!node.is_running());
         assert_eq!(node.state(), NodeState::Stopped);
     }
 
-    #[test]
-    fn test_node_double_start() {
+    #[tokio::test]
+    async fn test_node_double_start() {
         let mut node = make_node();
-        node.start().unwrap();
+        node.start().await.unwrap();
 
-        let result = node.start();
+        let result = node.start().await;
         assert!(matches!(result, Err(NodeError::AlreadyStarted)));
+
+        // Clean up
+        node.stop().await.unwrap();
     }
 
-    #[test]
-    fn test_node_stop_not_started() {
+    #[tokio::test]
+    async fn test_node_stop_not_started() {
         let mut node = make_node();
 
-        let result = node.stop();
+        let result = node.stop().await;
         assert!(matches!(result, Err(NodeError::NotStarted)));
     }
 
