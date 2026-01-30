@@ -22,7 +22,7 @@ pub use identity::{
 };
 
 // Re-export config types
-pub use config::{Config, ConfigError, IdentityConfig, TunConfig};
+pub use config::{Config, ConfigError, IdentityConfig, TunConfig, UdpConfig};
 
 // Re-export tree types
 pub use tree::{ParentDeclaration, TreeCoordinate, TreeError, TreeState};
@@ -32,9 +32,11 @@ pub use bloom::{BloomError, BloomFilter, BloomState};
 
 // Re-export transport types
 pub use transport::{
-    DiscoveredPeer, Link, LinkDirection, LinkId, LinkState, LinkStats, Transport, TransportAddr,
-    TransportError, TransportId, TransportState, TransportType,
+    packet_channel, DiscoveredPeer, Link, LinkDirection, LinkId, LinkState, LinkStats, PacketRx,
+    PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError, TransportId,
+    TransportState, TransportType,
 };
+pub use transport::udp::UdpTransport;
 
 // Re-export protocol types
 pub use protocol::{

@@ -4,10 +4,75 @@
 //! underlying communication mechanisms (UDP, Ethernet, Tor, etc.) over
 //! which FIPS links are established.
 
+pub mod udp;
+
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+// ============================================================================
+// Packet Channel Types
+// ============================================================================
+
+/// A packet received from a transport.
+#[derive(Clone, Debug)]
+pub struct ReceivedPacket {
+    /// Which transport received this packet.
+    pub transport_id: TransportId,
+    /// Remote peer address.
+    pub remote_addr: TransportAddr,
+    /// Packet data.
+    pub data: Vec<u8>,
+    /// Receipt timestamp (Unix milliseconds).
+    pub timestamp_ms: u64,
+}
+
+impl ReceivedPacket {
+    /// Create a new received packet with current timestamp.
+    pub fn new(transport_id: TransportId, remote_addr: TransportAddr, data: Vec<u8>) -> Self {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Self {
+            transport_id,
+            remote_addr,
+            data,
+            timestamp_ms,
+        }
+    }
+
+    /// Create a received packet with explicit timestamp.
+    pub fn with_timestamp(
+        transport_id: TransportId,
+        remote_addr: TransportAddr,
+        data: Vec<u8>,
+        timestamp_ms: u64,
+    ) -> Self {
+        Self {
+            transport_id,
+            remote_addr,
+            data,
+            timestamp_ms,
+        }
+    }
+}
+
+/// Channel sender for received packets.
+pub type PacketTx = tokio::sync::mpsc::Sender<ReceivedPacket>;
+
+/// Channel receiver for received packets.
+pub type PacketRx = tokio::sync::mpsc::Receiver<ReceivedPacket>;
+
+/// Create a packet channel with the given buffer size.
+pub fn packet_channel(buffer: usize) -> (PacketTx, PacketRx) {
+    tokio::sync::mpsc::channel(buffer)
+}
+
+// ============================================================================
+// Transport Identifiers
+// ============================================================================
 
 /// Unique identifier for a transport instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +118,10 @@ impl fmt::Display for LinkId {
     }
 }
 
+// ============================================================================
+// Errors
+// ============================================================================
+
 /// Errors related to transport operations.
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -95,6 +164,10 @@ pub enum TransportError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+// ============================================================================
+// Transport Type Metadata
+// ============================================================================
 
 /// Static metadata about a transport type.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +235,10 @@ impl fmt::Display for TransportType {
     }
 }
 
+// ============================================================================
+// Transport State
+// ============================================================================
+
 /// Transport lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportState {
@@ -209,6 +286,10 @@ impl fmt::Display for TransportState {
         write!(f, "{}", s)
     }
 }
+
+// ============================================================================
+// Link State
+// ============================================================================
 
 /// Link lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +346,10 @@ impl fmt::Display for LinkDirection {
         write!(f, "{}", s)
     }
 }
+
+// ============================================================================
+// Transport Address
+// ============================================================================
 
 /// Opaque transport-specific address.
 ///
@@ -348,6 +433,10 @@ impl From<String> for TransportAddr {
     }
 }
 
+// ============================================================================
+// Link Statistics
+// ============================================================================
+
 /// Statistics for a link.
 #[derive(Clone, Debug, Default)]
 pub struct LinkStats {
@@ -424,6 +513,10 @@ impl LinkStats {
         *self = Self::default();
     }
 }
+
+// ============================================================================
+// Link
+// ============================================================================
 
 /// A link to a remote endpoint over a transport.
 #[derive(Clone, Debug)]
@@ -586,6 +679,10 @@ impl Link {
     }
 }
 
+// ============================================================================
+// Discovered Peer
+// ============================================================================
+
 /// A peer discovered via transport-layer discovery.
 #[derive(Clone, Debug)]
 pub struct DiscoveredPeer {
@@ -621,6 +718,10 @@ impl DiscoveredPeer {
     }
 }
 
+// ============================================================================
+// Transport Trait
+// ============================================================================
+
 /// Transport trait defining the interface for transport drivers.
 ///
 /// This is a simplified synchronous trait. Actual implementations would
@@ -650,6 +751,10 @@ pub trait Transport {
     /// Discover potential peers (if supported).
     fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError>;
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -884,5 +989,46 @@ mod tests {
     fn test_transport_state_display() {
         assert_eq!(format!("{}", TransportState::Up), "up");
         assert_eq!(format!("{}", TransportState::Failed), "failed");
+    }
+
+    #[test]
+    fn test_received_packet() {
+        let packet = ReceivedPacket::new(
+            TransportId::new(1),
+            TransportAddr::from_string("192.168.1.1:4000"),
+            vec![1, 2, 3, 4],
+        );
+
+        assert_eq!(packet.transport_id, TransportId::new(1));
+        assert_eq!(packet.data, vec![1, 2, 3, 4]);
+        assert!(packet.timestamp_ms > 0);
+    }
+
+    #[test]
+    fn test_received_packet_with_timestamp() {
+        let packet = ReceivedPacket::with_timestamp(
+            TransportId::new(1),
+            TransportAddr::from_string("test"),
+            vec![5, 6],
+            12345,
+        );
+
+        assert_eq!(packet.timestamp_ms, 12345);
+    }
+
+    #[tokio::test]
+    async fn test_packet_channel() {
+        let (tx, mut rx) = packet_channel(10);
+
+        let packet = ReceivedPacket::new(
+            TransportId::new(1),
+            TransportAddr::from_string("test"),
+            vec![1, 2, 3],
+        );
+
+        tx.send(packet.clone()).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.data, vec![1, 2, 3]);
     }
 }

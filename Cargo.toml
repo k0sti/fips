@@ -18,7 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tun = { version = "0.7", features = ["async"] }
 libc = "0.2"
 rtnetlink = "0.14"
-tokio = { version = "1", features = ["rt", "macros", "signal", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time"] }
 futures = "0.3"
 
 [dev-dependencies]

@@ -72,6 +72,12 @@ const DEFAULT_TUN_NAME: &str = "fips0";
 /// Default TUN MTU (IPv6 minimum).
 const DEFAULT_TUN_MTU: u16 = 1280;
 
+/// Default UDP bind address.
+const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:4000";
+
+/// Default UDP MTU (IPv6 minimum).
+const DEFAULT_UDP_MTU: u16 = 1280;
+
 /// TUN interface configuration (`tun.*`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TunConfig {
@@ -101,6 +107,34 @@ impl TunConfig {
     }
 }
 
+/// UDP transport configuration (`udp.*`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UdpConfig {
+    /// Enable UDP transport (`udp.enabled`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled: bool,
+
+    /// Bind address (`udp.bind_addr`). Defaults to "0.0.0.0:4000".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_addr: Option<String>,
+
+    /// UDP MTU (`udp.mtu`). Defaults to 1280 (IPv6 minimum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+}
+
+impl UdpConfig {
+    /// Get the bind address, using default if not configured.
+    pub fn bind_addr(&self) -> &str {
+        self.bind_addr.as_deref().unwrap_or(DEFAULT_UDP_BIND_ADDR)
+    }
+
+    /// Get the UDP MTU, using default if not configured.
+    pub fn mtu(&self) -> u16 {
+        self.mtu.unwrap_or(DEFAULT_UDP_MTU)
+    }
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -111,6 +145,10 @@ pub struct Config {
     /// TUN interface configuration (`tun.*`).
     #[serde(default)]
     pub tun: TunConfig,
+
+    /// UDP transport configuration (`udp.*`).
+    #[serde(default)]
+    pub udp: UdpConfig,
 }
 
 impl Config {
@@ -208,6 +246,16 @@ impl Config {
         }
         if other.tun.mtu.is_some() {
             self.tun.mtu = other.tun.mtu;
+        }
+        // Merge udp section
+        if other.udp.enabled {
+            self.udp.enabled = true;
+        }
+        if other.udp.bind_addr.is_some() {
+            self.udp.bind_addr = other.udp.bind_addr;
+        }
+        if other.udp.mtu.is_some() {
+            self.udp.mtu = other.udp.mtu;
         }
     }
 
