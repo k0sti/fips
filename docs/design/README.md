@@ -17,3 +17,4 @@ Protocol design specifications and analysis for the Federated Interoperable Peer
 | ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | [fips-architecture.md](fips-architecture.md)               | Software architecture: entities, state machines, transport abstractions, configuration  |
 | [fips-architecture-review.md](fips-architecture-review.md) | Architecture review issues and resolution status                                        |
+| [fips-tun-driver.md](fips-tun-driver.md)                   | TUN interface driver: reader/writer threads, ICMPv6, packet flow                        |
