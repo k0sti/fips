@@ -796,6 +796,13 @@ impl TransportHandle {
         }
     }
 
+    /// Get the instance name (if configured as a named instance).
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            TransportHandle::Udp(t) => t.name(),
+        }
+    }
+
     /// Get the transport type metadata.
     pub fn transport_type(&self) -> &TransportType {
         match self {
@@ -814,6 +821,13 @@ impl TransportHandle {
     pub fn mtu(&self) -> u16 {
         match self {
             TransportHandle::Udp(t) => t.mtu(),
+        }
+    }
+
+    /// Get the local bound address (only valid after start).
+    pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
+        match self {
+            TransportHandle::Udp(t) => t.local_addr(),
         }
     }
 

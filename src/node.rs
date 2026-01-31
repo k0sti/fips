@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Errors related to node operations.
 #[derive(Debug, Error)]
@@ -305,29 +305,8 @@ impl Node {
         // Create UDP transport instances
         for (name, udp_config) in udp_instances {
             let transport_id = self.allocate_transport_id();
-            let bind_addr = udp_config.bind_addr().to_string();
-            let udp = UdpTransport::new(
-                transport_id,
-                udp_config,
-                packet_tx.clone(),
-            );
+            let udp = UdpTransport::new(transport_id, name, udp_config, packet_tx.clone());
             transports.push(TransportHandle::Udp(udp));
-
-            // Log with name only if present (named instance)
-            if let Some(ref n) = name {
-                debug!(
-                    transport_id = %transport_id,
-                    name = %n,
-                    bind_addr = %bind_addr,
-                    "Created UDP transport"
-                );
-            } else {
-                debug!(
-                    transport_id = %transport_id,
-                    bind_addr = %bind_addr,
-                    "Created UDP transport"
-                );
-            }
         }
 
         // Future transports follow same pattern:
@@ -597,6 +576,38 @@ impl Node {
         }
         self.state = NodeState::Starting;
 
+        // Create packet channel for transport -> Node communication
+        const PACKET_BUFFER_SIZE: usize = 1024;
+        let (packet_tx, packet_rx) = packet_channel(PACKET_BUFFER_SIZE);
+        self.packet_tx = Some(packet_tx.clone());
+        self.packet_rx = Some(packet_rx);
+
+        // Initialize transports first (before TUN)
+        let transport_handles = self.create_transports(&packet_tx);
+
+        for mut handle in transport_handles {
+            let transport_id = handle.transport_id();
+            let transport_type = handle.transport_type().name;
+            let name = handle.name().map(|s| s.to_string());
+
+            match handle.start().await {
+                Ok(()) => {
+                    self.transports.insert(transport_id, handle);
+                }
+                Err(e) => {
+                    if let Some(ref n) = name {
+                        warn!(transport_type, name = %n, error = %e, "Transport failed to start");
+                    } else {
+                        warn!(transport_type, error = %e, "Transport failed to start");
+                    }
+                }
+            }
+        }
+
+        if !self.transports.is_empty() {
+            info!(count = self.transports.len(), "Transports initialized");
+        }
+
         // Initialize TUN interface if configured
         if self.config.tun.enabled {
             let address = *self.identity.address();
@@ -642,43 +653,6 @@ impl Node {
                     warn!(error = %e, "Failed to initialize TUN, continuing without it");
                 }
             }
-        }
-
-        // Create packet channel for transport -> Node communication
-        const PACKET_BUFFER_SIZE: usize = 1024;
-        let (packet_tx, packet_rx) = packet_channel(PACKET_BUFFER_SIZE);
-        self.packet_tx = Some(packet_tx.clone());
-        self.packet_rx = Some(packet_rx);
-
-        // Initialize transports
-        let transport_handles = self.create_transports(&packet_tx);
-
-        for mut handle in transport_handles {
-            let transport_id = handle.transport_id();
-            let transport_type = handle.transport_type().name;
-
-            match handle.start().await {
-                Ok(()) => {
-                    info!(
-                        transport_id = %transport_id,
-                        transport_type,
-                        "Transport started"
-                    );
-                    self.transports.insert(transport_id, handle);
-                }
-                Err(e) => {
-                    warn!(
-                        transport_id = %transport_id,
-                        transport_type,
-                        error = %e,
-                        "Transport failed to start, continuing without it"
-                    );
-                }
-            }
-        }
-
-        if !self.transports.is_empty() {
-            info!(count = self.transports.len(), "Transports initialized");
         }
 
         self.state = NodeState::Running;

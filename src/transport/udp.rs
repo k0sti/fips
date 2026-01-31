@@ -21,6 +21,8 @@ use tracing::{debug, info, warn};
 pub struct UdpTransport {
     /// Unique transport identifier.
     transport_id: TransportId,
+    /// Optional instance name (for named instances in config).
+    name: Option<String>,
     /// Configuration.
     config: UdpConfig,
     /// Current state.
@@ -37,9 +39,15 @@ pub struct UdpTransport {
 
 impl UdpTransport {
     /// Create a new UDP transport.
-    pub fn new(transport_id: TransportId, config: UdpConfig, packet_tx: PacketTx) -> Self {
+    pub fn new(
+        transport_id: TransportId,
+        name: Option<String>,
+        config: UdpConfig,
+        packet_tx: PacketTx,
+    ) -> Self {
         Self {
             transport_id,
+            name,
             config,
             state: TransportState::Configured,
             socket: None,
@@ -47,6 +55,11 @@ impl UdpTransport {
             recv_task: None,
             local_addr: None,
         }
+    }
+
+    /// Get the instance name (if configured as a named instance).
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Get the local bound address (only valid after start).
@@ -102,12 +115,18 @@ impl UdpTransport {
         self.recv_task = Some(recv_task);
         self.state = TransportState::Up;
 
-        info!(
-            transport_id = %self.transport_id,
-            local_addr = %self.local_addr.unwrap(),
-            mtu = self.config.mtu(),
-            "UDP transport started"
-        );
+        if let Some(ref name) = self.name {
+            info!(
+                name = %name,
+                local_addr = %self.local_addr.unwrap(),
+                "UDP transport started"
+            );
+        } else {
+            info!(
+                local_addr = %self.local_addr.unwrap(),
+                "UDP transport started"
+            );
+        }
 
         Ok(())
     }
@@ -296,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_stop() {
         let (tx, _rx) = packet_channel(100);
-        let mut transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let mut transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         assert_eq!(transport.state(), TransportState::Configured);
 
@@ -311,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn test_double_start_fails() {
         let (tx, _rx) = packet_channel(100);
-        let mut transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let mut transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         transport.start_async().await.unwrap();
 
@@ -324,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn test_stop_not_started_fails() {
         let (tx, _rx) = packet_channel(100);
-        let mut transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let mut transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         let result = transport.stop_async().await;
         assert!(matches!(result, Err(TransportError::NotStarted)));
@@ -335,8 +354,8 @@ mod tests {
         let (tx1, _rx1) = packet_channel(100);
         let (tx2, mut rx2) = packet_channel(100);
 
-        let mut t1 = UdpTransport::new(TransportId::new(1), make_config(0), tx1);
-        let mut t2 = UdpTransport::new(TransportId::new(2), make_config(0), tx2);
+        let mut t1 = UdpTransport::new(TransportId::new(1), None, make_config(0), tx1);
+        let mut t2 = UdpTransport::new(TransportId::new(2), None, make_config(0), tx2);
 
         t1.start_async().await.unwrap();
         t2.start_async().await.unwrap();
@@ -370,8 +389,8 @@ mod tests {
         let (tx1, mut rx1) = packet_channel(100);
         let (tx2, mut rx2) = packet_channel(100);
 
-        let mut t1 = UdpTransport::new(TransportId::new(1), make_config(0), tx1);
-        let mut t2 = UdpTransport::new(TransportId::new(2), make_config(0), tx2);
+        let mut t1 = UdpTransport::new(TransportId::new(1), None, make_config(0), tx1);
+        let mut t2 = UdpTransport::new(TransportId::new(2), None, make_config(0), tx2);
 
         t1.start_async().await.unwrap();
         t2.start_async().await.unwrap();
@@ -408,6 +427,7 @@ mod tests {
         let (tx, _rx) = packet_channel(100);
         let mut transport = UdpTransport::new(
             TransportId::new(1),
+            None,
             UdpConfig {
                 mtu: Some(100),
                 ..make_config(0)
@@ -430,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_not_started() {
         let (tx, _rx) = packet_channel(100);
-        let transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         let result = transport
             .send_async(&TransportAddr::from_string("127.0.0.1:9999"), b"test")
@@ -442,7 +462,7 @@ mod tests {
     #[tokio::test]
     async fn test_discover_returns_empty() {
         let (tx, _rx) = packet_channel(100);
-        let transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         // Discovery returns empty until multicast/DNS-SD is implemented
         let peers = transport.discover().unwrap();
@@ -452,7 +472,7 @@ mod tests {
     #[test]
     fn test_transport_type() {
         let (tx, _rx) = packet_channel(100);
-        let transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         assert_eq!(transport.transport_type().name, "udp");
         assert!(!transport.transport_type().connection_oriented);
@@ -462,7 +482,7 @@ mod tests {
     #[test]
     fn test_sync_methods_return_not_supported() {
         let (tx, _rx) = packet_channel(100);
-        let mut transport = UdpTransport::new(TransportId::new(1), make_config(0), tx);
+        let mut transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
 
         assert!(matches!(
             transport.start(),
