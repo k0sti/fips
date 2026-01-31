@@ -123,6 +123,13 @@ adversary claims to be a node it doesn't control.
 > without built-in encryption or key exchange (radio links, serial connections).
 > On transports that provide identity-binding encryption, this protocol may be
 > skipped if the transport key is bound to the peer's npub.
+>
+> **Terminology note**: *Peer authentication* (this section) is hop-by-hop—it
+> verifies that a direct peer is who they claim to be. This is distinct from
+> *crypto sessions* (see [fips-protocol-flow.md](fips-protocol-flow.md) §6),
+> which provide end-to-end authenticated encryption between source and
+> destination using Noise KK. Both layers are necessary: peer auth secures the
+> local link; crypto sessions secure the full path.
 
 ```text
 Initiator (A)                                  Responder (B)
@@ -591,8 +598,14 @@ A single node may have multiple transports of different types:
 | 0x03 | Lookup | Destination lookup request |
 | 0x04 | LookupResponse | Coordinates for requested key |
 | 0x05 | PathBroken | Route failure notification |
+| 0x06 | SessionSetup | Routing session + crypto handshake init |
+| 0x07 | SessionAck | Routing session ack + crypto response |
+| 0x08 | CoordsRequired | Router cache miss notification |
 | 0x10 | Traffic | Encrypted application data |
 | 0x11 | TrafficAck | Delivery acknowledgement |
+
+See [fips-routing.md](fips-routing.md) Part 4 for routing session details and
+[fips-protocol-flow.md](fips-protocol-flow.md) §5-6 for combined establishment.
 
 ### TreeAnnounce
 
@@ -673,7 +686,17 @@ LookupResponse {
 - QUIC: Built-in TLS
 - Radio: Pre-shared key or public-key encryption
 
-**End-to-end encryption**: Application layer uses NIP-44 or similar for payload encryption.
+**End-to-end encryption**: FIPS provides a crypto session layer using the Noise
+Protocol Framework with secp256k1. The Noise KK pattern provides mutual
+authentication and forward secrecy in a single round-trip, since both parties
+know each other's npub before initiating. Session keys are used with
+ChaCha20-Poly1305 AEAD for all data packets; no per-packet signatures are
+required (AEAD tag provides integrity and authenticity). See
+[fips-protocol-flow.md](fips-protocol-flow.md) §6 for crypto session details.
+
+> **Note**: Applications may use additional encryption (NIP-44) for
+> application-layer privacy, but FIPS-layer encryption protects against
+> intermediate router observation.
 
 ---
 
@@ -703,6 +726,16 @@ LookupResponse {
 ---
 
 ## References
+
+### FIPS Design Documents
+
+- [fips-protocol-flow.md](fips-protocol-flow.md) — Traffic flow, session terminology, crypto sessions
+- [fips-routing.md](fips-routing.md) — Bloom filters, discovery, routing sessions
+- [fips-architecture.md](fips-architecture.md) — Software architecture, configuration
+- [fips-transports.md](fips-transports.md) — Transport protocol characteristics
+- [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol dynamics
+
+### External References
 
 - [Yggdrasil Network](https://yggdrasil-network.github.io/)
 - [Yggdrasil v0.5 Release Notes](https://yggdrasil-network.github.io/2023/10/22/upcoming-v05-release.html)

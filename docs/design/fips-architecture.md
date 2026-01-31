@@ -791,7 +791,12 @@ the limit but need not enforce it strictly.
 The discovery cache stores coordinates learned from LookupResponses for destinations
 this node wants to reach. This is the primary cache for endpoint nodes.
 
-### Session Management
+### Routing Session Management
+
+> **Terminology note**: These parameters configure *routing sessions*—hop-by-hop
+> cached state at intermediate routers. For *crypto session* (end-to-end
+> encryption) parameters, see the Crypto Session section below. See
+> [fips-protocol-flow.md](fips-protocol-flow.md) §5 for the distinction.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -804,6 +809,22 @@ The session cache stores coordinates learned from SessionSetup packets passing t
 this node as a transit router. Larger than discovery cache since routers see traffic
 for many destinations. Both caches are part of Node.coord_cache; these parameters
 configure the same underlying cache but are grouped by purpose.
+
+### Crypto Session Management
+
+> **Note**: Crypto sessions provide end-to-end authenticated encryption using
+> Noise KK. See [fips-protocol-flow.md](fips-protocol-flow.md) §6 for details.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `crypto.session.max_entries` | u32 | 10000 | Max concurrent crypto sessions |
+| `crypto.session.idle_timeout` | duration | 3600s | Expire idle sessions |
+| `crypto.session.rekey_interval` | duration | 86400s | Rekey after this interval |
+| `crypto.session.rekey_bytes` | u64 | 0 | Rekey after N bytes (0 = disabled) |
+
+Crypto sessions are keyed by remote npub and survive transport changes. The
+handshake is carried within SessionSetup/SessionAck messages (combined
+establishment).
 
 ### Peer Defaults
 
@@ -888,6 +909,7 @@ configure the same underlying cache but are grouped by purpose.
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS protocol design
+- [fips-protocol-flow.md](fips-protocol-flow.md) — Traffic flow, session terminology, crypto sessions
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [fips-routing.md](fips-routing.md) — Routing, Bloom filters, discovery
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol dynamics

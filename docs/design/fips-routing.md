@@ -343,14 +343,20 @@ No global routing tables. Each node makes purely local decisions.
 
 ---
 
-## Part 4: Session Establishment
+## Part 4: Routing Session Establishment
 
-### Session Purpose
+> **Terminology note**: This section describes *routing sessions*—hop-by-hop
+> cached state at intermediate routers. FIPS also has *crypto sessions*—end-to-end
+> authenticated encryption between source and destination. See
+> [fips-protocol-flow.md](fips-protocol-flow.md) §5 for the distinction and §6
+> for crypto session details.
+
+### Routing Session Purpose
 
 Establish cached coordinate state along a path so that subsequent data packets
 can omit coordinates, minimizing per-packet overhead.
 
-### Session Lifecycle
+### Routing Session Lifecycle
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -362,16 +368,20 @@ can omit coordinates, minimizing per-packet overhead.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Session Message Formats
+### Routing Session Message Formats
 
 ```rust
-/// Establishes cached state along path
+/// Establishes cached state along path; optionally carries crypto handshake
 struct SessionSetup {
     src_addr: Ipv6Addr,
     dest_addr: Ipv6Addr,
     src_coords: Vec<NodeId>,   // For return path caching
     dest_coords: Vec<NodeId>,  // For forward path routing
     flags: SessionFlags,
+
+    // Crypto session establishment (see fips-protocol-flow.md §6)
+    // Opaque to routers; only processed by destination
+    handshake_payload: Option<Vec<u8>>,  // Noise KK message 1
 }
 
 struct SessionFlags {
@@ -379,11 +389,14 @@ struct SessionFlags {
     bidirectional: bool,       // Set up both directions
 }
 
-/// Confirms session establishment
+/// Confirms session establishment; optionally carries crypto response
 struct SessionAck {
     src_addr: Ipv6Addr,
     dest_addr: Ipv6Addr,
     src_coords: Vec<NodeId>,   // Acknowledger's coords (for return caching)
+
+    // Crypto session response (see fips-protocol-flow.md §6)
+    handshake_payload: Option<Vec<u8>>,  // Noise KK message 2
 }
 
 /// Minimal data packet
@@ -416,7 +429,7 @@ struct CoordsRequired {
 
 Comparable to IPv6 (40 bytes). No coordinates in data packets.
 
-### Session Setup Flow
+### Routing Session Setup Flow
 
 ```text
 S                       R1                      R2                      D
@@ -544,10 +557,14 @@ impl Sender {
 | FilterAnnounce | Bloom filter propagation | ~4.1 KB | Topology changes |
 | LookupRequest | Discover coordinates | ~300 bytes | First contact with distant node |
 | LookupResponse | Return coordinates | ~400 bytes | Reply to discovery |
-| SessionSetup | Warm router caches | ~400-600 bytes | Before data transfer |
-| SessionAck | Confirm session | ~300 bytes | Optional confirmation |
+| SessionSetup | Warm router caches + crypto init | ~400-700 bytes | Before data transfer |
+| SessionAck | Confirm session + crypto response | ~300-500 bytes | Session confirmation |
 | DataPacket | Application data | 36 bytes + payload | Bulk of traffic |
 | CoordsRequired | Request retransmit | ~50 bytes | Cache miss recovery |
+
+> **Note**: SessionSetup/SessionAck sizes vary based on coordinate depth and
+> whether they carry crypto handshake payloads (combined establishment per
+> [fips-protocol-flow.md](fips-protocol-flow.md) §5.5).
 
 ---
 
@@ -604,5 +621,6 @@ When nodes join/leave:
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS architecture
+- [fips-protocol-flow.md](fips-protocol-flow.md) — Traffic flow, crypto sessions, terminology
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol details

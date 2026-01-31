@@ -685,17 +685,34 @@ this should be updated to reflect AEAD-only authentication.
 This section tracks items that need reconciliation with existing design docs
 or earlier sections of this document.
 
-### 7.1 Pending Updates
+### 7.1 Completed Updates (Session 40)
 
 | Location | Status | Notes |
 |----------|--------|-------|
 | §3.1 | ✓ Done | Updated to AEAD authentication |
-| fips-routing.md §Part 4 | Pending | Clarify "Session" → "Routing Session" per §5.4 |
+| fips-routing.md Part 4 | ✓ Done | Renamed to "Routing Session Establishment", added terminology note |
+| fips-routing.md SessionSetup/Ack | ✓ Done | Added `handshake_payload` for crypto handshake |
+| fips-design.md §7 Encryption | ✓ Done | Updated to reference Noise KK instead of NIP-44 |
+| fips-design.md §6 Messages | ✓ Done | Added SessionSetup, SessionAck, CoordsRequired types |
+| fips-design.md §1 Peer Auth | ✓ Done | Added terminology note distinguishing peer auth from crypto sessions |
+| fips-architecture.md Config | ✓ Done | Renamed to "Routing Session", added "Crypto Session" section |
 
-### 7.2 Design Doc Alignment
+### 7.2 Cross-References Added
 
-The following decisions in this document affect existing design docs:
+All design docs now reference fips-protocol-flow.md in their References sections:
 
-1. **fips-routing.md**: "Session" → "Routing Session" terminology
-2. **Combined establishment** (§5.5): SessionSetup carries crypto handshake
-3. **Noise KK**: Replaces any unspecified handshake references
+- fips-design.md
+- fips-routing.md
+- fips-architecture.md
+
+### 7.3 Design Doc Alignment Summary
+
+The following decisions from this document have been propagated:
+
+1. **Session terminology** (§5.4): "Routing Session" vs "Crypto Session" distinction
+   now consistent across all docs
+2. **Combined establishment** (§5.5): SessionSetup/SessionAck carry optional
+   `handshake_payload` for Noise KK handshake
+3. **Noise KK** (§6): fips-design.md encryption section updated, new config
+   parameters added to fips-architecture.md
+4. **Peer auth vs crypto session**: fips-design.md §1 clarifies the distinction
