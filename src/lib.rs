@@ -49,7 +49,10 @@ pub use protocol::{
 pub use cache::{CacheEntry, CacheError, CacheStats, CachedCoords, CoordCache, RouteCache};
 
 // Re-export peer types
-pub use peer::{Peer, PeerError, PeerState, UpstreamPeer};
+pub use peer::{
+    cross_connection_winner, ActivePeer, ConnectivityState, HandshakeState, PeerConnection,
+    PeerError, PeerSlot, PromotionResult,
+};
 
 // Re-export node types
 pub use node::{Node, NodeError, NodeState};
