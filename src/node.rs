@@ -244,12 +244,6 @@ impl Node {
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
 
-        info!(
-            node_id = %node_id,
-            address = %identity.address(),
-            "Node initialized as root"
-        );
-
         Ok(Self {
             identity,
             config,
@@ -292,12 +286,6 @@ impl Node {
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
-
-        info!(
-            node_id = %node_id,
-            address = %identity.address(),
-            "Node initialized as root"
-        );
 
         Self {
             identity,
@@ -1032,12 +1020,10 @@ impl Node {
         }
 
         self.state = NodeState::Running;
-        info!(
-            state = %self.state,
-            transports = self.transports.len(),
-            connections = self.connections.len(),
-            "Node started"
-        );
+        info!("Node started:");
+        info!("       state: {}", self.state);
+        info!("  transports: {}", self.transports.len());
+        info!(" connections: {}", self.connections.len());
         Ok(())
     }
 

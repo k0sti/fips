@@ -37,11 +37,63 @@ pub const DATA_HEADER_SIZE: usize = 36;
 // Link Layer Message Types (peer-to-peer, hop-by-hop)
 // ============================================================================
 
+/// Handshake message type identifiers.
+///
+/// These messages are exchanged during Noise IK handshake before link
+/// encryption is established. They use the same TLV framing as link
+/// messages but payloads are not encrypted (except Noise-internal encryption).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HandshakeMessageType {
+    /// Noise IK message 1: initiator sends ephemeral + encrypted static.
+    /// Payload: 82 bytes (33 ephemeral + 33 static + 16 tag).
+    NoiseIKMsg1 = 0x01,
+
+    /// Noise IK message 2: responder sends ephemeral.
+    /// Payload: 33 bytes (ephemeral pubkey only).
+    NoiseIKMsg2 = 0x02,
+}
+
+impl HandshakeMessageType {
+    /// Try to convert from a byte.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x01 => Some(HandshakeMessageType::NoiseIKMsg1),
+            0x02 => Some(HandshakeMessageType::NoiseIKMsg2),
+            _ => None,
+        }
+    }
+
+    /// Convert to a byte.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Check if a byte represents a handshake message type.
+    pub fn is_handshake(b: u8) -> bool {
+        matches!(b, 0x01 | 0x02)
+    }
+}
+
+impl fmt::Display for HandshakeMessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            HandshakeMessageType::NoiseIKMsg1 => "NoiseIKMsg1",
+            HandshakeMessageType::NoiseIKMsg2 => "NoiseIKMsg2",
+        };
+        write!(f, "{}", name)
+    }
+}
+
+// ============================================================================
+// Link-Layer Message Types
+// ============================================================================
+
 /// Link-layer message type identifiers.
 ///
 /// These messages are exchanged between directly connected peers over
-/// Noise-encrypted links. Peer authentication happens via Noise IK
-/// handshake before any of these messages are sent.
+/// Noise-encrypted links. All payloads are encrypted with session keys
+/// established during the Noise IK handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LinkMessageType {
@@ -727,6 +779,37 @@ mod tests {
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
         TreeCoordinate::new(ids.iter().map(|&v| make_node_id(v)).collect()).unwrap()
+    }
+
+    // ===== HandshakeMessageType Tests =====
+
+    #[test]
+    fn test_handshake_message_type_roundtrip() {
+        let types = [
+            HandshakeMessageType::NoiseIKMsg1,
+            HandshakeMessageType::NoiseIKMsg2,
+        ];
+
+        for ty in types {
+            let byte = ty.to_byte();
+            let restored = HandshakeMessageType::from_byte(byte);
+            assert_eq!(restored, Some(ty));
+        }
+    }
+
+    #[test]
+    fn test_handshake_message_type_invalid() {
+        assert!(HandshakeMessageType::from_byte(0x00).is_none());
+        assert!(HandshakeMessageType::from_byte(0x03).is_none());
+        assert!(HandshakeMessageType::from_byte(0x10).is_none());
+    }
+
+    #[test]
+    fn test_handshake_message_type_is_handshake() {
+        assert!(HandshakeMessageType::is_handshake(0x01));
+        assert!(HandshakeMessageType::is_handshake(0x02));
+        assert!(!HandshakeMessageType::is_handshake(0x00));
+        assert!(!HandshakeMessageType::is_handshake(0x10));
     }
 
     // ===== LinkMessageType Tests =====

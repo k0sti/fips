@@ -81,21 +81,14 @@ async fn main() {
     };
 
     // Log node information
-    info!(
-        state = %node.state(),
-        leaf_only = node.is_leaf_only(),
-        "Node created"
-    );
-    info!("  npub: {}", node.npub());
-    info!("  node_id: {}", hex::encode(node.node_id().as_bytes()));
-    info!("  address: {}", node.identity().address());
+    info!("Node created:");
+    info!("      npub: {}", node.npub());
+    info!("   node_id: {}", hex::encode(node.node_id().as_bytes()));
+    info!("   address: {}", node.identity().address());
+    info!("     state: {}", node.state());
+    info!(" leaf_only: {}", node.is_leaf_only());
 
     // Start the node (initializes TUN, spawns I/O threads)
-    info!(
-        tun_state = %node.tun_state(),
-        "Starting node"
-    );
-
     if let Err(e) = node.start().await {
         error!("Failed to start node: {}", e);
         std::process::exit(1);

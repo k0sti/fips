@@ -204,14 +204,13 @@ impl TunWriter {
     /// Blocks forever, reading packets from the channel and writing them
     /// to the TUN device. Returns when the channel is closed (all senders dropped).
     pub fn run(mut self) {
-        info!(name = %self.name, "TUN writer starting");
+        debug!(name = %self.name, "TUN writer starting");
 
         for packet in self.rx {
             if let Err(e) = self.file.write_all(&packet) {
                 // "Bad address" is expected during shutdown when interface is deleted
                 let err_str = e.to_string();
                 if err_str.contains("Bad address") {
-                    info!(name = %self.name, "TUN interface deleted, writer stopping");
                     break;
                 }
                 error!(name = %self.name, error = %e, "TUN write error");
@@ -219,8 +218,6 @@ impl TunWriter {
                 debug!(name = %self.name, len = packet.len(), "TUN packet written");
             }
         }
-
-        info!(name = %self.name, "TUN writer stopped");
     }
 }
 
@@ -243,7 +240,7 @@ pub fn run_tun_reader(
     let name = device.name().to_string();
     let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
 
-    info!(name = %name, "TUN reader starting");
+    debug!(name = %name, "TUN reader starting");
 
     loop {
         match device.read_packet(&mut buf) {
@@ -265,7 +262,6 @@ pub fn run_tun_reader(
                             "Sending ICMPv6 Destination Unreachable"
                         );
                         if tun_tx.send(response).is_err() {
-                            info!(name = %name, "TUN writer channel closed, reader stopping");
                             break;
                         }
                     }
@@ -277,17 +273,13 @@ pub fn run_tun_reader(
             Err(e) => {
                 // "Bad address" (EFAULT) is expected during shutdown when interface is deleted
                 let err_str = format!("{}", e);
-                if err_str.contains("Bad address") {
-                    info!(name = %name, "TUN interface deleted, reader stopping");
-                } else {
+                if !err_str.contains("Bad address") {
                     error!(name = %name, error = %e, "TUN read error");
                 }
                 break;
             }
         }
     }
-
-    info!(name = %name, "TUN reader stopped");
 }
 
 /// Log basic information about an IPv6 packet at DEBUG level.
@@ -330,8 +322,10 @@ pub fn log_ipv6_packet(packet: &[u8]) {
 /// to return an error. Use this for graceful shutdown when the TUN device
 /// has been moved to another thread.
 pub async fn shutdown_tun_interface(name: &str) -> Result<(), TunError> {
-    info!(name, "shutdown_tun_interface called");
-    delete_interface(name).await
+    info!("Shutting down TUN interface {}", name);
+    delete_interface(name).await?;
+    info!("TUN interface {} stopped", name);
+    Ok(())
 }
 
 impl std::fmt::Debug for TunDevice {
@@ -356,16 +350,12 @@ async fn interface_exists(name: &str) -> bool {
 
 /// Delete a network interface by name.
 async fn delete_interface(name: &str) -> Result<(), TunError> {
-    info!(name, "delete_interface: starting");
     let (connection, handle, _) = new_connection()
         .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
     tokio::spawn(connection);
 
     let index = get_interface_index(&handle, name).await?;
-    info!(name, index, "delete_interface: got index, deleting");
     handle.link().del(index).execute().await?;
-
-    info!(name, "delete_interface: done");
     Ok(())
 }
 

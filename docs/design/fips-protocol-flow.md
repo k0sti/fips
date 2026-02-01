@@ -686,6 +686,15 @@ for the startup sequence.
 
 ### 7.1 Connection Flow Summary (Noise IK)
 
+All messages use TLV framing (see fips-design.md §6 Wire Format):
+
+```text
+┌────────┬────────┬────────────────────────────────────┐
+│ Type   │ Length │ Payload                            │
+│ 1 byte │ 2 bytes│ Variable                           │
+└────────┴────────┴────────────────────────────────────┘
+```
+
 **Outbound (to static peer):**
 
 ```text
@@ -695,10 +704,12 @@ Config: npub + transport hint (e.g., "udp:192.168.1.1:4000")
 Create link via transport
     │
     ▼
-Noise IK msg1 (82 bytes): ephemeral + encrypted static key
+Send: [0x01][0x00 0x52][82-byte Noise msg1]
+      Type=NoiseIKMsg1, Length=82
     │
     ▼
-Receive msg2 (33 bytes): peer's ephemeral key
+Recv: [0x02][0x00 0x21][33-byte Noise msg2]
+      Type=NoiseIKMsg2, Length=33
     │
     ▼
 Noise session established → link encrypted → begins tree gossip
@@ -707,13 +718,16 @@ Noise session established → link encrypted → begins tree gossip
 **Inbound (peer connects to us):**
 
 ```text
-Transport receives Noise msg1 from unknown address
+Transport receives packet from unknown address
+    │
+    ▼
+Parse TLV: Type=0x01 (NoiseIKMsg1)
     │
     ▼
 Process msg1 → learn peer's identity from encrypted static key
     │
     ▼
-Send msg2 (33 bytes): our ephemeral key
+Send: [0x02][0x00 0x21][33-byte Noise msg2]
     │
     ▼
 Noise session established → link encrypted → begins tree gossip

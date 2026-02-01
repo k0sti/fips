@@ -41,9 +41,9 @@ pub use transport::udp::UdpTransport;
 
 // Re-export protocol types
 pub use protocol::{
-    CoordsRequired, DataFlags, DataPacket, FilterAnnounce, LinkMessageType, LookupRequest,
-    LookupResponse, PathBroken, ProtocolError, SessionAck, SessionDatagram, SessionFlags,
-    SessionMessageType, SessionSetup, TreeAnnounce,
+    CoordsRequired, DataFlags, DataPacket, FilterAnnounce, HandshakeMessageType, LinkMessageType,
+    LookupRequest, LookupResponse, PathBroken, ProtocolError, SessionAck, SessionDatagram,
+    SessionFlags, SessionMessageType, SessionSetup, TreeAnnounce,
 };
 
 // Re-export cache types

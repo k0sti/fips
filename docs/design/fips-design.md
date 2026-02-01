@@ -581,10 +581,12 @@ A single node may have multiple transports of different types:
 
 ## 6. Protocol Messages
 
-FIPS uses two independent message type spaces corresponding to the two protocol
-layers. Messages are exchanged over Noise-encrypted links after peer authentication.
+FIPS uses a unified TLV (Type-Length-Value) wire format for all messages,
+including handshake and post-handshake communication.
 
 ### Wire Format
+
+All FIPS link messages use this framing:
 
 ```text
 ┌────────┬────────┬────────────────────────────────────┐
@@ -593,10 +595,29 @@ layers. Messages are exchanged over Noise-encrypted links after peer authenticat
 └────────┴────────┴────────────────────────────────────┘
 ```
 
-### Link Layer Messages (Peer-to-Peer)
+- **Type**: Message type identifier (determines encryption state)
+- **Length**: Big-endian payload length in bytes
+- **Payload**: Message-specific data
+
+### Handshake Messages (0x00-0x0F)
+
+Exchanged during Noise IK handshake before link encryption is established.
+Payloads are not encrypted (except Noise-internal encryption of static key).
+
+| Type | Name        | Payload | Description                              |
+|------|-------------|---------|------------------------------------------|
+| 0x01 | NoiseIKMsg1 | 82 bytes| Initiator: ephemeral + encrypted static  |
+| 0x02 | NoiseIKMsg2 | 33 bytes| Responder: ephemeral pubkey              |
+
+Receiver logic:
+
+- Type < 0x10 → handshake message, process as raw Noise
+- Type ≥ 0x10 → post-handshake, decrypt payload with session keys
+
+### Link Layer Messages (0x10-0x4F)
 
 Exchanged between directly connected peers over Noise-encrypted links.
-Peer authentication uses Noise IK handshake (see §1) before any messages.
+All payloads are encrypted with session keys from the Noise IK handshake.
 
 | Type | Name           | Description                                |
 |------|----------------|--------------------------------------------|

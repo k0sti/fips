@@ -149,7 +149,7 @@ impl UdpTransport {
 
         self.state = TransportState::Down;
 
-        info!(
+        debug!(
             transport_id = %self.transport_id,
             "UDP transport stopped"
         );
