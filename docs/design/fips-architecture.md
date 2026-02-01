@@ -928,7 +928,7 @@ this node wants to reach. This is the primary cache for endpoint nodes.
 > **Terminology note**: These parameters configure *routing sessions*—hop-by-hop
 > cached state at intermediate routers. For *crypto session* (end-to-end
 > encryption) parameters, see the Crypto Session section below. See
-> [fips-protocol-flow.md](fips-protocol-flow.md) §5 for the distinction.
+> [fips-session-protocol.md](fips-session-protocol.md) §5 for the distinction.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -945,7 +945,7 @@ configure the same underlying cache but are grouped by purpose.
 ### Crypto Session Management
 
 > **Note**: Crypto sessions provide end-to-end authenticated encryption using
-> Noise KK. See [fips-protocol-flow.md](fips-protocol-flow.md) §6 for details.
+> Noise KK. See [fips-session-protocol.md](fips-session-protocol.md) §6 for details.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1041,7 +1041,7 @@ establishment).
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS protocol design
-- [fips-protocol-flow.md](fips-protocol-flow.md) — Traffic flow, session terminology, crypto sessions
+- [fips-session-protocol.md](fips-session-protocol.md) — Traffic flow, session terminology, crypto sessions
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [fips-routing.md](fips-routing.md) — Routing, Bloom filters, discovery
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol dynamics

@@ -581,38 +581,49 @@ A single node may have multiple transports of different types:
 
 ## 6. Protocol Messages
 
-FIPS uses a unified TLV (Type-Length-Value) wire format for all messages,
-including handshake and post-handshake communication.
+FIPS uses a discriminator-based wire format with session indices for efficient
+dispatch. See [fips-wire-protocol.md](fips-wire-protocol.md) for complete
+wire format specification, security properties, and dispatch logic.
 
 ### Wire Format
 
-All FIPS link messages use this framing:
+All FIPS link-layer packets begin with a 1-byte discriminator:
 
 ```text
-┌────────┬────────┬────────────────────────────────────┐
-│ Type   │ Length │ Payload                            │
-│ 1 byte │ 2 bytes│ Variable                           │
-└────────┴────────┴────────────────────────────────────┘
+┌─────────────┬────────────────────────────────────────────────┐
+│ Discriminator│ Type-Specific Payload                          │
+│ 1 byte      │ Variable                                       │
+└─────────────┴────────────────────────────────────────────────┘
 ```
 
-- **Type**: Message type identifier (determines encryption state)
-- **Length**: Big-endian payload length in bytes
-- **Payload**: Message-specific data
+| Byte | Type            | Payload Format                                   |
+|------|-----------------|--------------------------------------------------|
+| 0x00 | Encrypted frame | `[receiver_idx:4][counter:8][ciphertext+tag]`    |
+| 0x01 | Noise IK msg1   | `[sender_idx:4][noise_msg1:82]`                  |
+| 0x02 | Noise IK msg2   | `[sender_idx:4][receiver_idx:4][noise_msg2:33]`  |
 
-### Handshake Messages (0x00-0x0F)
+**Session indices** enable O(1) dispatch without relying on source address,
+supporting transport-layer roaming. Each party allocates a random 32-bit index
+during handshake; packets include the receiver's index for fast session lookup.
+
+### Handshake Messages
 
 Exchanged during Noise IK handshake before link encryption is established.
-Payloads are not encrypted (except Noise-internal encryption of static key).
 
-| Type | Name        | Payload | Description                              |
-|------|-------------|---------|------------------------------------------|
-| 0x01 | NoiseIKMsg1 | 82 bytes| Initiator: ephemeral + encrypted static  |
-| 0x02 | NoiseIKMsg2 | 33 bytes| Responder: ephemeral pubkey              |
+| Type | Name        | Size     | Description                                     |
+|------|-------------|----------|-------------------------------------------------|
+| 0x01 | NoiseIKMsg1 | 87 bytes | Initiator: index + ephemeral + encrypted static |
+| 0x02 | NoiseIKMsg2 | 42 bytes | Responder: indices + ephemeral pubkey           |
 
-Receiver logic:
+### Encrypted Frames
 
-- Type < 0x10 → handshake message, process as raw Noise
-- Type ≥ 0x10 → post-handshake, decrypt payload with session keys
+Post-handshake packets use the 0x00 discriminator with AEAD encryption:
+
+- **receiver_idx**: Identifies session for O(1) lookup (no trial decryption)
+- **counter**: 64-bit monotonic nonce, also used for replay detection
+- **ciphertext**: ChaCha20-Poly1305 encrypted payload with 16-byte tag
+
+The plaintext begins with a message type byte (see Link Layer Messages below).
 
 ### Link Layer Messages (0x10-0x4F)
 
@@ -727,7 +738,7 @@ authentication and forward secrecy in a single round-trip, since both parties
 know each other's npub before initiating. Session keys are used with
 ChaCha20-Poly1305 AEAD for all data packets; no per-packet signatures are
 required (AEAD tag provides integrity and authenticity). See
-[fips-protocol-flow.md](fips-protocol-flow.md) §6 for crypto session details.
+[fips-session-protocol.md](fips-session-protocol.md) §6 for crypto session details.
 
 > **Note**: Applications may use additional encryption (NIP-44) for
 > application-layer privacy, but FIPS-layer encryption protects against
@@ -764,7 +775,7 @@ required (AEAD tag provides integrity and authenticity). See
 
 ### FIPS Design Documents
 
-- [fips-protocol-flow.md](fips-protocol-flow.md) — Traffic flow, session terminology, crypto sessions
+- [fips-session-protocol.md](fips-session-protocol.md) — Traffic flow, session terminology, crypto sessions
 - [fips-routing.md](fips-routing.md) — Bloom filters, discovery, routing sessions
 - [fips-architecture.md](fips-architecture.md) — Software architecture, configuration
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics

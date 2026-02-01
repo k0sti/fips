@@ -348,7 +348,7 @@ No global routing tables. Each node makes purely local decisions.
 > **Terminology note**: This section describes *routing sessions*—hop-by-hop
 > cached state at intermediate routers. FIPS also has *crypto sessions*—end-to-end
 > authenticated encryption between source and destination. See
-> [fips-protocol-flow.md](fips-protocol-flow.md) §5 for the distinction and §6
+> [fips-session-protocol.md](fips-session-protocol.md) §5 for the distinction and §6
 > for crypto session details.
 
 ### Routing Session Purpose
@@ -379,7 +379,7 @@ struct SessionSetup {
     dest_coords: Vec<NodeId>,  // For forward path routing
     flags: SessionFlags,
 
-    // Crypto session establishment (see fips-protocol-flow.md §6)
+    // Crypto session establishment (see fips-session-protocol.md §6)
     // Opaque to routers; only processed by destination
     handshake_payload: Option<Vec<u8>>,  // Noise KK message 1
 }
@@ -395,7 +395,7 @@ struct SessionAck {
     dest_addr: Ipv6Addr,
     src_coords: Vec<NodeId>,   // Acknowledger's coords (for return caching)
 
-    // Crypto session response (see fips-protocol-flow.md §6)
+    // Crypto session response (see fips-session-protocol.md §6)
     handshake_payload: Option<Vec<u8>>,  // Noise KK message 2
 }
 
@@ -564,7 +564,7 @@ impl Sender {
 
 > **Note**: SessionSetup/SessionAck sizes vary based on coordinate depth and
 > whether they carry crypto handshake payloads (combined establishment per
-> [fips-protocol-flow.md](fips-protocol-flow.md) §5.5).
+> [fips-session-protocol.md](fips-session-protocol.md) §5.5).
 
 ---
 
@@ -621,6 +621,6 @@ When nodes join/leave:
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS architecture
-- [fips-protocol-flow.md](fips-protocol-flow.md) — Traffic flow, crypto sessions, terminology
+- [fips-session-protocol.md](fips-session-protocol.md) — Traffic flow, crypto sessions, terminology
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol details
