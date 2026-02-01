@@ -3,7 +3,7 @@
 //! Loads configuration and creates the top-level node instance.
 
 use clap::Parser;
-use fips::{Config, Node, TunState};
+use fips::{Config, Node};
 use std::path::PathBuf;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::{fmt, EnvFilter};
@@ -99,29 +99,6 @@ async fn main() {
     if let Err(e) = node.start().await {
         error!("Failed to start node: {}", e);
         std::process::exit(1);
-    }
-
-    // Show TUN interface details if active
-    if node.tun_state() == TunState::Active {
-        if let Some(tun_name) = node.config().tun.name.as_deref() {
-            let output = std::process::Command::new("ip")
-                .args(["link", "show", tun_name])
-                .output();
-            match output {
-                Ok(out) => {
-                    if out.status.success() {
-                        info!(
-                            "ip link show {}:\n{}",
-                            tun_name,
-                            String::from_utf8_lossy(&out.stdout)
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to run ip link: {}", e);
-                }
-            }
-        }
     }
 
     info!("FIPS running, press Ctrl+C to exit");

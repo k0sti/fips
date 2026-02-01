@@ -317,16 +317,11 @@ pub fn log_ipv6_packet(packet: &[u8]) {
         _ => "other",
     };
 
-    debug!(
-        %src,
-        %dst,
-        protocol,
-        next_header,
-        payload_len,
-        hop_limit,
-        total_len = packet.len(),
-        "TUN packet received"
-    );
+    debug!("TUN packet received:");
+    debug!("      src: {}", src);
+    debug!("      dst: {}", dst);
+    debug!(" protocol: {} ({})", protocol, next_header);
+    debug!("  payload: {} bytes, hop_limit: {}", payload_len, hop_limit);
 }
 
 /// Shutdown and delete a TUN interface by name.

@@ -984,7 +984,11 @@ impl Node {
             info!(count = self.transports.len(), "Transports initialized");
         }
 
-        // Initialize TUN interface if configured
+        // Connect to static peers before TUN is active
+        // This allows handshake messages to be sent before we start accepting packets
+        self.initiate_peer_connections().await;
+
+        // Initialize TUN interface last, after transports and peers are ready
         if self.config.tun.enabled {
             let address = *self.identity.address();
             match TunDevice::create(&self.config.tun, address).await {
@@ -993,17 +997,13 @@ impl Node {
                     let name = device.name().to_string();
                     let our_addr = *device.address();
 
-                    info!(
-                        name = %name,
-                        mtu,
-                        address = %device.address(),
-                        "TUN device active"
-                    );
+                    info!("TUN device active:");
+                    info!("     name: {}", name);
+                    info!("  address: {}", device.address());
+                    info!("      mtu: {}", mtu);
 
                     // Create writer (dups the fd for independent write access)
                     let (writer, tun_tx) = device.create_writer()?;
-
-                    info!(mtu, name = %name, "Starting TUN reader and writer");
 
                     // Spawn writer thread
                     let writer_handle = thread::spawn(move || {
@@ -1030,9 +1030,6 @@ impl Node {
                 }
             }
         }
-
-        // Connect to static peers (step 5 per architecture doc)
-        self.initiate_peer_connections().await;
 
         self.state = NodeState::Running;
         info!(
