@@ -2,7 +2,7 @@
 
 A detailed study of the gossip-based spanning tree protocol, focusing on
 operational behavior under various mesh conditions. This document complements
-[fips-design.md](fips-design.md) with step-by-step walkthroughs of protocol
+[fips-intro.md](fips-intro.md) with step-by-step walkthroughs of protocol
 dynamics rather than message formats and data structures.
 
 For wire formats, see [fips-gossip-protocol.md](fips-gossip-protocol.md) §2 (TreeAnnounce).

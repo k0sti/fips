@@ -570,7 +570,7 @@ When nodes join/leave:
 
 ## References
 
-- [fips-design.md](fips-design.md) — Overall FIPS architecture
+- [fips-intro.md](fips-intro.md) — Overall FIPS architecture
 - [fips-gossip-protocol.md](fips-gossip-protocol.md) — Wire formats for TreeAnnounce, FilterAnnounce, Lookup
 - [fips-session-protocol.md](fips-session-protocol.md) — Traffic flow, crypto sessions, terminology
 - [fips-wire-protocol.md](fips-wire-protocol.md) — Link-layer transport and Noise IK handshake

@@ -1040,7 +1040,7 @@ establishment).
 
 ## References
 
-- [fips-design.md](fips-design.md) — Overall FIPS protocol design
+- [fips-intro.md](fips-intro.md) — Overall FIPS protocol design
 - [fips-session-protocol.md](fips-session-protocol.md) — Traffic flow, session terminology, crypto sessions
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [fips-routing.md](fips-routing.md) — Routing, Bloom filters, discovery

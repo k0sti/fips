@@ -7,11 +7,11 @@ Protocol design specifications and analysis for the Federated Interoperable Peer
 Start with the high-level architecture, then work through session flow, routing
 concepts, and finally the wire-level protocol details.
 
-### 1. Architecture and Overview
+### 1. Introduction and Overview
 
 | Document                                 | Description                                                 |
 |------------------------------------------|-------------------------------------------------------------|
-| [fips-design.md](fips-design.md)         | Core protocol: goals, identity, addressing, spanning tree   |
+| [fips-intro.md](fips-intro.md)           | Protocol introduction: goals, concepts, architecture        |
 
 ### 2. Protocol Flow (How Traffic Works)
 
@@ -45,22 +45,16 @@ concepts, and finally the wire-level protocol details.
 ## Document Cross-References
 
 ```text
-                    fips-design.md
-                         │
-                         ▼
-                fips-session-protocol.md
-                    │           │
-          ┌─────────┘           └─────────┐
-          ▼                               ▼
-    fips-routing.md              fips-wire-protocol.md
-          │                               │
-          ▼                               │
-spanning-tree-dynamics.md                 │
-          │                               │
-          └───────────┬───────────────────┘
-                      ▼
-            fips-gossip-protocol.md
-                      │
-                      ▼
-              fips-transports.md
+                      fips-intro.md
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+    fips-session-protocol.md    fips-architecture.md
+              │                         │
+    ┌─────────┴─────────┐               ▼
+    ▼                   ▼         fips-transports.md
+fips-routing.md   fips-wire-protocol.md
+    │       │
+    ▼       ▼
+spanning-tree-dynamics.md ←→ fips-gossip-protocol.md
 ```

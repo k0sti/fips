@@ -80,7 +80,7 @@ Total overhead: 29 bytes (1 + 4 + 8 + 16)
 - **tag**: 16-byte Poly1305 authentication tag.
 
 The plaintext inside the encrypted frame begins with a message type byte,
-followed by the message-specific payload (see fips-design.md §6 for message
+followed by the message-specific payload (see fips-intro.md for message
 types 0x10-0x4F).
 
 ### 2.2 Noise IK Message 1 (0x01)
@@ -790,7 +790,7 @@ protocol layers apply additional policy.
 
 ### Internal Documents
 
-- [fips-design.md](fips-design.md) - Overall protocol design
+- [fips-intro.md](fips-intro.md) - Overall protocol design
 - [fips-session-protocol.md](fips-session-protocol.md) - Session establishment flow
 - [fips-architecture.md](fips-architecture.md) - Software architecture
 
