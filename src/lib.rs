@@ -8,6 +8,7 @@ pub mod cache;
 pub mod config;
 pub mod icmp;
 pub mod identity;
+pub mod noise;
 pub mod node;
 pub mod peer;
 pub mod protocol;
@@ -62,3 +63,6 @@ pub use tun::{log_ipv6_packet, shutdown_tun_interface, TunDevice, TunError, TunS
 
 // Re-export ICMPv6 types
 pub use icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode, Icmpv6Type};
+
+// Re-export Noise types (HandshakeState not re-exported to avoid conflict with peer::HandshakeState)
+pub use noise::{CipherState, HandshakeRole, NoiseError, NoiseSession};

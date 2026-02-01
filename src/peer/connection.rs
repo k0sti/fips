@@ -1,28 +1,28 @@
 //! Peer Connection (Handshake Phase)
 //!
 //! Represents an in-progress connection before authentication completes.
-//! PeerConnection tracks the Noise handshake state and transitions to
+//! PeerConnection tracks the Noise IK handshake state and transitions to
 //! ActivePeer upon successful authentication.
 
+use crate::noise::{self, NoiseError, NoiseSession};
 use crate::transport::{LinkDirection, LinkId, LinkStats};
 use crate::PeerIdentity;
+use secp256k1::Keypair;
 use std::fmt;
 
 /// Handshake protocol state machine.
 ///
-/// For Noise KK pattern:
-/// - Initiator: SentHello → AwaitingAuth → Complete
-/// - Responder: AwaitingHello → SentAuth → Complete
+/// For Noise IK pattern:
+/// - Initiator: Initial → SentMsg1 → Complete
+/// - Responder: Initial → ReceivedMsg1 → Complete
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandshakeState {
-    /// Waiting for initial Hello from remote (responder role).
-    AwaitingHello,
-    /// Sent Hello, waiting for Auth response (initiator role).
-    SentHello,
-    /// Received Hello, sent Auth, waiting for AuthAck (responder role).
-    SentAuth,
-    /// Sent Auth, waiting for AuthAck (initiator role).
-    AwaitingAuthAck,
+    /// Initial state, ready to start handshake.
+    Initial,
+    /// Initiator: Sent message 1, awaiting message 2.
+    SentMsg1,
+    /// Responder: Received message 1, ready to send message 2.
+    ReceivedMsg1,
     /// Handshake completed successfully.
     Complete,
     /// Handshake failed.
@@ -34,10 +34,7 @@ impl HandshakeState {
     pub fn is_in_progress(&self) -> bool {
         matches!(
             self,
-            HandshakeState::AwaitingHello
-                | HandshakeState::SentHello
-                | HandshakeState::SentAuth
-                | HandshakeState::AwaitingAuthAck
+            HandshakeState::Initial | HandshakeState::SentMsg1 | HandshakeState::ReceivedMsg1
         )
     }
 
@@ -50,31 +47,14 @@ impl HandshakeState {
     pub fn is_failed(&self) -> bool {
         matches!(self, HandshakeState::Failed)
     }
-
-    /// Check if we are the initiator (sent first message).
-    pub fn is_initiator(&self) -> bool {
-        matches!(
-            self,
-            HandshakeState::SentHello | HandshakeState::AwaitingAuthAck
-        )
-    }
-
-    /// Check if we are the responder (received first message).
-    pub fn is_responder(&self) -> bool {
-        matches!(
-            self,
-            HandshakeState::AwaitingHello | HandshakeState::SentAuth
-        )
-    }
 }
 
 impl fmt::Display for HandshakeState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            HandshakeState::AwaitingHello => "awaiting_hello",
-            HandshakeState::SentHello => "sent_hello",
-            HandshakeState::SentAuth => "sent_auth",
-            HandshakeState::AwaitingAuthAck => "awaiting_auth_ack",
+            HandshakeState::Initial => "initial",
+            HandshakeState::SentMsg1 => "sent_msg1",
+            HandshakeState::ReceivedMsg1 => "received_msg1",
             HandshakeState::Complete => "complete",
             HandshakeState::Failed => "failed",
         };
@@ -85,8 +65,7 @@ impl fmt::Display for HandshakeState {
 /// A connection in the handshake phase, before authentication completes.
 ///
 /// For outbound connections, we know the expected peer identity from config.
-/// For inbound connections, we learn the identity during the handshake.
-#[derive(Clone, Debug)]
+/// For inbound connections, we learn the identity during the Noise handshake.
 pub struct PeerConnection {
     // === Link Reference ===
     /// The link carrying this connection.
@@ -100,12 +79,14 @@ pub struct PeerConnection {
     handshake_state: HandshakeState,
 
     /// Expected peer identity (known for outbound, learned for inbound).
-    /// None until we receive their public key in the handshake.
+    /// Updated after receiving their static key in the handshake.
     expected_identity: Option<PeerIdentity>,
 
-    // === Noise Session State ===
-    // TODO: Add actual Noise protocol state when implementing crypto
-    // noise_state: Option<NoiseSession>,
+    /// Noise handshake state (consumes on completion).
+    noise_handshake: Option<noise::HandshakeState>,
+
+    /// Completed Noise session (available after handshake complete).
+    noise_session: Option<NoiseSession>,
 
     // === Timing ===
     /// When the connection attempt started (Unix milliseconds).
@@ -126,6 +107,7 @@ impl PeerConnection {
     /// Create a new outbound connection (we are initiating).
     ///
     /// For outbound, we know who we're trying to reach from configuration.
+    /// The Noise handshake will be initialized when `start_handshake` is called.
     pub fn outbound(
         link_id: LinkId,
         expected_identity: PeerIdentity,
@@ -134,8 +116,10 @@ impl PeerConnection {
         Self {
             link_id,
             direction: LinkDirection::Outbound,
-            handshake_state: HandshakeState::SentHello,
+            handshake_state: HandshakeState::Initial,
             expected_identity: Some(expected_identity),
+            noise_handshake: None,
+            noise_session: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
             retry_count: 0,
@@ -145,13 +129,16 @@ impl PeerConnection {
 
     /// Create a new inbound connection (they are initiating).
     ///
-    /// For inbound, we don't know who they are until they identify in handshake.
+    /// For inbound, we don't know who they are until we decrypt their
+    /// identity from Noise message 1.
     pub fn inbound(link_id: LinkId, current_time_ms: u64) -> Self {
         Self {
             link_id,
             direction: LinkDirection::Inbound,
-            handshake_state: HandshakeState::AwaitingHello,
+            handshake_state: HandshakeState::Initial,
             expected_identity: None,
+            noise_handshake: None,
+            noise_session: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
             retry_count: 0,
@@ -241,41 +228,146 @@ impl PeerConnection {
         &mut self.link_stats
     }
 
-    // === State Transitions ===
+    // === Noise Handshake Operations ===
 
-    /// Record that we sent a Hello message (initiator).
-    pub fn mark_hello_sent(&mut self, current_time_ms: u64) {
-        self.handshake_state = HandshakeState::SentHello;
+    /// Start the handshake as initiator and generate message 1.
+    ///
+    /// For outbound connections only. Returns the handshake message to send.
+    pub fn start_handshake(
+        &mut self,
+        our_keypair: Keypair,
+        current_time_ms: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        if self.direction != LinkDirection::Outbound {
+            return Err(NoiseError::WrongState {
+                expected: "outbound connection".to_string(),
+                got: "inbound connection".to_string(),
+            });
+        }
+
+        if self.handshake_state != HandshakeState::Initial {
+            return Err(NoiseError::WrongState {
+                expected: "initial state".to_string(),
+                got: self.handshake_state.to_string(),
+            });
+        }
+
+        let remote_static = self
+            .expected_identity
+            .as_ref()
+            .expect("outbound must have expected identity")
+            .pubkey_full();
+
+        let mut hs = noise::HandshakeState::new_initiator(our_keypair, remote_static);
+        let msg1 = hs.write_message_1()?;
+
+        self.noise_handshake = Some(hs);
+        self.handshake_state = HandshakeState::SentMsg1;
         self.last_activity = current_time_ms;
+
+        Ok(msg1)
     }
 
-    /// Record that we received a Hello and learned peer identity.
-    pub fn mark_hello_received(&mut self, identity: PeerIdentity, current_time_ms: u64) {
-        self.expected_identity = Some(identity);
-        self.last_activity = current_time_ms;
-    }
+    /// Initialize responder and process incoming message 1.
+    ///
+    /// For inbound connections only. Returns the handshake message 2 to send.
+    pub fn receive_handshake_init(
+        &mut self,
+        our_keypair: Keypair,
+        message: &[u8],
+        current_time_ms: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        if self.direction != LinkDirection::Inbound {
+            return Err(NoiseError::WrongState {
+                expected: "inbound connection".to_string(),
+                got: "outbound connection".to_string(),
+            });
+        }
 
-    /// Record that we sent Auth response (responder).
-    pub fn mark_auth_sent(&mut self, current_time_ms: u64) {
-        self.handshake_state = HandshakeState::SentAuth;
-        self.last_activity = current_time_ms;
-    }
+        if self.handshake_state != HandshakeState::Initial {
+            return Err(NoiseError::WrongState {
+                expected: "initial state".to_string(),
+                got: self.handshake_state.to_string(),
+            });
+        }
 
-    /// Record that we're awaiting AuthAck (initiator).
-    pub fn mark_awaiting_auth_ack(&mut self, current_time_ms: u64) {
-        self.handshake_state = HandshakeState::AwaitingAuthAck;
-        self.last_activity = current_time_ms;
-    }
+        let mut hs = noise::HandshakeState::new_responder(our_keypair);
 
-    /// Mark handshake as complete.
-    pub fn mark_complete(&mut self, current_time_ms: u64) {
+        // Process message 1 (this reveals the initiator's identity)
+        hs.read_message_1(message)?;
+
+        // Extract the discovered identity
+        let remote_static = hs
+            .remote_static()
+            .expect("remote static available after msg1")
+            .clone();
+        self.expected_identity = Some(PeerIdentity::from_pubkey_full(remote_static));
+
+        // Generate message 2
+        let msg2 = hs.write_message_2()?;
+
+        // Handshake is complete for responder
+        let session = hs.into_session()?;
+        self.noise_session = Some(session);
         self.handshake_state = HandshakeState::Complete;
         self.last_activity = current_time_ms;
+
+        Ok(msg2)
     }
+
+    /// Complete the handshake by processing message 2.
+    ///
+    /// For outbound connections only (initiator completing handshake).
+    pub fn complete_handshake(
+        &mut self,
+        message: &[u8],
+        current_time_ms: u64,
+    ) -> Result<(), NoiseError> {
+        if self.handshake_state != HandshakeState::SentMsg1 {
+            return Err(NoiseError::WrongState {
+                expected: "sent_msg1 state".to_string(),
+                got: self.handshake_state.to_string(),
+            });
+        }
+
+        let mut hs = self
+            .noise_handshake
+            .take()
+            .expect("noise handshake must exist in SentMsg1 state");
+
+        hs.read_message_2(message)?;
+
+        let session = hs.into_session()?;
+        self.noise_session = Some(session);
+        self.handshake_state = HandshakeState::Complete;
+        self.last_activity = current_time_ms;
+
+        Ok(())
+    }
+
+    /// Take the completed Noise session.
+    ///
+    /// Returns the NoiseSession for use in ActivePeer. Can only be called
+    /// once after handshake completes.
+    pub fn take_session(&mut self) -> Option<NoiseSession> {
+        if self.handshake_state == HandshakeState::Complete {
+            self.noise_session.take()
+        } else {
+            None
+        }
+    }
+
+    /// Check if we have a completed session ready to take.
+    pub fn has_session(&self) -> bool {
+        self.handshake_state == HandshakeState::Complete && self.noise_session.is_some()
+    }
+
+    // === State Transitions (for manual control if needed) ===
 
     /// Mark handshake as failed.
     pub fn mark_failed(&mut self) {
         self.handshake_state = HandshakeState::Failed;
+        self.noise_handshake = None;
     }
 
     /// Increment retry counter.
@@ -301,6 +393,22 @@ impl PeerConnection {
     }
 }
 
+impl fmt::Debug for PeerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerConnection")
+            .field("link_id", &self.link_id)
+            .field("direction", &self.direction)
+            .field("handshake_state", &self.handshake_state)
+            .field("expected_identity", &self.expected_identity)
+            .field("has_noise_handshake", &self.noise_handshake.is_some())
+            .field("has_noise_session", &self.noise_session.is_some())
+            .field("started_at", &self.started_at)
+            .field("last_activity", &self.last_activity)
+            .field("retry_count", &self.retry_count)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,22 +419,21 @@ mod tests {
         PeerIdentity::from_pubkey(identity.pubkey())
     }
 
+    fn make_keypair() -> Keypair {
+        let identity = Identity::generate();
+        identity.keypair()
+    }
+
     #[test]
     fn test_handshake_state_properties() {
-        assert!(HandshakeState::AwaitingHello.is_in_progress());
-        assert!(HandshakeState::SentHello.is_in_progress());
-        assert!(HandshakeState::SentAuth.is_in_progress());
-        assert!(HandshakeState::AwaitingAuthAck.is_in_progress());
+        assert!(HandshakeState::Initial.is_in_progress());
+        assert!(HandshakeState::SentMsg1.is_in_progress());
+        assert!(HandshakeState::ReceivedMsg1.is_in_progress());
         assert!(!HandshakeState::Complete.is_in_progress());
         assert!(!HandshakeState::Failed.is_in_progress());
 
         assert!(HandshakeState::Complete.is_complete());
         assert!(HandshakeState::Failed.is_failed());
-
-        assert!(HandshakeState::SentHello.is_initiator());
-        assert!(HandshakeState::AwaitingAuthAck.is_initiator());
-        assert!(HandshakeState::AwaitingHello.is_responder());
-        assert!(HandshakeState::SentAuth.is_responder());
     }
 
     #[test]
@@ -336,7 +443,7 @@ mod tests {
 
         assert!(conn.is_outbound());
         assert!(!conn.is_inbound());
-        assert_eq!(conn.handshake_state(), HandshakeState::SentHello);
+        assert_eq!(conn.handshake_state(), HandshakeState::Initial);
         assert!(conn.expected_identity().is_some());
         assert_eq!(conn.started_at(), 1000);
         assert_eq!(conn.retry_count(), 0);
@@ -348,50 +455,59 @@ mod tests {
 
         assert!(conn.is_inbound());
         assert!(!conn.is_outbound());
-        assert_eq!(conn.handshake_state(), HandshakeState::AwaitingHello);
+        assert_eq!(conn.handshake_state(), HandshakeState::Initial);
         assert!(conn.expected_identity().is_none());
         assert_eq!(conn.started_at(), 2000);
     }
 
     #[test]
-    fn test_outbound_handshake_flow() {
-        let identity = make_peer_identity();
-        let mut conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
+    fn test_full_handshake_flow() {
+        // Create identities
+        let initiator_identity = Identity::generate();
+        let responder_identity = Identity::generate();
 
-        // Initial state: SentHello
-        assert_eq!(conn.handshake_state(), HandshakeState::SentHello);
-        assert!(conn.is_in_progress());
+        let initiator_keypair = initiator_identity.keypair();
+        let responder_keypair = responder_identity.keypair();
 
-        // Received response, awaiting auth ack
-        conn.mark_awaiting_auth_ack(1100);
-        assert_eq!(conn.handshake_state(), HandshakeState::AwaitingAuthAck);
-        assert!(conn.is_in_progress());
+        // Use from_pubkey_full to preserve parity for ECDH
+        let responder_peer_id = PeerIdentity::from_pubkey_full(responder_identity.pubkey_full());
 
-        // Complete
-        conn.mark_complete(1200);
-        assert!(conn.is_complete());
-        assert!(!conn.is_in_progress());
-    }
+        // Create connections
+        let mut initiator_conn =
+            PeerConnection::outbound(LinkId::new(1), responder_peer_id, 1000);
+        let mut responder_conn = PeerConnection::inbound(LinkId::new(2), 1000);
 
-    #[test]
-    fn test_inbound_handshake_flow() {
-        let mut conn = PeerConnection::inbound(LinkId::new(2), 2000);
+        // Initiator starts handshake
+        let msg1 = initiator_conn.start_handshake(initiator_keypair, 1100).unwrap();
+        assert_eq!(initiator_conn.handshake_state(), HandshakeState::SentMsg1);
 
-        // Initial state: AwaitingHello
-        assert_eq!(conn.handshake_state(), HandshakeState::AwaitingHello);
+        // Responder processes msg1 and sends msg2
+        let msg2 = responder_conn
+            .receive_handshake_init(responder_keypair, &msg1, 1200)
+            .unwrap();
+        assert_eq!(responder_conn.handshake_state(), HandshakeState::Complete);
 
-        // Received Hello, learned identity
-        let identity = make_peer_identity();
-        conn.mark_hello_received(identity, 2100);
-        assert!(conn.expected_identity().is_some());
+        // Responder learned initiator's identity
+        let discovered = responder_conn.expected_identity().unwrap();
+        assert_eq!(discovered.pubkey(), initiator_identity.pubkey());
 
-        // Sent Auth response
-        conn.mark_auth_sent(2200);
-        assert_eq!(conn.handshake_state(), HandshakeState::SentAuth);
+        // Initiator completes handshake
+        initiator_conn.complete_handshake(&msg2, 1300).unwrap();
+        assert_eq!(initiator_conn.handshake_state(), HandshakeState::Complete);
 
-        // Complete
-        conn.mark_complete(2300);
-        assert!(conn.is_complete());
+        // Both have sessions
+        assert!(initiator_conn.has_session());
+        assert!(responder_conn.has_session());
+
+        // Take and verify sessions work
+        let mut init_session = initiator_conn.take_session().unwrap();
+        let mut resp_session = responder_conn.take_session().unwrap();
+
+        // Encrypt/decrypt test
+        let plaintext = b"test message";
+        let ciphertext = init_session.encrypt(plaintext).unwrap();
+        let decrypted = resp_session.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
     }
 
     #[test]
@@ -430,5 +546,21 @@ mod tests {
         assert!(conn.is_failed());
         assert!(!conn.is_in_progress());
         assert!(!conn.is_complete());
+    }
+
+    #[test]
+    fn test_wrong_direction_errors() {
+        let identity = make_peer_identity();
+        let keypair = make_keypair();
+
+        // Outbound can't receive_handshake_init
+        let mut outbound = PeerConnection::outbound(LinkId::new(1), identity.clone(), 1000);
+        assert!(outbound
+            .receive_handshake_init(keypair.clone(), &[0u8; 82], 1100)
+            .is_err());
+
+        // Inbound can't start_handshake
+        let mut inbound = PeerConnection::inbound(LinkId::new(2), 1000);
+        assert!(inbound.start_handshake(keypair, 1100).is_err());
     }
 }

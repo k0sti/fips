@@ -376,9 +376,8 @@ impl Node {
     /// Initiate connections to configured static peers.
     ///
     /// For each peer configured with AutoConnect policy, creates a link and
-    /// peer entry. The peer starts in Connecting state; authentication
-    /// handshake will be handled by the event loop.
-    fn initiate_peer_connections(&mut self) {
+    /// peer entry, then starts the Noise handshake by sending the first message.
+    async fn initiate_peer_connections(&mut self) {
         // Collect peer configs to avoid borrow conflicts
         let peer_configs: Vec<_> = self.config.auto_connect_peers().cloned().collect();
 
@@ -390,7 +389,7 @@ impl Node {
         info!(count = peer_configs.len(), "Initiating static peer connections");
 
         for peer_config in peer_configs {
-            if let Err(e) = self.initiate_peer_connection(&peer_config) {
+            if let Err(e) = self.initiate_peer_connection(&peer_config).await {
                 warn!(
                     npub = %peer_config.npub,
                     alias = ?peer_config.alias,
@@ -402,7 +401,9 @@ impl Node {
     }
 
     /// Initiate a connection to a single peer.
-    fn initiate_peer_connection(&mut self, peer_config: &PeerConfig) -> Result<(), NodeError> {
+    ///
+    /// Creates a link, starts the Noise handshake, and sends the first message.
+    async fn initiate_peer_connection(&mut self, peer_config: &PeerConfig) -> Result<(), NodeError> {
         // Parse the peer's npub to get their identity
         let peer_identity = PeerIdentity::from_npub(&peer_config.npub).map_err(|e| {
             NodeError::InvalidPeerNpub {
@@ -469,14 +470,31 @@ impl Node {
 
             // Add reverse lookup for packet dispatch
             self.addr_to_link
-                .insert((transport_id, remote_addr), link_id);
+                .insert((transport_id, remote_addr.clone()), link_id);
 
             // Create connection in handshake phase (outbound knows expected identity)
             let current_time_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let connection = PeerConnection::outbound(link_id, peer_identity.clone(), current_time_ms);
+            let mut connection = PeerConnection::outbound(link_id, peer_identity.clone(), current_time_ms);
+
+            // Start the Noise handshake and get message 1
+            let our_keypair = self.identity.keypair();
+            let handshake_msg = match connection.start_handshake(our_keypair, current_time_ms) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!(
+                        npub = %peer_config.npub,
+                        error = %e,
+                        "Failed to start handshake"
+                    );
+                    // Clean up the link we just created
+                    self.links.remove(&link_id);
+                    self.addr_to_link.remove(&(transport_id, remote_addr));
+                    continue;
+                }
+            };
 
             let alias_display = peer_config
                 .alias
@@ -492,6 +510,31 @@ impl Node {
             info!("  link_id: {}", link_id);
 
             self.connections.insert(link_id, connection);
+
+            // Send the handshake message
+            if let Some(transport) = self.transports.get(&transport_id) {
+                match transport.send(&remote_addr, &handshake_msg).await {
+                    Ok(bytes) => {
+                        debug!(
+                            link_id = %link_id,
+                            bytes,
+                            "Sent Noise handshake message 1"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            link_id = %link_id,
+                            error = %e,
+                            "Failed to send handshake message"
+                        );
+                        // Mark connection as failed but don't remove it yet
+                        // The event loop can handle retry logic
+                        if let Some(conn) = self.connections.get_mut(&link_id) {
+                            conn.mark_failed();
+                        }
+                    }
+                }
+            }
 
             // Successfully initiated connection via this address
             return Ok(());
@@ -989,7 +1032,7 @@ impl Node {
         }
 
         // Connect to static peers (step 5 per architecture doc)
-        self.initiate_peer_connections();
+        self.initiate_peer_connections().await;
 
         self.state = NodeState::Running;
         info!(

@@ -6,7 +6,7 @@
 
 use bech32::{Bech32, Hrp};
 use rand::Rng;
-use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{Keypair, Parity, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::net::Ipv6Addr;
@@ -200,17 +200,39 @@ impl fmt::Display for FipsAddress {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PeerIdentity {
     pubkey: XOnlyPublicKey,
+    /// Full public key if known (includes parity for ECDH operations).
+    pubkey_full: Option<PublicKey>,
     node_id: NodeId,
     address: FipsAddress,
 }
 
 impl PeerIdentity {
     /// Create a PeerIdentity from an x-only public key.
+    ///
+    /// Note: When only the x-only key is available, the full public key
+    /// will be derived assuming even parity for ECDH operations.
     pub fn from_pubkey(pubkey: XOnlyPublicKey) -> Self {
         let node_id = NodeId::from_pubkey(&pubkey);
         let address = FipsAddress::from_node_id(&node_id);
         Self {
             pubkey,
+            pubkey_full: None,
+            node_id,
+            address,
+        }
+    }
+
+    /// Create a PeerIdentity from a full public key (includes parity).
+    ///
+    /// Use this when you have the complete public key (e.g., from a Noise
+    /// handshake) to preserve parity information for ECDH operations.
+    pub fn from_pubkey_full(pubkey: PublicKey) -> Self {
+        let (x_only, _parity) = pubkey.x_only_public_key();
+        let node_id = NodeId::from_pubkey(&x_only);
+        let address = FipsAddress::from_node_id(&node_id);
+        Self {
+            pubkey: x_only,
+            pubkey_full: Some(pubkey),
             node_id,
             address,
         }
@@ -225,6 +247,17 @@ impl PeerIdentity {
     /// Return the x-only public key.
     pub fn pubkey(&self) -> XOnlyPublicKey {
         self.pubkey
+    }
+
+    /// Return the full public key for ECDH operations.
+    ///
+    /// If the full key was provided during construction, it is returned.
+    /// Otherwise, the key is derived from the x-only key assuming even parity.
+    pub fn pubkey_full(&self) -> PublicKey {
+        self.pubkey_full.unwrap_or_else(|| {
+            // Derive full key assuming even parity
+            self.pubkey.public_key(Parity::Even)
+        })
     }
 
     /// Return the public key as a bech32-encoded npub string (NIP-19).
@@ -314,9 +347,21 @@ impl Identity {
         Ok(Self::from_secret_key(secret_key))
     }
 
+    /// Return the underlying keypair.
+    ///
+    /// This is needed for cryptographic operations like Noise handshakes.
+    pub fn keypair(&self) -> Keypair {
+        self.keypair
+    }
+
     /// Return the x-only public key.
     pub fn pubkey(&self) -> XOnlyPublicKey {
         self.keypair.x_only_public_key().0
+    }
+
+    /// Return the full public key (includes parity).
+    pub fn pubkey_full(&self) -> PublicKey {
+        self.keypair.public_key()
     }
 
     /// Return the public key as a bech32-encoded npub string (NIP-19).

@@ -146,7 +146,7 @@ pub fn cross_connection_winner(
 // ============================================================================
 
 /// A slot in the peer table, representing either connection or active phase.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum PeerSlot {
     /// Connection in handshake phase.
     Connecting(PeerConnection),
