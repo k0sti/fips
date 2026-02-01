@@ -2,8 +2,10 @@
 
 A detailed study of the gossip-based spanning tree protocol, focusing on
 operational behavior under various mesh conditions. This document complements
-[FIPS-DESIGN.md](FIPS-DESIGN.md) with step-by-step walkthroughs of protocol
+[fips-design.md](fips-design.md) with step-by-step walkthroughs of protocol
 dynamics rather than message formats and data structures.
+
+For wire formats, see [fips-gossip-protocol.md](fips-gossip-protocol.md) §2 (TreeAnnounce).
 
 The protocol is based on Yggdrasil v0.5's CRDT gossip design.
 

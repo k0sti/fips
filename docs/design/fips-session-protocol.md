@@ -456,116 +456,23 @@ Per-packet signatures would add:
 Since Noise already provides authentication through key binding, signatures
 are redundant. This matches WireGuard and Lightning's approach.
 
-**Reconciliation note**: §3.1 mentions packets being "signed by source" -
-this should be updated to reflect AEAD-only authentication.
-
 ---
 
 ## 7. Peer Connection Establishment
 
-Before any of the traffic flows described above can occur, nodes must establish
-authenticated peer connections using Noise IK. See [fips-design.md](fips-design.md)
-§1 for full protocol details and [fips-architecture.md](fips-architecture.md)
-for the startup sequence.
+Before any session-layer traffic can flow, nodes must establish authenticated
+link-layer connections with their peers using Noise IK. See
+[fips-wire-protocol.md](fips-wire-protocol.md) for the complete wire protocol
+specification including handshake flow, session lifecycle, index management,
+roaming support, and transport-specific considerations.
 
-### 7.1 Connection Flow Summary (Noise IK)
-
-All messages use TLV framing (see fips-design.md §6 Wire Format):
-
-```text
-┌────────┬────────┬────────────────────────────────────┐
-│ Type   │ Length │ Payload                            │
-│ 1 byte │ 2 bytes│ Variable                           │
-└────────┴────────┴────────────────────────────────────┘
-```
-
-**Outbound (to static peer):**
-
-```text
-Config: npub + transport hint (e.g., "udp:192.168.1.1:4000")
-    │
-    ▼
-Create link via transport
-    │
-    ▼
-Send: [0x01][0x00 0x52][82-byte Noise msg1]
-      Type=NoiseIKMsg1, Length=82
-    │
-    ▼
-Recv: [0x02][0x00 0x21][33-byte Noise msg2]
-      Type=NoiseIKMsg2, Length=33
-    │
-    ▼
-Noise session established → link encrypted → begins tree gossip
-```
-
-**Inbound (peer connects to us):**
-
-```text
-Transport receives packet from unknown address
-    │
-    ▼
-Parse TLV: Type=0x01 (NoiseIKMsg1)
-    │
-    ▼
-Process msg1 → learn peer's identity from encrypted static key
-    │
-    ▼
-Send: [0x02][0x00 0x21][33-byte Noise msg2]
-    │
-    ▼
-Noise session established → link encrypted → begins tree gossip
-```
-
-### 7.2 Post-Authentication
-
-After successful Noise handshake:
+After successful Noise IK handshake:
 
 1. **Link encrypted**: All subsequent messages use AEAD encryption
-2. **TreeAnnounce exchange**: Both peers send their current tree state
+2. **TreeAnnounce exchange**: Both peers send their current spanning tree state
 3. **FilterAnnounce exchange**: Both peers send their bloom filters
 4. **Peer is Active**: Can now participate in routing and forwarding
 
 The first TreeAnnounce from a new peer may trigger parent reselection if that
-peer offers a better path to root.
-
----
-
-## 8. Document Reconciliation
-
-This section tracks items that need reconciliation with existing design docs
-or earlier sections of this document.
-
-### 8.1 Completed Updates (Session 47)
-
-| Location                         | Status | Notes                                              |
-|----------------------------------|--------|----------------------------------------------------|
-| fips-design.md §1 Peer Auth      | ✓ Done | Replaced custom handshake with Noise IK            |
-| fips-design.md §6 Messages       | ✓ Done | Split into LinkMessageType + SessionMessageType    |
-| protocol.rs                      | ✓ Done | Removed Hello/Challenge/Auth/AuthAck types         |
-| protocol.rs                      | ✓ Done | Added SessionDatagram for link-layer encapsulation |
-| This document §6                 | ✓ Done | Updated to two-layer Noise IK architecture         |
-| This document §7                 | ✓ Done | Updated connection flow for Noise IK               |
-
-### 8.2 Previous Updates (Session 40)
-
-| Location                         | Status | Notes                                               |
-|----------------------------------|--------|-----------------------------------------------------|
-| §3.1                             | ✓ Done | Updated to AEAD authentication                      |
-| fips-routing.md Part 4           | ✓ Done | Renamed to "Routing Session Establishment"          |
-| fips-routing.md SessionSetup/Ack | ✓ Done | Added `handshake_payload` for crypto handshake      |
-| fips-design.md §7 Encryption     | ✓ Done | Updated to reference Noise instead of NIP-44        |
-| fips-architecture.md Config      | ✓ Done | Renamed to "Routing Session", added "Crypto Session"|
-
-### 8.3 Design Doc Alignment Summary
-
-The following decisions from this document have been propagated:
-
-1. **Two-layer architecture**: Link layer (Noise IK peer auth) and session layer
-   (Noise KK end-to-end) operate independently with separate keys
-2. **Session terminology** (§5.4): "Routing Session" vs "Crypto Session" distinction
-   now consistent across all docs
-3. **Combined establishment** (§5.5): SessionSetup/SessionAck carry optional
-   `handshake_payload` for session-layer Noise KK handshake
-4. **Message type split**: LinkMessageType for hop-by-hop, SessionMessageType for
-   end-to-end (carried inside SessionDatagram)
+peer offers a better path to root. See [fips-gossip-protocol.md](fips-gossip-protocol.md)
+for TreeAnnounce and FilterAnnounce wire formats.

@@ -1,10 +1,11 @@
 # FIPS Routing Design
 
-**Status**: Work in Progress
-
 This document describes the routing architecture for FIPS, including Bloom
-filter reachability, discovery protocol, greedy tree routing, and session
-establishment.
+filter reachability, discovery protocol, greedy tree routing, and routing
+session establishment.
+
+For wire formats and exchange rules, see [fips-gossip-protocol.md](fips-gossip-protocol.md).
+For spanning tree dynamics and convergence, see [spanning-tree-dynamics.md](spanning-tree-dynamics.md).
 
 ## Overview
 
@@ -107,45 +108,19 @@ Filters are updated on events rather than periodic refresh:
 3. Received filter changes outgoing filter — recompute, send updates
 4. Local state change — new leaf dependent, become gateway, etc.
 
-**Rate limiting:**
+Updates are rate-limited to prevent storms during reconvergence. See
+[fips-gossip-protocol.md](fips-gossip-protocol.md) §3 for FilterAnnounce wire
+format and exchange rules.
 
-To prevent update storms, rate-limit or debounce updates:
+### Filter Contents
 
-```rust
-const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+A node's outgoing filter to peer Q contains:
 
-fn maybe_send_update(&mut self, peer: PeerId) {
-    if self.last_send_time[peer].elapsed() < MIN_UPDATE_INTERVAL {
-        self.pending_update[peer] = true;
-        return;
-    }
-    // ... send update
-}
-```
+1. This node's own Node ID
+2. Node IDs of leaf-only dependents
+3. Entries from filters received from other peers (not Q) with TTL > 0
 
-### Filter Announcement Message
-
-```rust
-struct FilterAnnounce {
-    filter: BloomFilter,  // 4 KB
-    ttl: u8,              // Remaining propagation hops
-    sequence: u64,        // Freshness / deduplication
-}
-```
-
-### Propagation Rules
-
-When node N sends a FilterAnnounce to peer Q:
-
-1. Include N's own Node ID
-2. Include N's leaf-only dependents
-3. Include entries from filters received from other peers (not Q) with TTL > 0
-
-When node N receives FilterAnnounce from peer P:
-
-1. Store: `peer_filters[P] = received.filter`
-2. If `received.ttl > 0`: include P's filter contents in N's next announcement
-   to other peers, with TTL decremented
+This creates K-hop reachability scope through TTL-based propagation.
 
 ### K-Hop Scope Emergence
 
@@ -179,25 +154,7 @@ Bloom filters.
 - Route cache miss
 - After cached route failure
 
-### Message Formats
-
-```rust
-struct LookupRequest {
-    request_id: u64,
-    target: NodeId,              // Who we're looking for
-    origin: NodeId,              // Who's asking
-    origin_coords: Vec<NodeId>,  // Origin's ancestry (for return path)
-    ttl: u8,                     // Propagation limit
-    visited: BloomFilter,        // Prevent loops (compact, ~256 bytes)
-}
-
-struct LookupResponse {
-    request_id: u64,
-    target: NodeId,
-    target_coords: Vec<NodeId>,  // Target's ancestry — the key payload
-    proof: Signature,            // Target signs to prove existence
-}
-```
+For wire formats, see [fips-gossip-protocol.md](fips-gossip-protocol.md) §4-5.
 
 ### Discovery Flow
 
@@ -234,17 +191,10 @@ Each router forwards toward the origin using tree distance.
 
 ### Security
 
-**Target signs response:**
-
-```rust
-struct LookupResponse {
-    // ...
-    proof: Signature,  // Sign(request_id || target || target_coords)
-}
-```
-
-Without this, a malicious node could claim reachability for any target and
-blackhole traffic. The signature proves the target authorized the route.
+The target signs the LookupResponse with a proof covering
+`(request_id || target || target_coords)`. Without this signature, a malicious
+node could claim reachability for any target and blackhole traffic. The
+signature proves the target authorized the route.
 
 ### Caching
 
@@ -621,6 +571,8 @@ When nodes join/leave:
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS architecture
+- [fips-gossip-protocol.md](fips-gossip-protocol.md) — Wire formats for TreeAnnounce, FilterAnnounce, Lookup
 - [fips-session-protocol.md](fips-session-protocol.md) — Traffic flow, crypto sessions, terminology
+- [fips-wire-protocol.md](fips-wire-protocol.md) — Link-layer transport and Noise IK handshake
 - [fips-transports.md](fips-transports.md) — Transport protocol characteristics
-- [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol details
+- [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol dynamics and convergence
