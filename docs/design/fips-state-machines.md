@@ -228,8 +228,7 @@ loop {
 ```text
 PeerSlot::Connecting(PeerConnection)
     │
-    │ AuthInit/AuthResponse exchange
-    │ Noise KK handshake
+    │ Noise IK handshake (2 messages)
     ▼
 PeerSlot::Active(ActivePeer)
     │
@@ -240,13 +239,13 @@ PeerSlot::Active(ActivePeer)
 
 **PeerConnection** contains:
 
-- Noise handshake state (ephemeral keys, handshake hash)
-- Retry tracking (attempts, last_sent)
+- Noise IK handshake state (ephemeral keys, handshake hash)
+- Expected identity (for outbound) or discovered identity (for inbound)
 - Direction (Inbound vs Outbound)
 
 **ActivePeer** contains:
 
-- Session keys (for encrypt/decrypt)
+- NoiseSession (symmetric keys for encrypt/decrypt)
 - Tree position (declaration, coordinates)
 - Bloom filter (what's reachable through this peer)
 - Statistics (last_seen, link_stats)
@@ -342,9 +341,10 @@ struct Node {
 
 For inbound connections from unknown addresses:
 
-1. Parse packet → extract sender's identity (in AuthInit)
-2. Create new PeerConnection
-3. Add to `peers` and `addr_to_peer`
+1. Receive Noise IK msg1 → decrypt to extract sender's static key (identity)
+2. Create new PeerConnection with discovered identity
+3. Add to `connections` (by LinkId) and `addr_to_link`
+4. After handshake completes, promote to ActivePeer (indexed by NodeId)
 
 ## Summary
 

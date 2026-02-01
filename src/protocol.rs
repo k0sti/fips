@@ -1,15 +1,29 @@
 //! FIPS Protocol Messages
 //!
-//! Wire format message types for FIPS protocol communication, including
-//! authentication handshake, spanning tree announcements, Bloom filter
-//! propagation, discovery protocol, and data packets.
+//! Wire format definitions for FIPS protocol communication across two layers:
+//!
+//! ## Link Layer (peer-to-peer, hop-by-hop)
+//!
+//! Messages exchanged between directly connected peers over Noise-encrypted
+//! links. Includes spanning tree gossip, bloom filter propagation, discovery
+//! protocol, and forwarding of session-layer datagrams.
+//!
+//! Link-layer peer authentication uses Noise IK (see `noise.rs`), which
+//! establishes the encrypted channel before any of these messages are sent.
+//!
+//! ## Session Layer (end-to-end, between FIPS addresses)
+//!
+//! Messages exchanged between source and destination FIPS nodes, encrypted
+//! with session keys that intermediate nodes cannot read. Includes session
+//! establishment, IPv6 datagram encapsulation, and routing errors.
+//!
+//! Session-layer datagrams are carried as opaque payloads through the link
+//! layer, encrypted end-to-end independently of per-hop link encryption.
 
 use crate::bloom::BloomFilter;
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use crate::{FipsAddress, NodeId};
-use rand::Rng;
 use secp256k1::schnorr::Signature;
-use secp256k1::XOnlyPublicKey;
 use std::fmt;
 use thiserror::Error;
 
@@ -19,55 +33,47 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// Data packet header size in bytes (excluding payload).
 pub const DATA_HEADER_SIZE: usize = 36;
 
-/// Message type identifiers.
+// ============================================================================
+// Link Layer Message Types (peer-to-peer, hop-by-hop)
+// ============================================================================
+
+/// Link-layer message type identifiers.
+///
+/// These messages are exchanged between directly connected peers over
+/// Noise-encrypted links. Peer authentication happens via Noise IK
+/// handshake before any of these messages are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum MessageType {
-    // Authentication (0x00-0x0F)
-    Hello = 0x00,
-    Challenge = 0x01,
-    Auth = 0x02,
-    AuthAck = 0x03,
-
+pub enum LinkMessageType {
     // Tree protocol (0x10-0x1F)
+    /// Spanning tree state announcement.
     TreeAnnounce = 0x10,
 
     // Bloom filter (0x20-0x2F)
+    /// Bloom filter reachability update.
     FilterAnnounce = 0x20,
 
     // Discovery (0x30-0x3F)
+    /// Request to discover a node's coordinates.
     LookupRequest = 0x30,
+    /// Response with target's coordinates.
     LookupResponse = 0x31,
 
-    // Session (0x40-0x4F)
-    SessionSetup = 0x40,
-    SessionAck = 0x41,
-
-    // Data (0x50-0x5F)
-    DataPacket = 0x50,
-
-    // Errors (0x60-0x6F)
-    CoordsRequired = 0x60,
-    PathBroken = 0x61,
+    // Forwarding (0x40-0x4F)
+    /// Encapsulated session-layer datagram for forwarding.
+    /// Payload is opaque to intermediate nodes (end-to-end encrypted).
+    SessionDatagram = 0x40,
 }
 
-impl MessageType {
+impl LinkMessageType {
     /// Try to convert from a byte.
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0x00 => Some(MessageType::Hello),
-            0x01 => Some(MessageType::Challenge),
-            0x02 => Some(MessageType::Auth),
-            0x03 => Some(MessageType::AuthAck),
-            0x10 => Some(MessageType::TreeAnnounce),
-            0x20 => Some(MessageType::FilterAnnounce),
-            0x30 => Some(MessageType::LookupRequest),
-            0x31 => Some(MessageType::LookupResponse),
-            0x40 => Some(MessageType::SessionSetup),
-            0x41 => Some(MessageType::SessionAck),
-            0x50 => Some(MessageType::DataPacket),
-            0x60 => Some(MessageType::CoordsRequired),
-            0x61 => Some(MessageType::PathBroken),
+            0x10 => Some(LinkMessageType::TreeAnnounce),
+            0x20 => Some(LinkMessageType::FilterAnnounce),
+            0x30 => Some(LinkMessageType::LookupRequest),
+            0x31 => Some(LinkMessageType::LookupResponse),
+            0x40 => Some(LinkMessageType::SessionDatagram),
             _ => None,
         }
     }
@@ -78,26 +84,83 @@ impl MessageType {
     }
 }
 
-impl fmt::Display for MessageType {
+impl fmt::Display for LinkMessageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            MessageType::Hello => "Hello",
-            MessageType::Challenge => "Challenge",
-            MessageType::Auth => "Auth",
-            MessageType::AuthAck => "AuthAck",
-            MessageType::TreeAnnounce => "TreeAnnounce",
-            MessageType::FilterAnnounce => "FilterAnnounce",
-            MessageType::LookupRequest => "LookupRequest",
-            MessageType::LookupResponse => "LookupResponse",
-            MessageType::SessionSetup => "SessionSetup",
-            MessageType::SessionAck => "SessionAck",
-            MessageType::DataPacket => "DataPacket",
-            MessageType::CoordsRequired => "CoordsRequired",
-            MessageType::PathBroken => "PathBroken",
+            LinkMessageType::TreeAnnounce => "TreeAnnounce",
+            LinkMessageType::FilterAnnounce => "FilterAnnounce",
+            LinkMessageType::LookupRequest => "LookupRequest",
+            LinkMessageType::LookupResponse => "LookupResponse",
+            LinkMessageType::SessionDatagram => "SessionDatagram",
         };
         write!(f, "{}", name)
     }
 }
+
+// ============================================================================
+// Session Layer Message Types (end-to-end, between FIPS addresses)
+// ============================================================================
+
+/// Session-layer message type identifiers.
+///
+/// These messages are exchanged end-to-end between FIPS nodes, encrypted
+/// with session keys that intermediate nodes cannot read. They are carried
+/// as payloads inside `LinkMessageType::SessionDatagram`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionMessageType {
+    // Session establishment (0x00-0x0F)
+    /// Session setup with coordinates (warms router caches).
+    SessionSetup = 0x00,
+    /// Session acknowledgement.
+    SessionAck = 0x01,
+
+    // Data (0x10-0x1F)
+    /// Encrypted IPv6 datagram payload.
+    DataPacket = 0x10,
+
+    // Errors (0x20-0x2F)
+    /// Router cache miss - needs coordinates.
+    CoordsRequired = 0x20,
+    /// Routing failure (local minimum or unreachable).
+    PathBroken = 0x21,
+}
+
+impl SessionMessageType {
+    /// Try to convert from a byte.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(SessionMessageType::SessionSetup),
+            0x01 => Some(SessionMessageType::SessionAck),
+            0x10 => Some(SessionMessageType::DataPacket),
+            0x20 => Some(SessionMessageType::CoordsRequired),
+            0x21 => Some(SessionMessageType::PathBroken),
+            _ => None,
+        }
+    }
+
+    /// Convert to a byte.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+impl fmt::Display for SessionMessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            SessionMessageType::SessionSetup => "SessionSetup",
+            SessionMessageType::SessionAck => "SessionAck",
+            SessionMessageType::DataPacket => "DataPacket",
+            SessionMessageType::CoordsRequired => "CoordsRequired",
+            SessionMessageType::PathBroken => "PathBroken",
+        };
+        write!(f, "{}", name)
+    }
+}
+
+// Legacy type alias for compatibility during transition
+#[deprecated(note = "Use LinkMessageType or SessionMessageType instead")]
+pub type MessageType = LinkMessageType;
 
 /// Errors related to protocol message handling.
 #[derive(Debug, Error)]
@@ -127,102 +190,9 @@ pub enum ProtocolError {
     TtlExpired,
 }
 
-// ============ Authentication Messages ============
-
-/// Initial hello message from initiator.
-///
-/// The first message in the 4-step authentication handshake.
-#[derive(Clone, Debug)]
-pub struct Hello {
-    /// Initiator's public key.
-    pub pubkey: XOnlyPublicKey,
-}
-
-impl Hello {
-    /// Create a new Hello message.
-    pub fn new(pubkey: XOnlyPublicKey) -> Self {
-        Self { pubkey }
-    }
-}
-
-/// Challenge from responder, also contains responder's identity.
-///
-/// The second message in the authentication handshake.
-#[derive(Clone, Debug)]
-pub struct Challenge {
-    /// Responder's public key.
-    pub pubkey: XOnlyPublicKey,
-    /// Random challenge for initiator to sign.
-    pub challenge: [u8; 32],
-}
-
-impl Challenge {
-    /// Create a new Challenge with a specific challenge value.
-    pub fn new(pubkey: XOnlyPublicKey, challenge: [u8; 32]) -> Self {
-        Self { pubkey, challenge }
-    }
-
-    /// Generate a Challenge with a random challenge value.
-    pub fn generate(pubkey: XOnlyPublicKey) -> Self {
-        let mut challenge = [0u8; 32];
-        rand::thread_rng().fill(&mut challenge);
-        Self { pubkey, challenge }
-    }
-}
-
-/// Authentication response from initiator.
-///
-/// The third message in the authentication handshake. Contains the
-/// initiator's challenge and their response to the responder's challenge.
-#[derive(Clone, Debug)]
-pub struct Auth {
-    /// Challenge for responder to sign.
-    pub challenge: [u8; 32],
-    /// Initiator's response to responder's challenge.
-    pub response: Signature,
-    /// Timestamp included in signed response (Unix seconds).
-    pub timestamp: u64,
-}
-
-impl Auth {
-    /// Create a new Auth message.
-    pub fn new(challenge: [u8; 32], response: Signature, timestamp: u64) -> Self {
-        Self {
-            challenge,
-            response,
-            timestamp,
-        }
-    }
-
-    /// Generate a new Auth with a random challenge.
-    pub fn generate(response: Signature, timestamp: u64) -> Self {
-        let mut challenge = [0u8; 32];
-        rand::thread_rng().fill(&mut challenge);
-        Self {
-            challenge,
-            response,
-            timestamp,
-        }
-    }
-}
-
-/// Final acknowledgement from responder.
-///
-/// The fourth and final message in the authentication handshake.
-#[derive(Clone, Debug)]
-pub struct AuthAck {
-    /// Responder's response to initiator's challenge.
-    pub response: Signature,
-    /// Timestamp included in signed response (Unix seconds).
-    pub timestamp: u64,
-}
-
-impl AuthAck {
-    /// Create a new AuthAck message.
-    pub fn new(response: Signature, timestamp: u64) -> Self {
-        Self { response, timestamp }
-    }
-}
+// ============================================================================
+// Link Layer Messages
+// ============================================================================
 
 // ============ Tree Protocol Messages ============
 
@@ -413,7 +383,58 @@ impl LookupResponse {
     }
 }
 
-// ============ Session Messages ============
+// ============ Session Datagram (Link-Layer Encapsulation) ============
+
+/// Encapsulated session-layer datagram for forwarding.
+///
+/// This is a link-layer message that carries an opaque, end-to-end encrypted
+/// session-layer payload. Intermediate nodes route based on the destination
+/// address but cannot decrypt the payload.
+#[derive(Clone, Debug)]
+pub struct SessionDatagram {
+    /// Destination FIPS address (for routing decisions).
+    pub dest_addr: FipsAddress,
+    /// Hop limit (decremented at each hop).
+    pub hop_limit: u8,
+    /// Encrypted session-layer payload (opaque to intermediate nodes).
+    pub payload: Vec<u8>,
+}
+
+impl SessionDatagram {
+    /// Create a new session datagram.
+    pub fn new(dest_addr: FipsAddress, payload: Vec<u8>) -> Self {
+        Self {
+            dest_addr,
+            hop_limit: 64,
+            payload,
+        }
+    }
+
+    /// Set the hop limit.
+    pub fn with_hop_limit(mut self, hop_limit: u8) -> Self {
+        self.hop_limit = hop_limit;
+        self
+    }
+
+    /// Decrement hop limit, returning false if exhausted.
+    pub fn decrement_hop_limit(&mut self) -> bool {
+        if self.hop_limit > 0 {
+            self.hop_limit -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if the datagram can be forwarded.
+    pub fn can_forward(&self) -> bool {
+        self.hop_limit > 0
+    }
+}
+
+// ============================================================================
+// Session Layer Messages (end-to-end, between FIPS addresses)
+// ============================================================================
 
 /// Session flags for setup options.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -708,37 +729,54 @@ mod tests {
         TreeCoordinate::new(ids.iter().map(|&v| make_node_id(v)).collect()).unwrap()
     }
 
-    // ===== MessageType Tests =====
+    // ===== LinkMessageType Tests =====
 
     #[test]
-    fn test_message_type_roundtrip() {
+    fn test_link_message_type_roundtrip() {
         let types = [
-            MessageType::Hello,
-            MessageType::Challenge,
-            MessageType::Auth,
-            MessageType::AuthAck,
-            MessageType::TreeAnnounce,
-            MessageType::FilterAnnounce,
-            MessageType::LookupRequest,
-            MessageType::LookupResponse,
-            MessageType::SessionSetup,
-            MessageType::SessionAck,
-            MessageType::DataPacket,
-            MessageType::CoordsRequired,
-            MessageType::PathBroken,
+            LinkMessageType::TreeAnnounce,
+            LinkMessageType::FilterAnnounce,
+            LinkMessageType::LookupRequest,
+            LinkMessageType::LookupResponse,
+            LinkMessageType::SessionDatagram,
         ];
 
         for ty in types {
             let byte = ty.to_byte();
-            let restored = MessageType::from_byte(byte);
+            let restored = LinkMessageType::from_byte(byte);
             assert_eq!(restored, Some(ty));
         }
     }
 
     #[test]
-    fn test_message_type_invalid() {
-        assert!(MessageType::from_byte(0xFF).is_none());
-        assert!(MessageType::from_byte(0x99).is_none());
+    fn test_link_message_type_invalid() {
+        assert!(LinkMessageType::from_byte(0xFF).is_none());
+        assert!(LinkMessageType::from_byte(0x00).is_none());
+    }
+
+    // ===== SessionMessageType Tests =====
+
+    #[test]
+    fn test_session_message_type_roundtrip() {
+        let types = [
+            SessionMessageType::SessionSetup,
+            SessionMessageType::SessionAck,
+            SessionMessageType::DataPacket,
+            SessionMessageType::CoordsRequired,
+            SessionMessageType::PathBroken,
+        ];
+
+        for ty in types {
+            let byte = ty.to_byte();
+            let restored = SessionMessageType::from_byte(byte);
+            assert_eq!(restored, Some(ty));
+        }
+    }
+
+    #[test]
+    fn test_session_message_type_invalid() {
+        assert!(SessionMessageType::from_byte(0xFF).is_none());
+        assert!(SessionMessageType::from_byte(0x99).is_none());
     }
 
     // ===== SessionFlags Tests =====
@@ -862,21 +900,6 @@ mod tests {
         assert_eq!(&bytes[8..40], target.as_bytes());
     }
 
-    // ===== Challenge Tests =====
-
-    #[test]
-    fn test_challenge_generate() {
-        let secp = secp256k1::Secp256k1::new();
-        let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
-        let pubkey = keypair.x_only_public_key().0;
-
-        let challenge1 = Challenge::generate(pubkey);
-        let challenge2 = Challenge::generate(pubkey);
-
-        // Challenges should be different (random)
-        assert_ne!(challenge1.challenge, challenge2.challenge);
-    }
-
     // ===== FilterAnnounce Tests =====
 
     #[test]
@@ -931,22 +954,6 @@ mod tests {
             .with_last_coords(make_coords(&[2, 0]));
 
         assert!(err.last_known_coords.is_some());
-    }
-
-    // ===== Auth Tests =====
-
-    #[test]
-    fn test_auth_generate() {
-        let secp = secp256k1::Secp256k1::new();
-        let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
-        let digest = [0u8; 32];
-        let sig = secp.sign_schnorr(&digest, &keypair);
-
-        let auth1 = Auth::generate(sig, 1000);
-        let auth2 = Auth::generate(sig, 1000);
-
-        // Random challenges should differ
-        assert_ne!(auth1.challenge, auth2.challenge);
     }
 
     // ===== TreeAnnounce Tests =====

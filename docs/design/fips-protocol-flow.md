@@ -516,62 +516,59 @@ the crypto portion.
 
 ---
 
-## 6. Crypto Session Handshake
+## 6. Session-Layer Encryption
 
-The crypto session uses the Noise Protocol Framework with secp256k1, aligning
-with Nostr's cryptographic primitives.
+FIPS uses two independent Noise Protocol handshakes at different layers:
 
-### 6.1 Design Decision: Noise with secp256k1
+| Layer   | Scope       | Pattern  | Purpose                                   |
+|---------|-------------|----------|-------------------------------------------|
+| Link    | Hop-by-hop  | Noise IK | Authenticate peers, encrypt link          |
+| Session | End-to-end  | Noise IK | Authenticate endpoints, encrypt payload   |
 
-**Decision**: Use Noise Protocol Framework adapted for secp256k1.
+Both use `Noise_IK_secp256k1_ChaChaPoly_SHA256` with the same cryptographic
+primitives, but with separate keys and sessions.
 
-Rationale:
+### 6.1 Why Two Layers?
 
-- Well-analyzed framework with formal security proofs
-- Used successfully in WireGuard, Lightning (BOLT 8), Signal
-- Lightning Network already adapted Noise for secp256k1 (precedent)
-- Reuses Nostr's existing key infrastructure (npub/nsec)
-- Provides forward secrecy via ephemeral keys
+**Link encryption** protects against passive observers on each hop but allows
+intermediate nodes to see routing information (destination address).
 
-### 6.2 Pattern Selection
+**Session encryption** protects the actual payload end-to-end. Intermediate
+nodes forward opaque ciphertext without being able to read the contents.
 
-Since both parties know each other's static public key (npub) before the
-handshake begins (from DNS lookup / identity cache), the **Noise KK** pattern
-is appropriate:
+### 6.2 Session Noise Handshake
+
+The session-layer Noise IK handshake is carried inside `SessionSetup`/`SessionAck`
+messages, which themselves travel through the link-encrypted channel:
 
 ```text
-Noise_KK_secp256k1_ChaChaPoly_SHA256
-
-KK:
-  -> e, es, ss
-  <- e, ee, se
+Initiator knows destination npub (from DNS lookup)
+    │
+    ▼
+SessionSetup { coords, handshake_payload: Noise IK msg1 }
+    │
+    ▼  (travels through link-encrypted hops)
+    │
+Responder processes msg1, learns initiator identity
+    │
+    ▼
+SessionAck { coords, handshake_payload: Noise IK msg2 }
+    │
+    ▼
+Session keys established (independent of link keys)
 ```
 
-**Message 1 (Initiator → Responder):**
+### 6.3 Cryptographic Primitives
 
-- `e`: Initiator's ephemeral public key
-- `es`: DH(initiator_ephemeral, responder_static)
-- `ss`: DH(initiator_static, responder_static)
+Both link and session layers use the same stack:
 
-**Message 2 (Responder → Initiator):**
-
-- `e`: Responder's ephemeral public key
-- `ee`: DH(initiator_ephemeral, responder_ephemeral)
-- `se`: DH(responder_ephemeral, initiator_static)
-
-After both messages, both parties derive identical symmetric keys for
-encryption in each direction.
-
-### 6.3 Why KK (not IK or XX)
-
-| Pattern | Knowledge | Messages | FIPS Fit |
-|---------|-----------|----------|----------|
-| **KK** | Both know both static keys | 1 RT | Best - we have npubs |
-| IK | Initiator knows responder | 1 RT | Works but asymmetric |
-| XX | Neither knows | 2 RT | Unnecessary overhead |
-
-KK provides mutual authentication in a single round-trip since FIPS always
-knows the peer's npub before initiating (from DNS/identity cache).
+| Component      | Choice              | Notes                      |
+|----------------|---------------------|----------------------------|
+| Curve          | secp256k1           | Nostr-native               |
+| DH             | ECDH on secp256k1   | Standard EC Diffie-Hellman |
+| Cipher         | ChaCha20-Poly1305   | AEAD, same as NIP-44       |
+| Hash           | SHA-256             | Nostr-native               |
+| Key derivation | HKDF-SHA256         | Standard Noise KDF         |
 
 ### 6.4 Cryptographic Primitives
 
@@ -683,11 +680,11 @@ this should be updated to reflect AEAD-only authentication.
 ## 7. Peer Connection Establishment
 
 Before any of the traffic flows described above can occur, nodes must establish
-authenticated peer connections. This section provides a brief overview; see
-[fips-design.md](fips-design.md) §1 for the full peer authentication protocol
-and [fips-architecture.md](fips-architecture.md) for the startup sequence.
+authenticated peer connections using Noise IK. See [fips-design.md](fips-design.md)
+§1 for full protocol details and [fips-architecture.md](fips-architecture.md)
+for the startup sequence.
 
-### 7.1 Connection Flow Summary
+### 7.1 Connection Flow Summary (Noise IK)
 
 **Outbound (to static peer):**
 
@@ -698,43 +695,38 @@ Config: npub + transport hint (e.g., "udp:192.168.1.1:4000")
 Create link via transport
     │
     ▼
-Send AuthInit { our_npub, nonce }
+Noise IK msg1 (82 bytes): ephemeral + encrypted static key
     │
     ▼
-Receive AuthChallenge { peer_npub, peer_nonce, signature }
+Receive msg2 (33 bytes): peer's ephemeral key
     │
     ▼
-Verify signature, send AuthComplete { signature }
-    │
-    ▼
-Peer authenticated → begins tree gossip
+Noise session established → link encrypted → begins tree gossip
 ```
 
 **Inbound (peer connects to us):**
 
 ```text
-Transport receives data from unknown address
+Transport receives Noise msg1 from unknown address
     │
     ▼
-Receive AuthInit { peer_npub, nonce }
+Process msg1 → learn peer's identity from encrypted static key
     │
     ▼
-Send AuthChallenge { our_npub, our_nonce, signature }
+Send msg2 (33 bytes): our ephemeral key
     │
     ▼
-Receive AuthComplete { signature }
-    │
-    ▼
-Verify signature → peer authenticated → begins tree gossip
+Noise session established → link encrypted → begins tree gossip
 ```
 
 ### 7.2 Post-Authentication
 
-After successful peer authentication:
+After successful Noise handshake:
 
-1. **TreeAnnounce exchange**: Both peers send their current tree state
-2. **FilterAnnounce exchange**: Both peers send their bloom filters
-3. **Peer is Active**: Can now participate in routing and forwarding
+1. **Link encrypted**: All subsequent messages use AEAD encryption
+2. **TreeAnnounce exchange**: Both peers send their current tree state
+3. **FilterAnnounce exchange**: Both peers send their bloom filters
+4. **Peer is Active**: Can now participate in routing and forwarding
 
 The first TreeAnnounce from a new peer may trigger parent reselection if that
 peer offers a better path to root.
@@ -746,34 +738,36 @@ peer offers a better path to root.
 This section tracks items that need reconciliation with existing design docs
 or earlier sections of this document.
 
-### 8.1 Completed Updates (Session 40)
+### 8.1 Completed Updates (Session 47)
 
-| Location | Status | Notes |
-|----------|--------|-------|
-| §3.1 | ✓ Done | Updated to AEAD authentication |
-| fips-routing.md Part 4 | ✓ Done | Renamed to "Routing Session Establishment", added terminology note |
-| fips-routing.md SessionSetup/Ack | ✓ Done | Added `handshake_payload` for crypto handshake |
-| fips-design.md §7 Encryption | ✓ Done | Updated to reference Noise KK instead of NIP-44 |
-| fips-design.md §6 Messages | ✓ Done | Added SessionSetup, SessionAck, CoordsRequired types |
-| fips-design.md §1 Peer Auth | ✓ Done | Added terminology note distinguishing peer auth from crypto sessions |
-| fips-architecture.md Config | ✓ Done | Renamed to "Routing Session", added "Crypto Session" section |
+| Location                         | Status | Notes                                              |
+|----------------------------------|--------|----------------------------------------------------|
+| fips-design.md §1 Peer Auth      | ✓ Done | Replaced custom handshake with Noise IK            |
+| fips-design.md §6 Messages       | ✓ Done | Split into LinkMessageType + SessionMessageType    |
+| protocol.rs                      | ✓ Done | Removed Hello/Challenge/Auth/AuthAck types         |
+| protocol.rs                      | ✓ Done | Added SessionDatagram for link-layer encapsulation |
+| This document §6                 | ✓ Done | Updated to two-layer Noise IK architecture         |
+| This document §7                 | ✓ Done | Updated connection flow for Noise IK               |
 
-### 8.2 Cross-References Added
+### 8.2 Previous Updates (Session 40)
 
-All design docs now reference fips-protocol-flow.md in their References sections:
-
-- fips-design.md
-- fips-routing.md
-- fips-architecture.md
+| Location                         | Status | Notes                                               |
+|----------------------------------|--------|-----------------------------------------------------|
+| §3.1                             | ✓ Done | Updated to AEAD authentication                      |
+| fips-routing.md Part 4           | ✓ Done | Renamed to "Routing Session Establishment"          |
+| fips-routing.md SessionSetup/Ack | ✓ Done | Added `handshake_payload` for crypto handshake      |
+| fips-design.md §7 Encryption     | ✓ Done | Updated to reference Noise instead of NIP-44        |
+| fips-architecture.md Config      | ✓ Done | Renamed to "Routing Session", added "Crypto Session"|
 
 ### 8.3 Design Doc Alignment Summary
 
 The following decisions from this document have been propagated:
 
-1. **Session terminology** (§5.4): "Routing Session" vs "Crypto Session" distinction
+1. **Two-layer architecture**: Link layer (Noise IK peer auth) and session layer
+   (Noise IK end-to-end) operate independently with separate keys
+2. **Session terminology** (§5.4): "Routing Session" vs "Crypto Session" distinction
    now consistent across all docs
-2. **Combined establishment** (§5.5): SessionSetup/SessionAck carry optional
-   `handshake_payload` for Noise KK handshake
-3. **Noise KK** (§6): fips-design.md encryption section updated, new config
-   parameters added to fips-architecture.md
-4. **Peer auth vs crypto session**: fips-design.md §1 clarifies the distinction
+3. **Combined establishment** (§5.5): SessionSetup/SessionAck carry optional
+   `handshake_payload` for session-layer Noise IK handshake
+4. **Message type split**: LinkMessageType for hop-by-hop, SessionMessageType for
+   end-to-end (carried inside SessionDatagram)

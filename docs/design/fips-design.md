@@ -111,153 +111,107 @@ signature = schnorr_sign(nsec, SHA256(message))
 **Challenge-response authentication** is used during connection establishment
 to prove a node controls the private key corresponding to its claimed npub.
 
-### Peer Authentication Protocol
+### Peer Authentication Protocol (Noise IK)
 
-When two nodes establish a connection, they perform mutual authentication to
-verify each other's identity. This prevents impersonation attacks where an
-adversary claims to be a node it doesn't control.
+When two nodes establish a connection, they perform mutual authentication using
+the Noise Protocol Framework with the IK pattern. This provides:
 
-> **Note**: This authentication protocol is not derived from Yggdrasil, which
-> relies on transport-layer security (TLS/QUIC) for identity binding. FIPS
-> requires an explicit application-layer protocol because it supports transports
-> without built-in encryption or key exchange (radio links, serial connections).
-> For initial implementation, peer authentication is always performed regardless
-> of transport capabilities; this may be optimized in future versions.
->
+- Mutual authentication (both parties prove identity)
+- Forward secrecy (ephemeral keys protect past sessions)
+- Encrypted link (all subsequent messages are encrypted)
+
 > **Terminology note**: *Peer authentication* (this section) is hop-by-hop—it
-> verifies that a direct peer is who they claim to be. This is distinct from
-> *crypto sessions* (see [fips-protocol-flow.md](fips-protocol-flow.md) §6),
-> which provide end-to-end authenticated encryption between source and
-> destination using Noise KK. Both layers are necessary: peer auth secures the
-> local link; crypto sessions secure the full path.
+> verifies that a direct peer is who they claim to be and establishes an
+> encrypted link. This is distinct from *session-layer encryption* which
+> provides end-to-end authenticated encryption between FIPS addresses. Both
+> layers operate independently: peer auth secures each link; session encryption
+> secures the full path.
+
+#### Protocol: Noise_IK_secp256k1_ChaChaPoly_SHA256
+
+The IK pattern is chosen because:
+
+- **Outbound connections**: Initiator knows responder's static key from config
+- **Inbound connections**: Responder learns initiator's identity from message 1
+
+```text
+Pre-message (known before handshake):
+  <- s  (responder's static key known to initiator)
+
+Handshake:
+  -> e, es, s, ss    (msg1: initiator sends ephemeral + encrypted static)
+  <- e, ee, se       (msg2: responder sends ephemeral)
+```
 
 ```text
 Initiator (A)                                  Responder (B)
      │                                              │
-     │───── AuthInit { a_npub, nonce_a } ─────────►│
+     │ knows B's npub from config                   │
      │                                              │
-     │◄──── AuthChallenge { b_npub, nonce_b,       │
-     │          sig_b(nonce_a | a_npub) } ─────────│
-     │                                              │
-     │───── AuthComplete {                          │
-     │          sig_a(nonce_b | b_npub) } ────────►│
-     │                                              │
-   [A verifies B after msg 2]          [B verifies A after msg 3]
+     │───── msg1 (82 bytes) ──────────────────────►│
+     │      e: ephemeral pubkey (33)                │
+     │      s: encrypted static (33+16)             │
+     │                                              │ learns A's identity
+     │◄───── msg2 (33 bytes) ──────────────────────│
+     │       e: ephemeral pubkey (33)               │
      │                                              │
      ▼                                              ▼
-   Authenticated                              Authenticated
+   Noise session established              Noise session established
+   (symmetric keys derived)               (symmetric keys derived)
 ```
 
-**Protocol flow:**
+#### Cryptographic Primitives
 
-1. **AuthInit**: Initiator sends its npub and a 32-byte random nonce
-2. **AuthChallenge**: Responder sends its npub, its own nonce, and a signature
-   proving it controls its nsec (signing the initiator's nonce and npub)
-3. **AuthComplete**: Initiator sends a signature proving it controls its nsec
-   (signing the responder's nonce and npub)
+| Component | Choice              | Notes                     |
+|-----------|---------------------|---------------------------|
+| Curve     | secp256k1           | Nostr-native              |
+| DH        | ECDH on secp256k1   | Standard EC Diffie-Hellman|
+| AEAD      | ChaCha20-Poly1305   | Same as NIP-44            |
+| Hash      | SHA-256             | Nostr-native              |
+| KDF       | HKDF-SHA256         | Standard Noise KDF        |
 
-After message 2, the initiator can verify the responder's identity. After
-message 3, the responder can verify the initiator's identity. Both nodes have
-now proven they control their claimed private keys.
+#### Crossing Connection Handling
 
-### Crossing Connection Handling
-
-When both nodes have each other as static peers, both may initiate authentication
-simultaneously ("crossing hellos"). This is resolved using deterministic
-tie-breaking based on npub ordering:
+When both nodes simultaneously initiate connections, a deterministic tie-breaker
+resolves which connection survives:
 
 ```text
-A (lower npub)                             B (higher npub)
-     │                                           │
-     │─── AuthInit { a_npub, nonce_a } ────────►│
-     │◄── AuthInit { b_npub, nonce_b } ─────────│  (crossing)
-     │                                           │
-  A < B: ignore B's init,               B > A: switch to responder,
-  wait for challenge                    send AuthChallenge
-     │                                           │
-     │◄── AuthChallenge { b_npub, ... } ────────│
-     │─── AuthComplete { ... } ────────────────►│
-     │                                           │
-     ▼                                           ▼
-  Authenticated                            Authenticated
+Rule: Smaller node_id's OUTBOUND connection wins
+
+If our_node_id < their_node_id:
+  - Our outbound wins, close our inbound
+If our_node_id > their_node_id:
+  - Our inbound wins, close our outbound
 ```
 
-**Rules:**
+Both nodes independently reach the same conclusion without coordination.
 
-- If a node receives AuthInit while its own AuthInit is pending to the same peer:
-  - If local npub < remote npub: Continue as initiator, ignore incoming AuthInit
-  - If local npub > remote npub: Abort own initiation, switch to responder role
+#### Post-Authentication State
 
-This ensures exactly one handshake completes with minimal wasted effort.
+After the Noise handshake completes:
 
-### Authentication Message Structures
+- **NoiseSession** holds symmetric keys for encrypt/decrypt
+- Link is fully encrypted (all subsequent messages use AEAD)
+- Peer's verified identity is extracted from the handshake
+- Node transitions from `PeerConnection` to `ActivePeer` state
 
-```rust
-struct AuthInit {
-    npub: [u8; 32],      // Initiator's public key (x-only)
-    nonce: [u8; 32],     // Random challenge
-}
+#### Link vs Session Encryption
 
-struct AuthChallenge {
-    npub: [u8; 32],      // Responder's public key (x-only)
-    nonce: [u8; 32],     // Responder's challenge
-    signature: [u8; 64], // sig(initiator_nonce || initiator_npub)
-}
+FIPS uses two independent encryption layers:
 
-struct AuthComplete {
-    signature: [u8; 64], // sig(responder_nonce || responder_npub)
-}
-```
+| Layer       | Scope       | Keys                     | Purpose                              |
+|-------------|-------------|--------------------------|--------------------------------------|
+| **Link**    | Hop-by-hop  | Per-peer Noise session   | Encrypt all traffic on this link     |
+| **Session** | End-to-end  | Per-destination session  | Encrypt payload across multiple hops |
 
-### Signature Construction
+A packet from A→D through B traverses:
 
-Signatures are constructed with domain separation to prevent cross-protocol
-signature reuse:
+1. A encrypts payload with A↔D session key
+2. A encrypts that with A↔B link key, sends to B
+3. B decrypts link layer, routes, re-encrypts with B↔C or B↔D link key
+4. D decrypts link layer, then decrypts session layer to get payload
 
-```text
-digest = SHA256("fips-peer-auth-v1" || peer_nonce || peer_npub)
-signature = schnorr_sign(nsec, digest)
-```
-
-**Domain separation**: The `"fips-peer-auth-v1"` prefix ensures that signatures
-created for FIPS peer authentication cannot be replayed in other contexts (e.g.,
-a Nostr event signature or FIPS crypto session). If the authentication protocol
-is revised, the version string changes (e.g., `"fips-peer-auth-v2"`).
-
-**Nonce freshness**: The 32-byte random nonce from the peer ensures that
-signatures cannot be pre-computed. Each authentication attempt requires a
-fresh signature over the peer's unique challenge.
-
-**Binding to peer identity**: The signature includes the peer's npub, binding
-the response to that specific peer. This prevents relay attacks where an
-adversary forwards a challenge from one node and uses the response with another.
-
-### Authentication Failure Handling
-
-If authentication fails at any step:
-
-- **Invalid signature**: Connection is terminated immediately
-- **Wrong npub**: The node is not who it claimed to be; terminate
-- **Expired timestamp**: Possible replay attack; terminate
-- **Timeout**: Peer did not respond in time; terminate
-
-Nodes should implement rate limiting on authentication attempts to prevent
-denial-of-service attacks that exhaust computational resources through
-repeated signature verifications.
-
-### Post-Authentication State
-
-After successful authentication, each node stores:
-
-- The peer's verified npub and derived node_id
-- The link over which the peer was authenticated
-- Timestamp of successful authentication
-
-This state is used for:
-
-- Routing decisions (only forward to authenticated peers)
-- TreeAnnounce signature verification (cached public key lookup)
-- Session resumption on transient disconnections (within a timeout window)
+Intermediate nodes can route but cannot read session-layer payloads.
 
 ---
 
@@ -627,36 +581,45 @@ A single node may have multiple transports of different types:
 
 ## 6. Protocol Messages
 
+FIPS uses two independent message type spaces corresponding to the two protocol
+layers. Messages are exchanged over Noise-encrypted links after peer authentication.
+
 ### Wire Format
 
-```
+```text
 ┌────────┬────────┬────────────────────────────────────┐
 │ Type   │ Length │ Payload                            │
 │ 1 byte │ 2 bytes│ Variable                           │
 └────────┴────────┴────────────────────────────────────┘
 ```
 
-### Message Types
+### Link Layer Messages (Peer-to-Peer)
 
-| Type | Name | Description |
-|------|------|-------------|
-| 0x00 | Dummy | Keepalive/padding |
-| 0x01 | TreeAnnounce | Spanning tree state |
-| 0x02 | BloomUpdate | Bloom filter update |
-| 0x03 | Lookup | Destination lookup request |
-| 0x04 | LookupResponse | Coordinates for requested key |
-| 0x05 | PathBroken | Route failure notification |
-| 0x06 | SessionSetup | Routing session + crypto handshake init |
-| 0x07 | SessionAck | Routing session ack + crypto response |
-| 0x08 | CoordsRequired | Router cache miss notification |
-| 0x09 | AuthInit | Peer authentication initiation |
-| 0x0a | AuthChallenge | Peer authentication challenge + response |
-| 0x0b | AuthComplete | Peer authentication completion |
-| 0x10 | Traffic | Encrypted application data |
-| 0x11 | TrafficAck | Delivery acknowledgement |
+Exchanged between directly connected peers over Noise-encrypted links.
+Peer authentication uses Noise IK handshake (see §1) before any messages.
 
-See [fips-routing.md](fips-routing.md) Part 4 for routing session details and
-[fips-protocol-flow.md](fips-protocol-flow.md) §5-6 for combined establishment.
+| Type | Name           | Description                                |
+|------|----------------|--------------------------------------------|
+| 0x10 | TreeAnnounce   | Spanning tree state announcement           |
+| 0x20 | FilterAnnounce | Bloom filter reachability update           |
+| 0x30 | LookupRequest  | Request to discover node coordinates       |
+| 0x31 | LookupResponse | Response with target's coordinates         |
+| 0x40 | SessionDatagram| Encapsulated session-layer payload         |
+
+### Session Layer Messages (End-to-End)
+
+Carried inside `SessionDatagram`, encrypted with end-to-end session keys.
+Intermediate nodes route based on destination but cannot read the payload.
+
+| Type | Name           | Description                                |
+|------|----------------|--------------------------------------------|
+| 0x00 | SessionSetup   | Session establishment with coordinates     |
+| 0x01 | SessionAck     | Session acknowledgement                    |
+| 0x10 | DataPacket     | Encrypted IPv6 datagram                    |
+| 0x20 | CoordsRequired | Router cache miss notification             |
+| 0x21 | PathBroken     | Route failure notification                 |
+
+See [fips-routing.md](fips-routing.md) Part 4 for routing session details.
 
 ### TreeAnnounce
 
