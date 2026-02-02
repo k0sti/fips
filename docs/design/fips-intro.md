@@ -103,7 +103,7 @@ adapts these for multi-transport operation and Nostr identity integration.
 **Encryption**: Link and session encryption use the [Noise Protocol
 Framework](https://noiseprotocol.org/), the same foundation used by WireGuard,
 Lightning Network, and other production systems. FIPS uses the IK pattern for
-link authentication and KK pattern for end-to-end sessions.
+link authentication and end-to-end sessions.
 
 **Cryptographic primitives**: FIPS reuses Nostr's cryptographic stack—secp256k1
 for keys, Schnorr signatures, SHA-256 for hashing, and ChaCha20-Poly1305 for
@@ -172,7 +172,7 @@ FIPS uses independent encryption at two layers:
 | Layer       | Scope       | Pattern  | Purpose                              |
 |-------------|-------------|----------|--------------------------------------|
 | **Link**    | Hop-by-hop  | Noise IK | Encrypt all traffic on each link    |
-| **Session** | End-to-end  | Noise KK | Encrypt payload across multiple hops |
+| **Session** | End-to-end  | Noise IK | Encrypt payload across multiple hops |
 
 ### Link Layer (Peer-to-Peer)
 
@@ -188,8 +188,9 @@ the first handshake message.
 ### Session Layer (End-to-End)
 
 For traffic between non-adjacent nodes, FIPS establishes end-to-end encrypted
-sessions using Noise KK. Both parties know each other's npub before initiating,
-enabling mutual authentication in a single round-trip.
+sessions using Noise IK. The initiator knows the destination's npub; the
+responder learns the initiator's identity from the handshake—the same asymmetry
+as link-layer connections.
 
 A packet from A to D through intermediate node B:
 
@@ -460,7 +461,7 @@ FIPS assumes adversaries with varying capabilities:
 authentication and forward secrecy. An observer on the underlying transport
 sees only encrypted packets.
 
-**End-to-end encryption**: Session-layer Noise KK encrypts payloads between
+**End-to-end encryption**: Session-layer Noise IK encrypts payloads between
 endpoints. Intermediate routers cannot read application data.
 
 **Signature verification**: All protocol messages (TreeAnnounce, LookupResponse)
@@ -529,7 +530,7 @@ maintaining control over their own identities and peering relationships.
 
 | Document | Description |
 |----------|-------------|
-| [fips-session-protocol.md](fips-session-protocol.md) | End-to-end session flow, Noise KK encryption |
+| [fips-session-protocol.md](fips-session-protocol.md) | End-to-end session flow, Noise IK encryption |
 | [fips-wire-protocol.md](fips-wire-protocol.md) | Link-layer transport, Noise IK handshake |
 | [fips-gossip-protocol.md](fips-gossip-protocol.md) | TreeAnnounce, FilterAnnounce, Lookup formats |
 | [fips-routing.md](fips-routing.md) | Bloom filters, discovery, greedy routing |

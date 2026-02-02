@@ -169,7 +169,7 @@ Payloads within a session are:
 1. **Encrypted** with the session key (provides confidentiality)
 2. **Authenticated** via AEAD tag (session keys bound to npub identities)
 
-Authentication derives from the Noise KK handshake binding session keys to
+Authentication derives from the Noise IK handshake binding session keys to
 both parties' static keys. See §6 for cryptographic details.
 
 ### 3.2 Session Establishment Trigger
@@ -203,10 +203,9 @@ paths.
 
 ### 3.4 Session Establishment Flow
 
-FIPS uses Noise KK for session establishment. Both parties know each other's
-static keys: the initiator from DNS lookup, the responder from the source
-address in the SessionSetup. The KK pattern provides mutual authentication
-from the first message.
+FIPS uses Noise IK for session establishment. The initiator knows the
+destination's npub; the responder learns the initiator's identity from the
+handshake. This is the same asymmetry as link-layer connections.
 
 The handshake is carried inside SessionSetup/SessionAck messages (see §5.5),
 which also establish routing session state at intermediate nodes.
@@ -268,7 +267,7 @@ FIPS uses two distinct session concepts at different layers:
 ### 5.1 Crypto Session
 
 - Established between two npub identities
-- Provides confidentiality and authenticity via Noise KK
+- Provides confidentiality and authenticity via Noise IK
 - Survives route changes and transport failover
 - Keyed by: `(local_npub, remote_npub)`
 
@@ -291,14 +290,14 @@ crypto handshake, minimizing round-trips.
 2. SessionSetup + Crypto Init
    └─► Source sends SessionSetup containing:
        - src/dest coordinates (for router caching)
-       - Noise KK handshake initiation (for destination)
+       - Noise IK handshake initiation (for destination)
    └─► Routers cache coordinates as packet transits
    └─► Destination receives crypto init, begins handshake
 
 3. SessionAck + Crypto Response
    └─► Destination sends SessionAck containing:
        - Its coordinates (for reverse path caching)
-       - Noise KK handshake response
+       - Noise IK handshake response
    └─► Routers cache reverse path
    └─► Source completes crypto handshake
 
@@ -321,7 +320,7 @@ FIPS uses two independent Noise Protocol handshakes at different layers:
 | Layer   | Scope       | Pattern  | Purpose                                   |
 |---------|-------------|----------|-------------------------------------------|
 | Link    | Hop-by-hop  | Noise IK | Authenticate peers, encrypt link          |
-| Session | End-to-end  | Noise KK | Authenticate endpoints, encrypt payload   |
+| Session | End-to-end  | Noise IK | Authenticate endpoints, encrypt payload   |
 
 Both use `Noise_IK_secp256k1_ChaChaPoly_SHA256` with the same cryptographic
 primitives, but with separate keys and sessions.
@@ -336,21 +335,21 @@ nodes forward opaque ciphertext without being able to read the contents.
 
 ### 6.2 Session Noise Handshake
 
-The session-layer Noise KK handshake is carried inside `SessionSetup`/`SessionAck`
+The session-layer Noise IK handshake is carried inside `SessionSetup`/`SessionAck`
 messages, which themselves travel through the link-encrypted channel:
 
 ```text
 Initiator knows destination npub (from DNS lookup)
     │
     ▼
-SessionSetup { coords, handshake_payload: Noise KK msg1 }
+SessionSetup { coords, handshake_payload: Noise IK msg1 }
     │
     ▼  (travels through link-encrypted hops)
     │
 Responder processes msg1, learns initiator identity
     │
     ▼
-SessionAck { coords, handshake_payload: Noise KK msg2 }
+SessionAck { coords, handshake_payload: Noise IK msg2 }
     │
     ▼
 Session keys established (independent of link keys)
@@ -386,7 +385,7 @@ SessionSetup {
     dest_addr: Ipv6Addr,
 
     // Crypto portion (opaque to routers, processed by destination)
-    handshake_payload: Vec<u8>,  // Noise KK message 1
+    handshake_payload: Vec<u8>,  // Noise IK message 1
 }
 
 SessionAck {
@@ -394,7 +393,7 @@ SessionAck {
     src_coords: Vec<NodeId>,  // Responder's coordinates
 
     // Crypto portion
-    handshake_payload: Vec<u8>,  // Noise KK message 2
+    handshake_payload: Vec<u8>,  // Noise IK message 2
 }
 ```
 
@@ -427,13 +426,12 @@ The ephemeral keys (`e` in Noise notation) provide forward secrecy:
 Lightning's adaptation of Noise for secp256k1 (BOLT 8) provides a proven
 reference implementation:
 
-- Uses Noise XK pattern (different from our KK)
+- Uses Noise XK pattern (different from our IK)
 - Same secp256k1 + ChaCha20-Poly1305 + SHA-256 stack
 - Handles the secp256k1 ECDH correctly
 - Open source implementations available in multiple languages
 
-FIPS can reference BOLT 8's cryptographic details while using the KK pattern
-appropriate for our mutual-knowledge scenario.
+FIPS can reference BOLT 8's cryptographic details while using the IK pattern.
 
 ### 6.9 Data Packet Authentication
 

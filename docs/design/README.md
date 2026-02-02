@@ -17,7 +17,7 @@ concepts, and finally the wire-level protocol details.
 
 | Document                                             | Description                                               |
 |------------------------------------------------------|-----------------------------------------------------------|
-| [fips-session-protocol.md](fips-session-protocol.md) | End-to-end session flow, Noise KK encryption, terminology |
+| [fips-session-protocol.md](fips-session-protocol.md) | End-to-end session flow, Noise IK encryption, terminology |
 
 ### 3. Routing (How Packets Find Their Way)
 

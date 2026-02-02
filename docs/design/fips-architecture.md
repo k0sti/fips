@@ -307,28 +307,32 @@ Inbound:
 
 ### Peer Lifecycle
 
+The peer lifecycle uses Noise IK for authentication. Noise IK is a 2-message
+handshake where the initiator knows the responder's static key. See
+[fips-wire-protocol.md](fips-wire-protocol.md) §2 for wire format details.
+
 ```
                         ┌─────────────────────────────────────────┐
                         │              Disconnected               │
                         └─────────────────────────────────────────┘
                              │                           │
-                  [outbound] │                           │ [inbound data]
+                  [outbound] │                           │ [inbound msg1]
                              ▼                           ▼
                   ┌──────────────────┐        ┌──────────────────┐
-                  │    Connecting    │        │AwaitingAuthInit  │
-                  │(conn-oriented)   │        │                  │
+                  │    Connecting    │        │  ReceivedMsg1    │
+                  │(conn-oriented)   │        │  (send msg2)     │
                   └──────────────────┘        └──────────────────┘
                              │                           │
-              [link ready]   │               [recv AuthInit]
-                             ▼                           ▼
-                  ┌──────────────────┐        ┌──────────────────┐
-                  │AwaitingChallenge │        │AwaitingComplete  │
-                  │ (sent AuthInit)  │        │(sent AuthChallenge)│
-                  └──────────────────┘        └──────────────────┘
+              [link ready]   │                           │ [recv encrypted]
+              [send msg1]    │                           │ [verify]
+                             ▼                           │
+                  ┌──────────────────┐                   │
+                  │  AwaitingMsg2    │                   │
+                  │  (sent msg1)     │                   │
+                  └──────────────────┘                   │
                              │                           │
-        [recv AuthChallenge] │                           │ [recv AuthComplete]
-        [verify, send        │                           │ [verify]
-         AuthComplete]       │                           │
+              [recv msg2]    │                           │
+              [verify]       │                           │
                              ▼                           ▼
                         ┌─────────────────────────────────────────┐
                         │                 Active                  │
@@ -347,18 +351,18 @@ Inbound:
 
 - `Disconnected`: No active connection; for static peers, retry with backoff
 - `Connecting`: Link establishment in progress (connection-oriented transports only)
-- `AwaitingAuthInit`: Inbound connection, waiting for peer's AuthInit
-- `AwaitingChallenge`: Sent AuthInit, waiting for AuthChallenge
-- `AwaitingComplete`: Sent AuthChallenge, waiting for AuthComplete
+- `ReceivedMsg1`: Inbound; received Noise IK msg1, sent msg2, awaiting first encrypted frame
+- `AwaitingMsg2`: Outbound; sent Noise IK msg1, waiting for msg2
 - `Active`: Authenticated; participating in tree gossip and filter exchange
 
 **Crossing connection handling:**
 
-When in `AwaitingChallenge` and we receive an AuthInit from the same peer:
+When in `AwaitingMsg2` and we receive a msg1 from the same peer (both sides
+initiated simultaneously):
 
-- If local npub < remote npub: Ignore incoming AuthInit, remain initiator
-- If local npub > remote npub: Switch to responder role, send AuthChallenge,
-  transition to `AwaitingComplete`
+- If local npub < remote npub: Ignore incoming msg1, remain initiator
+- If local npub > remote npub: Switch to responder role, send msg2,
+  transition to `ReceivedMsg1`
 
 **Events:**
 
@@ -367,11 +371,10 @@ PeerEvent
 ├── Discovered { link_id, transport_addr, hint: Option<PublicKey> }
 ├── LinkConnected
 ├── LinkFailed { reason }
-├── AuthInitReceived { npub, nonce }
-├── AuthChallengeReceived { npub, nonce, signature }
-├── AuthCompleteReceived { signature }
-├── AuthSuccess { npub, node_id }
-├── AuthFailed { reason }
+├── Msg1Received { noise_payload }
+├── Msg2Received { noise_payload }
+├── HandshakeComplete { npub, node_id }
+├── HandshakeFailed { reason }
 ├── TreeAnnounceReceived { declaration, ancestry }
 ├── FilterAnnounceReceived { filter, sequence, ttl }
 ├── Timeout { kind: TimeoutKind }
@@ -945,7 +948,7 @@ configure the same underlying cache but are grouped by purpose.
 ### Crypto Session Management
 
 > **Note**: Crypto sessions provide end-to-end authenticated encryption using
-> Noise KK. See [fips-session-protocol.md](fips-session-protocol.md) §6 for details.
+> Noise IK. See [fips-session-protocol.md](fips-session-protocol.md) §6 for details.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

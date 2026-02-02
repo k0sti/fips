@@ -196,7 +196,7 @@ D receives and merges:
 
 ```
 D adds B's node_id to its bloom filter
-D sends BloomUpdate to parent A
+D sends FilterAnnounce to parent A
 
 A merges D's bloom filter with its view of D's subtree
 A now knows "B is reachable through D" (probabilistically)

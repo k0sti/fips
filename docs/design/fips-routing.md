@@ -92,7 +92,7 @@ node's npub, truncated or used directly as the filter key.
 Each node maintains a Bloom filter for each peer direction:
 
 ```rust
-peer_filters: HashMap<PeerId, BloomFilter>
+peer_filters: HashMap<NodeId, BloomFilter>
 ```
 
 The filter for peer P answers: "Which destinations are reachable through P?"
@@ -248,7 +248,7 @@ Note: Coordinates are ordered self-to-root, so common ancestry is a suffix.
 ### Greedy Routing Algorithm
 
 ```rust
-fn greedy_next_hop(&self, dest_coords: &[NodeId]) -> PeerId {
+fn greedy_next_hop(&self, dest_coords: &[NodeId]) -> NodeId {
     // Check if we are the destination
     if dest_coords[0] == self.node_id {
         return LOCAL_DELIVERY;
@@ -257,7 +257,7 @@ fn greedy_next_hop(&self, dest_coords: &[NodeId]) -> PeerId {
     // Check if destination is a direct peer
     for peer in &self.peers {
         if peer.node_id == dest_coords[0] {
-            return peer.id;
+            return peer.node_id;
         }
     }
 
@@ -265,7 +265,7 @@ fn greedy_next_hop(&self, dest_coords: &[NodeId]) -> PeerId {
     self.peers
         .iter()
         .min_by_key(|p| tree_distance(&p.coords, dest_coords))
-        .map(|p| p.id)
+        .map(|p| p.node_id)
         .expect("no peers")
 }
 ```
@@ -331,7 +331,7 @@ struct SessionSetup {
 
     // Crypto session establishment (see fips-session-protocol.md §6)
     // Opaque to routers; only processed by destination
-    handshake_payload: Option<Vec<u8>>,  // Noise KK message 1
+    handshake_payload: Option<Vec<u8>>,  // Noise IK message 1
 }
 
 struct SessionFlags {
@@ -346,7 +346,7 @@ struct SessionAck {
     src_coords: Vec<NodeId>,   // Acknowledger's coords (for return caching)
 
     // Crypto session response (see fips-session-protocol.md §6)
-    handshake_payload: Option<Vec<u8>>,  // Noise KK message 2
+    handshake_payload: Option<Vec<u8>>,  // Noise IK message 2
 }
 
 /// Minimal data packet
