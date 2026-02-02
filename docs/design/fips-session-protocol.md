@@ -9,6 +9,10 @@ including peer discovery, authentication, tree announcements, and data routing.
 
 ## 1. Application-Initiated Traffic Flow
 
+> **Note**: This section applies to traditional IP-based applications using the
+> TUN interface. Applications using the native FIPS datagram service address
+> destinations directly by npub, and routing proceeds from there without DNS.
+
 Traffic flow begins at the application layer with a DNS query, which triggers
 a cascade of events through the FIPS stack.
 
@@ -17,10 +21,10 @@ a cascade of events through the FIPS stack.
 An application wants to send IPv6 traffic to another FIPS node, identified by
 an npub. The flow:
 
-1. **DNS Query**: Application queries a local FIPS DNS server for the npub
-   (format TBD - perhaps `npub1xxx...xxx.fips` or similar)
+1. **DNS Query**: Application queries the local FIPS DNS service for the npub
+   mapping to an IPv6 address
 
-2. **FIPS DNS Server** performs two functions:
+2. **FIPS DNS service** performs two functions:
    - **Address derivation**: Converts the npub to an identity and derives the
      corresponding `fd::/8` IPv6 address
    - **Cache priming**: Stores the identity mapping (IPv6 address ↔ npub ↔ node_id)
@@ -33,6 +37,8 @@ an npub. The flow:
 
 5. **TUN Processing**: When the packet arrives at the TUN, FIPS already has the
    cached mapping from the DNS lookup, enabling immediate routing decisions
+
+6. **Note**: This identity cache is only necessary when using the FIPS IPv6 shim
 
 ### 1.2 Design Rationale
 
@@ -194,12 +200,13 @@ management) and transmitted after the session is established.
 FIPS sessions exist above the routing layer. A session between two npubs
 survives:
 
-- Transport failover (UDP → Tor → back to UDP)
+- Transport failover (UDP → WiFi → back to UDP)
 - Route changes (different intermediate hops)
-- Transport address changes on either end
+- Transport address changes on either end (WiFi → LTE → WiFi)
 
 The session is bound to **npub identities**, not transport addresses or routing
-paths.
+paths. This allows FIPS endpoints to roam over their transports as needed while
+maintaining an established session.
 
 ### 3.4 Session Establishment Flow
 
@@ -207,7 +214,7 @@ FIPS uses Noise IK for session establishment. The initiator knows the
 destination's npub; the responder learns the initiator's identity from the
 handshake. This is the same asymmetry as link-layer connections.
 
-The handshake is carried inside SessionSetup/SessionAck messages (see §5.5),
+The handshake is carried inside SessionSetup/SessionAck messages (see §5.1),
 which also establish routing session state at intermediate nodes.
 
 ### 3.5 Simultaneous Session Initiation (Crossing Hellos)
@@ -255,61 +262,67 @@ Route cache entries:
 
 ---
 
-## 5. Session Terminology
+## 5. Route Cache Warming
 
-FIPS uses two distinct session concepts at different layers:
+### 5.1 Initial Warming via Handshake
 
-| Term                | Layer       | Purpose                      | Endpoints              |
-|---------------------|-------------|------------------------------|------------------------|
-| **Crypto Session**  | End-to-end  | Authentication + encryption  | Source ↔ Destination   |
-| **Routing Session** | Hop-by-hop  | Cache coordinates at routers | Along the path         |
+The crypto session handshake (SessionSetup/SessionAck) warms route caches at
+intermediate routers as it transits. Each message carries the sender's
+coordinates; routers extract and cache `(src_addr, dest_addr) → next_hop` for
+both directions. After the handshake completes, data packets use minimal
+36-byte headers and routers forward based on cached routes.
 
-### 5.1 Crypto Session
+### 5.2 Cache Miss Recovery
 
-- Established between two npub identities
-- Provides confidentiality and authenticity via Noise IK
-- Survives route changes and transport failover
-- Keyed by: `(local_npub, remote_npub)`
+When an intermediate router's cache entry expires or is evicted, it cannot
+forward data packets (which carry only addresses, not coordinates). The router
+returns a CoordsRequired error to the sender.
 
-### 5.2 Routing Session
+The crypto session remains valid—only the routing state is lost. Recovery uses
+coords-on-demand: data packets include an optional coordinates field. When the
+sender receives CoordsRequired:
 
-- Warms coordinate caches at intermediate routers
-- Enables minimal 36-byte data packet headers
-- Must be re-established when router caches expire
-- Keyed by: `(src_addr, dest_addr)` at each router
+1. Sender marks the route as "cold"
+2. Subsequent data packets include coordinates (flag bit set)
+3. Routers along the path cache coordinates as packets transit
+4. Once route is warm again, sender clears the flag and resumes minimal headers
 
-### 5.3 Combined Establishment
+This avoids a full SessionSetup round-trip for what is purely a routing cache
+refresh.
 
-Both sessions are established together: the routing session setup carries the
-crypto handshake, minimizing round-trips.
+### 5.3 DataPacket Coordinate Flag
+
+The DataPacket `flags` field includes a `COORDS_PRESENT` bit:
+
+| Bit | Meaning                                              |
+|-----|------------------------------------------------------|
+| 0   | COORDS_PRESENT - coordinates follow the fixed header |
+
+When set, the packet includes `src_coords` and `dest_coords` after the standard
+header fields. Routers process these coordinates the same way as SessionSetup:
+cache both directions and forward using greedy routing.
+
+### 5.4 Sender State Machine
 
 ```text
-1. Route discovery (if needed)
-   └─► LookupRequest/Response → obtain destination coordinates
-
-2. SessionSetup + Crypto Init
-   └─► Source sends SessionSetup containing:
-       - src/dest coordinates (for router caching)
-       - Noise IK handshake initiation (for destination)
-   └─► Routers cache coordinates as packet transits
-   └─► Destination receives crypto init, begins handshake
-
-3. SessionAck + Crypto Response
-   └─► Destination sends SessionAck containing:
-       - Its coordinates (for reverse path caching)
-       - Noise IK handshake response
-   └─► Routers cache reverse path
-   └─► Source completes crypto handshake
-
-4. Data flow
-   └─► Encrypted payloads with minimal 36-byte headers
-   └─► Both crypto session and routing session now active
+        ┌──────────────┐
+        │    WARM      │ ◄── Normal: send minimal headers
+        └──────┬───────┘
+               │ CoordsRequired received
+               ▼
+        ┌──────────────┐
+        │    COLD      │ ◄── Send packets with coords
+        └──────┬───────┘
+               │ N packets sent successfully
+               ▼
+        ┌──────────────┐
+        │    WARM      │
+        └──────────────┘
 ```
 
-SessionSetup and SessionAck messages carry both routing information (coordinates
-for router caching) and crypto payload (handshake messages, opaque to routers).
-Routers process the routing portion and forward; only endpoints process the
-crypto portion.
+The sender transitions back to WARM after sending a configurable number of
+packets with coordinates (e.g., 3) without receiving CoordsRequired. This
+provides confidence that caches along the path are populated.
 
 ---
 
@@ -324,6 +337,14 @@ FIPS uses two independent Noise Protocol handshakes at different layers:
 
 Both use `Noise_IK_secp256k1_ChaChaPoly_SHA256` with the same cryptographic
 primitives, but with separate keys and sessions.
+
+> **Privacy note**: Noise IK does not provide initiator anonymity if the
+> responder's static key is compromised—an attacker who obtains the responder's
+> nsec can decrypt the initiator's identity from captured handshake messages.
+> Noise XK would protect initiator identity in this scenario, but requires an
+> additional round-trip (3 handshake messages vs 2), increasing session setup
+> from 3 packets to 4. Further deployment experience is needed to evaluate
+> whether the privacy benefit justifies the latency cost.
 
 ### 6.1 Why Two Layers?
 

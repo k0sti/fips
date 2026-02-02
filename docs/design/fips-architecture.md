@@ -931,7 +931,8 @@ this node wants to reach. This is the primary cache for endpoint nodes.
 > **Terminology note**: These parameters configure *routing sessions*—hop-by-hop
 > cached state at intermediate routers. For *crypto session* (end-to-end
 > encryption) parameters, see the Crypto Session section below. See
-> [fips-session-protocol.md](fips-session-protocol.md) §5 for the distinction.
+> [fips-session-protocol.md](fips-session-protocol.md) §3 for crypto sessions
+> and §5 for route cache warming.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
