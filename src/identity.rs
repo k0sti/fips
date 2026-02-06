@@ -1,6 +1,6 @@
 //! FIPS Identity System
 //!
-//! Node identity based on Nostr keypairs (secp256k1). The node_id is derived
+//! Node identity based on Nostr keypairs (secp256k1). The node_addr is derived
 //! from the public key via SHA-256, and the FIPS address uses an IPv6-compatible
 //! format with the 0xfd prefix.
 
@@ -33,8 +33,8 @@ pub enum IdentityError {
     #[error("signature verification failed")]
     SignatureVerificationFailed,
 
-    #[error("invalid node_id length: expected 32, got {0}")]
-    InvalidNodeIdLength(usize),
+    #[error("invalid node_addr length: expected 32, got {0}")]
+    InvalidNodeAddrLength(usize),
 
     #[error("invalid address length: expected 16, got {0}")]
     InvalidAddressLength(usize),
@@ -64,31 +64,31 @@ pub enum IdentityError {
     InvalidHex(#[from] hex::FromHexError),
 }
 
-/// 32-byte node identifier derived from SHA-256(npub).
+/// 32-byte node identifier derived from SHA-256(pubkey).
 ///
-/// The node_id is used in protocol messages and bloom filters. Hashing the
+/// The node_addr is used in protocol messages and bloom filters. Hashing the
 /// public key prevents grinding attacks that exploit secp256k1's algebraic
 /// structure.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeId([u8; 32]);
+pub struct NodeAddr([u8; 32]);
 
-impl NodeId {
-    /// Create a NodeId from a 32-byte array.
+impl NodeAddr {
+    /// Create a NodeAddr from a 32-byte array.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    /// Create a NodeId from a slice.
+    /// Create a NodeAddr from a slice.
     pub fn from_slice(slice: &[u8]) -> Result<Self, IdentityError> {
         if slice.len() != 32 {
-            return Err(IdentityError::InvalidNodeIdLength(slice.len()));
+            return Err(IdentityError::InvalidNodeAddrLength(slice.len()));
         }
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(slice);
         Ok(Self(bytes))
     }
 
-    /// Derive a NodeId from an x-only public key (npub).
+    /// Derive a NodeAddr from an x-only public key (npub).
     pub fn from_pubkey(pubkey: &XOnlyPublicKey) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(pubkey.serialize());
@@ -109,19 +109,19 @@ impl NodeId {
     }
 }
 
-impl fmt::Debug for NodeId {
+impl fmt::Debug for NodeAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NodeId({})", hex_encode(&self.0[..8]))
+        write!(f, "NodeAddr({})", hex_encode(&self.0[..8]))
     }
 }
 
-impl fmt::Display for NodeId {
+impl fmt::Display for NodeAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", hex_encode(&self.0))
     }
 }
 
-impl AsRef<[u8]> for NodeId {
+impl AsRef<[u8]> for NodeAddr {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
@@ -130,7 +130,7 @@ impl AsRef<[u8]> for NodeId {
 /// 128-bit FIPS address with IPv6-compatible format.
 ///
 /// The address uses the IPv6 Unique Local Address (ULA) prefix `fd00::/8`,
-/// providing 120 bits for the node_id hash. This format allows applications
+/// providing 120 bits for the node_addr hash. This format allows applications
 /// designed for IP transports to bind to FIPS addresses via a TUN interface.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FipsAddress([u8; 16]);
@@ -154,13 +154,13 @@ impl FipsAddress {
         Self::from_bytes(bytes)
     }
 
-    /// Derive a FipsAddress from a NodeId.
+    /// Derive a FipsAddress from a NodeAddr.
     ///
-    /// Takes the first 15 bytes of the node_id and prepends the 0xfd prefix.
-    pub fn from_node_id(node_id: &NodeId) -> Self {
+    /// Takes the first 15 bytes of the node_addr and prepends the 0xfd prefix.
+    pub fn from_node_addr(node_addr: &NodeAddr) -> Self {
         let mut bytes = [0u8; 16];
         bytes[0] = FIPS_ADDRESS_PREFIX;
-        bytes[1..16].copy_from_slice(&node_id.0[0..15]);
+        bytes[1..16].copy_from_slice(&node_addr.0[0..15]);
         Self(bytes)
     }
 
@@ -202,7 +202,7 @@ pub struct PeerIdentity {
     pubkey: XOnlyPublicKey,
     /// Full public key if known (includes parity for ECDH operations).
     pubkey_full: Option<PublicKey>,
-    node_id: NodeId,
+    node_addr: NodeAddr,
     address: FipsAddress,
 }
 
@@ -212,12 +212,12 @@ impl PeerIdentity {
     /// Note: When only the x-only key is available, the full public key
     /// will be derived assuming even parity for ECDH operations.
     pub fn from_pubkey(pubkey: XOnlyPublicKey) -> Self {
-        let node_id = NodeId::from_pubkey(&pubkey);
-        let address = FipsAddress::from_node_id(&node_id);
+        let node_addr = NodeAddr::from_pubkey(&pubkey);
+        let address = FipsAddress::from_node_addr(&node_addr);
         Self {
             pubkey,
             pubkey_full: None,
-            node_id,
+            node_addr,
             address,
         }
     }
@@ -228,12 +228,12 @@ impl PeerIdentity {
     /// handshake) to preserve parity information for ECDH operations.
     pub fn from_pubkey_full(pubkey: PublicKey) -> Self {
         let (x_only, _parity) = pubkey.x_only_public_key();
-        let node_id = NodeId::from_pubkey(&x_only);
-        let address = FipsAddress::from_node_id(&node_id);
+        let node_addr = NodeAddr::from_pubkey(&x_only);
+        let address = FipsAddress::from_node_addr(&node_addr);
         Self {
             pubkey: x_only,
             pubkey_full: Some(pubkey),
-            node_id,
+            node_addr,
             address,
         }
     }
@@ -266,8 +266,8 @@ impl PeerIdentity {
     }
 
     /// Return the node ID.
-    pub fn node_id(&self) -> &NodeId {
-        &self.node_id
+    pub fn node_addr(&self) -> &NodeAddr {
+        &self.node_addr
     }
 
     /// Return the FIPS address.
@@ -286,7 +286,7 @@ impl PeerIdentity {
 impl fmt::Debug for PeerIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerIdentity")
-            .field("node_id", &self.node_id)
+            .field("node_addr", &self.node_addr)
             .field("address", &self.address)
             .finish()
     }
@@ -304,7 +304,7 @@ impl fmt::Display for PeerIdentity {
 /// and verifying protocol messages.
 pub struct Identity {
     keypair: Keypair,
-    node_id: NodeId,
+    node_addr: NodeAddr,
     address: FipsAddress,
 }
 
@@ -319,11 +319,11 @@ impl Identity {
     /// Create an identity from an existing keypair.
     pub fn from_keypair(keypair: Keypair) -> Self {
         let (pubkey, _parity) = keypair.x_only_public_key();
-        let node_id = NodeId::from_pubkey(&pubkey);
-        let address = FipsAddress::from_node_id(&node_id);
+        let node_addr = NodeAddr::from_pubkey(&pubkey);
+        let address = FipsAddress::from_node_addr(&node_addr);
         Self {
             keypair,
-            node_id,
+            node_addr,
             address,
         }
     }
@@ -370,8 +370,8 @@ impl Identity {
     }
 
     /// Return the node ID.
-    pub fn node_id(&self) -> &NodeId {
-        &self.node_id
+    pub fn node_addr(&self) -> &NodeAddr {
+        &self.node_addr
     }
 
     /// Return the FIPS address.
@@ -404,7 +404,7 @@ impl Identity {
 impl fmt::Debug for Identity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Identity")
-            .field("node_id", &self.node_id)
+            .field("node_addr", &self.node_addr)
             .field("address", &self.address)
             .finish_non_exhaustive()
     }
@@ -433,14 +433,14 @@ impl AuthChallenge {
     }
 
     /// Verify a response to this challenge.
-    pub fn verify(&self, response: &AuthResponse) -> Result<NodeId, IdentityError> {
+    pub fn verify(&self, response: &AuthResponse) -> Result<NodeAddr, IdentityError> {
         let digest = auth_challenge_digest(&self.0, response.timestamp);
         let secp = Secp256k1::new();
 
         secp.verify_schnorr(&response.signature, &digest, &response.pubkey)
             .map_err(|_| IdentityError::SignatureVerificationFailed)?;
 
-        Ok(NodeId::from_pubkey(&response.pubkey))
+        Ok(NodeAddr::from_pubkey(&response.pubkey))
     }
 }
 
@@ -547,28 +547,28 @@ mod tests {
     fn test_identity_generation() {
         let identity = Identity::generate();
 
-        // NodeId should be 32 bytes
-        assert_eq!(identity.node_id().as_bytes().len(), 32);
+        // NodeAddr should be 32 bytes
+        assert_eq!(identity.node_addr().as_bytes().len(), 32);
 
         // Address should start with 0xfd
         assert_eq!(identity.address().as_bytes()[0], 0xfd);
 
-        // Address bytes 1-15 should match node_id bytes 0-14
+        // Address bytes 1-15 should match node_addr bytes 0-14
         assert_eq!(
             &identity.address().as_bytes()[1..16],
-            &identity.node_id().as_bytes()[0..15]
+            &identity.node_addr().as_bytes()[0..15]
         );
     }
 
     #[test]
-    fn test_node_id_from_pubkey_deterministic() {
+    fn test_node_addr_from_pubkey_deterministic() {
         let identity = Identity::generate();
         let pubkey = identity.pubkey();
 
-        let node_id1 = NodeId::from_pubkey(&pubkey);
-        let node_id2 = NodeId::from_pubkey(&pubkey);
+        let node_addr1 = NodeAddr::from_pubkey(&pubkey);
+        let node_addr2 = NodeAddr::from_pubkey(&pubkey);
 
-        assert_eq!(node_id1, node_id2);
+        assert_eq!(node_addr1, node_addr2);
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod tests {
         let result = challenge.verify(&response);
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), *identity.node_id());
+        assert_eq!(result.unwrap(), *identity.node_addr());
     }
 
     #[test]
@@ -636,12 +636,12 @@ mod tests {
     }
 
     #[test]
-    fn test_node_id_ordering() {
+    fn test_node_addr_ordering() {
         let id1 = Identity::generate();
         let id2 = Identity::generate();
 
-        // NodeIds should be comparable for root election
-        let _cmp = id1.node_id().cmp(id2.node_id());
+        // NodeAddrs should be comparable for root election
+        let _cmp = id1.node_addr().cmp(id2.node_addr());
     }
 
     #[test]
@@ -656,22 +656,22 @@ mod tests {
         let identity1 = Identity::from_secret_bytes(&secret_bytes).unwrap();
         let identity2 = Identity::from_secret_bytes(&secret_bytes).unwrap();
 
-        // Same secret key should produce same node_id
-        assert_eq!(identity1.node_id(), identity2.node_id());
+        // Same secret key should produce same node_addr
+        assert_eq!(identity1.node_addr(), identity2.node_addr());
         assert_eq!(identity1.address(), identity2.address());
     }
 
     #[test]
-    fn test_node_id_from_slice() {
+    fn test_node_addr_from_slice() {
         let bytes = [0u8; 32];
-        let node_id = NodeId::from_slice(&bytes).unwrap();
-        assert_eq!(node_id.as_bytes(), &bytes);
+        let node_addr = NodeAddr::from_slice(&bytes).unwrap();
+        assert_eq!(node_addr.as_bytes(), &bytes);
 
         // Wrong length should fail
         let short = [0u8; 16];
         assert!(matches!(
-            NodeId::from_slice(&short),
-            Err(IdentityError::InvalidNodeIdLength(16))
+            NodeAddr::from_slice(&short),
+            Err(IdentityError::InvalidNodeAddrLength(16))
         ));
     }
 
@@ -772,7 +772,7 @@ mod tests {
         let peer = PeerIdentity::from_npub(&npub).unwrap();
 
         assert_eq!(peer.pubkey(), identity.pubkey());
-        assert_eq!(peer.node_id(), identity.node_id());
+        assert_eq!(peer.node_addr(), identity.node_addr());
         assert_eq!(peer.address(), identity.address());
         assert_eq!(peer.npub(), npub);
     }
@@ -877,7 +877,7 @@ mod tests {
         let identity = Identity::from_secret_str(&nsec).unwrap();
         let identity_from_bytes = Identity::from_secret_bytes(&secret_bytes).unwrap();
 
-        assert_eq!(identity.node_id(), identity_from_bytes.node_id());
+        assert_eq!(identity.node_addr(), identity_from_bytes.node_addr());
     }
 
     #[test]
@@ -892,6 +892,6 @@ mod tests {
         let identity = Identity::from_secret_str(hex_str).unwrap();
         let identity_from_bytes = Identity::from_secret_bytes(&secret_bytes).unwrap();
 
-        assert_eq!(identity.node_id(), identity_from_bytes.node_id());
+        assert_eq!(identity.node_addr(), identity_from_bytes.node_addr());
     }
 }

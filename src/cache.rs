@@ -5,7 +5,7 @@
 //! RouteCache stores coordinates learned from discovery queries.
 
 use crate::tree::TreeCoordinate;
-use crate::{FipsAddress, NodeId};
+use crate::{FipsAddress, NodeAddr};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -413,11 +413,11 @@ impl CachedCoords {
 ///
 /// Separate from CoordCache, this stores routes learned from the discovery
 /// protocol (LookupRequest/LookupResponse) rather than session establishment.
-/// Keyed by NodeId rather than FipsAddress.
+/// Keyed by NodeAddr rather than FipsAddress.
 #[derive(Clone, Debug)]
 pub struct RouteCache {
-    /// NodeId -> discovered coordinates.
-    entries: HashMap<NodeId, CachedCoords>,
+    /// NodeAddr -> discovered coordinates.
+    entries: HashMap<NodeAddr, CachedCoords>,
     /// Maximum entries.
     max_entries: usize,
 }
@@ -442,9 +442,9 @@ impl RouteCache {
     }
 
     /// Insert a discovered route.
-    pub fn insert(&mut self, node_id: NodeId, coords: TreeCoordinate, current_time_ms: u64) {
+    pub fn insert(&mut self, node_addr: NodeAddr, coords: TreeCoordinate, current_time_ms: u64) {
         // Update existing
-        if let Some(entry) = self.entries.get_mut(&node_id) {
+        if let Some(entry) = self.entries.get_mut(&node_addr) {
             entry.update(coords, current_time_ms);
             return;
         }
@@ -455,21 +455,21 @@ impl RouteCache {
         }
 
         self.entries
-            .insert(node_id, CachedCoords::new(coords, current_time_ms));
+            .insert(node_addr, CachedCoords::new(coords, current_time_ms));
     }
 
     /// Look up a route (without touching).
-    pub fn get(&self, node_id: &NodeId) -> Option<&CachedCoords> {
-        self.entries.get(node_id)
+    pub fn get(&self, node_addr: &NodeAddr) -> Option<&CachedCoords> {
+        self.entries.get(node_addr)
     }
 
     /// Look up and touch.
     pub fn get_and_touch(
         &mut self,
-        node_id: &NodeId,
+        node_addr: &NodeAddr,
         current_time_ms: u64,
     ) -> Option<&TreeCoordinate> {
-        if let Some(entry) = self.entries.get_mut(node_id) {
+        if let Some(entry) = self.entries.get_mut(node_addr) {
             entry.touch(current_time_ms);
             Some(entry.coords())
         } else {
@@ -478,13 +478,13 @@ impl RouteCache {
     }
 
     /// Remove a route (e.g., after route failure).
-    pub fn invalidate(&mut self, node_id: &NodeId) -> Option<CachedCoords> {
-        self.entries.remove(node_id)
+    pub fn invalidate(&mut self, node_addr: &NodeAddr) -> Option<CachedCoords> {
+        self.entries.remove(node_addr)
     }
 
     /// Check if a node is cached.
-    pub fn contains(&self, node_id: &NodeId) -> bool {
-        self.entries.contains_key(node_id)
+    pub fn contains(&self, node_addr: &NodeAddr) -> bool {
+        self.entries.contains_key(node_addr)
     }
 
     /// Number of cached routes.
@@ -533,10 +533,10 @@ impl Default for RouteCache {
 mod tests {
     use super::*;
 
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     fn make_address(val: u8) -> FipsAddress {
@@ -546,7 +546,7 @@ mod tests {
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
-        TreeCoordinate::new(ids.iter().map(|&v| make_node_id(v)).collect()).unwrap()
+        TreeCoordinate::new(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
 
     // ===== CacheEntry Tests =====
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn test_route_cache_basic() {
         let mut cache = RouteCache::new(100);
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
         let coords = make_coords(&[1, 0]);
 
         cache.insert(node, coords.clone(), 0);
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn test_route_cache_invalidate() {
         let mut cache = RouteCache::new(100);
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
         let coords = make_coords(&[1, 0]);
 
         cache.insert(node, coords, 0);
@@ -749,9 +749,9 @@ mod tests {
     fn test_route_cache_lru_eviction() {
         let mut cache = RouteCache::new(2);
 
-        let node1 = make_node_id(1);
-        let node2 = make_node_id(2);
-        let node3 = make_node_id(3);
+        let node1 = make_node_addr(1);
+        let node2 = make_node_addr(2);
+        let node3 = make_node_addr(3);
 
         cache.insert(node1, make_coords(&[1, 0]), 0);
         cache.insert(node2, make_coords(&[2, 0]), 100);
@@ -772,9 +772,9 @@ mod tests {
     fn test_route_cache_evict_older_than() {
         let mut cache = RouteCache::new(100);
 
-        cache.insert(make_node_id(1), make_coords(&[1, 0]), 0);
-        cache.insert(make_node_id(2), make_coords(&[2, 0]), 500);
-        cache.insert(make_node_id(3), make_coords(&[3, 0]), 1000);
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0);
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 500);
+        cache.insert(make_node_addr(3), make_coords(&[3, 0]), 1000);
 
         let evicted = cache.evict_older_than(600, 1000);
 
@@ -785,7 +785,7 @@ mod tests {
     #[test]
     fn test_route_cache_update() {
         let mut cache = RouteCache::new(100);
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
 
         cache.insert(node, make_coords(&[1, 0]), 0);
         cache.insert(node, make_coords(&[1, 2, 0]), 500);

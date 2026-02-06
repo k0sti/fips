@@ -22,7 +22,7 @@
 
 use crate::bloom::BloomFilter;
 use crate::tree::{ParentDeclaration, TreeCoordinate};
-use crate::{FipsAddress, NodeId};
+use crate::{FipsAddress, NodeAddr};
 use secp256k1::schnorr::Signature;
 use std::fmt;
 use thiserror::Error;
@@ -378,9 +378,9 @@ pub struct LookupRequest {
     /// Unique request identifier.
     pub request_id: u64,
     /// Node we're looking for.
-    pub target: NodeId,
+    pub target: NodeAddr,
     /// Who's asking (for response routing).
-    pub origin: NodeId,
+    pub origin: NodeAddr,
     /// Origin's coordinates (for return path).
     pub origin_coords: TreeCoordinate,
     /// Remaining propagation hops.
@@ -393,8 +393,8 @@ impl LookupRequest {
     /// Create a new lookup request.
     pub fn new(
         request_id: u64,
-        target: NodeId,
-        origin: NodeId,
+        target: NodeAddr,
+        origin: NodeAddr,
         origin_coords: TreeCoordinate,
         ttl: u8,
     ) -> Self {
@@ -412,8 +412,8 @@ impl LookupRequest {
 
     /// Generate a new request with a random ID.
     pub fn generate(
-        target: NodeId,
-        origin: NodeId,
+        target: NodeAddr,
+        origin: NodeAddr,
         origin_coords: TreeCoordinate,
         ttl: u8,
     ) -> Self {
@@ -425,12 +425,12 @@ impl LookupRequest {
     /// Decrement TTL and add self to visited.
     ///
     /// Returns false if TTL was already 0.
-    pub fn forward(&mut self, my_node_id: &NodeId) -> bool {
+    pub fn forward(&mut self, my_node_addr: &NodeAddr) -> bool {
         if self.ttl == 0 {
             return false;
         }
         self.ttl -= 1;
-        self.visited.insert(my_node_id);
+        self.visited.insert(my_node_addr);
         true
     }
 
@@ -440,8 +440,8 @@ impl LookupRequest {
     }
 
     /// Check if a node was already visited.
-    pub fn was_visited(&self, node_id: &NodeId) -> bool {
-        self.visited.contains(node_id)
+    pub fn was_visited(&self, node_addr: &NodeAddr) -> bool {
+        self.visited.contains(node_addr)
     }
 }
 
@@ -453,7 +453,7 @@ pub struct LookupResponse {
     /// Echoed request identifier.
     pub request_id: u64,
     /// The target node.
-    pub target: NodeId,
+    pub target: NodeAddr,
     /// Target's coordinates in the tree.
     pub target_coords: TreeCoordinate,
     /// Proof that target authorized this response (signature over request).
@@ -464,7 +464,7 @@ impl LookupResponse {
     /// Create a new lookup response.
     pub fn new(
         request_id: u64,
-        target: NodeId,
+        target: NodeAddr,
         target_coords: TreeCoordinate,
         proof: Signature,
     ) -> Self {
@@ -479,7 +479,7 @@ impl LookupResponse {
     /// Get the bytes that should be signed as proof.
     ///
     /// Format: request_id (8) || target (32)
-    pub fn proof_bytes(request_id: u64, target: &NodeId) -> Vec<u8> {
+    pub fn proof_bytes(request_id: u64, target: &NodeAddr) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(40);
         bytes.extend_from_slice(&request_id.to_le_bytes());
         bytes.extend_from_slice(target.as_bytes());
@@ -803,12 +803,12 @@ pub struct CoordsRequired {
     /// Destination that couldn't be routed.
     pub dest_addr: FipsAddress,
     /// Router reporting the miss.
-    pub reporter: NodeId,
+    pub reporter: NodeAddr,
 }
 
 impl CoordsRequired {
     /// Create a new CoordsRequired error.
-    pub fn new(dest_addr: FipsAddress, reporter: NodeId) -> Self {
+    pub fn new(dest_addr: FipsAddress, reporter: NodeAddr) -> Self {
         Self { dest_addr, reporter }
     }
 }
@@ -823,14 +823,14 @@ pub struct PathBroken {
     /// Destination that couldn't be reached.
     pub dest_addr: FipsAddress,
     /// Node that detected the failure.
-    pub reporter: NodeId,
+    pub reporter: NodeAddr,
     /// Optional: last known coordinates of destination.
     pub last_known_coords: Option<TreeCoordinate>,
 }
 
 impl PathBroken {
     /// Create a new PathBroken error.
-    pub fn new(original_src: FipsAddress, dest_addr: FipsAddress, reporter: NodeId) -> Self {
+    pub fn new(original_src: FipsAddress, dest_addr: FipsAddress, reporter: NodeAddr) -> Self {
         Self {
             original_src,
             dest_addr,
@@ -850,10 +850,10 @@ impl PathBroken {
 mod tests {
     use super::*;
 
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     fn make_address(val: u8) -> FipsAddress {
@@ -863,7 +863,7 @@ mod tests {
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
-        TreeCoordinate::new(ids.iter().map(|&v| make_node_id(v)).collect()).unwrap()
+        TreeCoordinate::new(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
 
     // ===== HandshakeMessageType Tests =====
@@ -1042,10 +1042,10 @@ mod tests {
 
     #[test]
     fn test_lookup_request_forward() {
-        let target = make_node_id(1);
-        let origin = make_node_id(2);
+        let target = make_node_addr(1);
+        let origin = make_node_addr(2);
         let coords = make_coords(&[2, 0]);
-        let forwarder = make_node_id(3);
+        let forwarder = make_node_addr(3);
 
         let mut request = LookupRequest::new(123, target, origin, coords, 5);
 
@@ -1060,21 +1060,21 @@ mod tests {
 
     #[test]
     fn test_lookup_request_ttl_exhausted() {
-        let target = make_node_id(1);
-        let origin = make_node_id(2);
+        let target = make_node_addr(1);
+        let origin = make_node_addr(2);
         let coords = make_coords(&[2, 0]);
 
         let mut request = LookupRequest::new(123, target, origin, coords, 1);
 
-        assert!(request.forward(&make_node_id(3)));
+        assert!(request.forward(&make_node_addr(3)));
         assert!(!request.can_forward());
-        assert!(!request.forward(&make_node_id(4)));
+        assert!(!request.forward(&make_node_addr(4)));
     }
 
     #[test]
     fn test_lookup_request_generate() {
-        let target = make_node_id(1);
-        let origin = make_node_id(2);
+        let target = make_node_addr(1);
+        let origin = make_node_addr(2);
         let coords = make_coords(&[2, 0]);
 
         let req1 = LookupRequest::generate(target, origin, coords.clone(), 5);
@@ -1088,7 +1088,7 @@ mod tests {
 
     #[test]
     fn test_lookup_response_proof_bytes() {
-        let target = make_node_id(42);
+        let target = make_node_addr(42);
         let bytes = LookupResponse::proof_bytes(12345, &target);
 
         assert_eq!(bytes.len(), 40); // 8 + 32
@@ -1166,17 +1166,17 @@ mod tests {
 
     #[test]
     fn test_coords_required() {
-        let err = CoordsRequired::new(make_address(1), make_node_id(2));
+        let err = CoordsRequired::new(make_address(1), make_node_addr(2));
 
         assert_eq!(err.dest_addr, make_address(1));
-        assert_eq!(err.reporter, make_node_id(2));
+        assert_eq!(err.reporter, make_node_addr(2));
     }
 
     // ===== PathBroken Tests =====
 
     #[test]
     fn test_path_broken() {
-        let err = PathBroken::new(make_address(1), make_address(2), make_node_id(3))
+        let err = PathBroken::new(make_address(1), make_address(2), make_node_addr(3))
             .with_last_coords(make_coords(&[2, 0]));
 
         assert!(err.last_known_coords.is_some());
@@ -1186,14 +1186,14 @@ mod tests {
 
     #[test]
     fn test_tree_announce() {
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
         let decl = ParentDeclaration::new(node, parent, 1, 1000);
         let ancestry = make_coords(&[1, 2, 0]);
 
         let announce = TreeAnnounce::new(decl, ancestry);
 
-        assert_eq!(announce.declaration.node_id(), &node);
+        assert_eq!(announce.declaration.node_addr(), &node);
         assert_eq!(announce.ancestry.depth(), 2);
     }
 }

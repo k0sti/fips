@@ -38,13 +38,13 @@ coordinates and distances.
 TreeAnnounce {
     sequence: u64,              // Monotonic, increments on parent change
     timestamp: u64,             // Unix timestamp (seconds)
-    parent: NodeId,             // 32 bytes, SHA-256(npub) of selected parent
+    parent: NodeAddr,             // 32 bytes, SHA-256(pubkey) of selected parent
     ancestry: Vec<AncestryEntry>,  // Path from self to root
     signature: Signature,       // 64 bytes, signs (sequence || timestamp || parent || ancestry)
 }
 
 AncestryEntry {
-    node_id: NodeId,            // 32 bytes
+    node_addr: NodeAddr,            // 32 bytes
     sequence: u64,              // That node's sequence number
     timestamp: u64,             // That node's timestamp
     signature: Signature,       // That node's signature over its declaration
@@ -59,7 +59,7 @@ Higher sequence numbers supersede lower ones for conflict resolution.
 **timestamp**: Used for distributed consistency. A declaration is considered
 stale if `now - timestamp > ROOT_TIMEOUT` (default 60 minutes for root).
 
-**parent**: The node_id of the selected parent. If `parent == self.node_id`,
+**parent**: The node_addr of the selected parent. If `parent == self.node_addr`,
 the node is declaring itself as root.
 
 **ancestry**: The chain from this node up to the root. The first entry is this
@@ -182,7 +182,7 @@ forward-compatible extension to larger filters.
 
 ```text
 for i in 0..hash_count:
-    bit_index = hash(node_id, i) % (8 * bits.len())
+    bit_index = hash(node_addr, i) % (8 * bits.len())
     if !bits[bit_index]: return false
 return true  // "maybe present"
 ```
@@ -191,7 +191,7 @@ return true  // "maybe present"
 
 A node's outgoing filter to peer Q contains:
 
-1. This node's own node_id
+1. This node's own node_addr
 2. Node_ids of leaf-only dependents (nodes using this node as sole peer)
 3. Entries from filters received from other peers (not Q) with TTL > 0
 
@@ -248,9 +248,9 @@ local Bloom filters.
 ```text
 LookupRequest {
     request_id: u64,            // Unique identifier for this request
-    target: NodeId,             // 32 bytes, who we're looking for
-    origin: NodeId,             // 32 bytes, who's asking
-    origin_coords: Vec<NodeId>, // Origin's ancestry (for return path)
+    target: NodeAddr,             // 32 bytes, who we're looking for
+    origin: NodeAddr,             // 32 bytes, who's asking
+    origin_coords: Vec<NodeAddr>, // Origin's ancestry (for return path)
     ttl: u8,                    // Remaining propagation hops
     visited: CompactBloomFilter,// ~256 bytes, prevents loops
 }
@@ -266,9 +266,9 @@ CompactBloomFilter {
 **request_id**: Randomly generated, used to match responses and detect
 duplicates.
 
-**target**: The node_id being searched for.
+**target**: The node_addr being searched for.
 
-**origin**: The node_id of the original requester. Used for response routing.
+**origin**: The node_addr of the original requester. Used for response routing.
 
 **origin_coords**: The requester's current tree coordinates. Enables greedy
 routing of the response back to origin.
@@ -288,7 +288,7 @@ When receiving LookupRequest:
 3. Decrement TTL
 
 4. Check if target is local:
-   - If target == self.node_id: generate LookupResponse
+   - If target == self.node_addr: generate LookupResponse
    - If target in local peer_filters: may respond on behalf (optional)
 
 5. If TTL > 0 and not found locally:
@@ -313,8 +313,8 @@ LookupResponse returns the target's coordinates to the requester.
 ```text
 LookupResponse {
     request_id: u64,            // Echoes LookupRequest.request_id
-    target: NodeId,             // 32 bytes, confirms who was found
-    target_coords: Vec<NodeId>, // Target's ancestry (the key payload)
+    target: NodeAddr,             // 32 bytes, confirms who was found
+    target_coords: Vec<NodeAddr>, // Target's ancestry (the key payload)
     proof: Signature,           // 64 bytes, target signs to prove existence
 }
 ```
@@ -384,7 +384,7 @@ handshake completion.
 
 ## 8. Encoding
 
-All multi-byte integers are little-endian. NodeId is 32 bytes (SHA-256 hash).
+All multi-byte integers are little-endian. NodeAddr is 32 bytes (SHA-256 hash).
 Signatures are 64 bytes (secp256k1 Schnorr).
 
 Variable-length fields (ancestry, coordinates) are prefixed with a 2-byte
@@ -431,7 +431,7 @@ Propagates spanning tree state between directly connected peers.
 │  │   0    │ msg_type         │ 1 byte    │ 0x10                          │  │
 │  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
 │  │   9    │ timestamp        │ 8 bytes   │ u64 LE, Unix seconds          │  │
-│  │  17    │ parent           │ 32 bytes  │ NodeId of selected parent     │  │
+│  │  17    │ parent           │ 32 bytes  │ NodeAddr of selected parent     │  │
 │  │  49    │ ancestry_count   │ 2 bytes   │ u16 LE, number of entries     │  │
 │  │  51    │ ancestry[0..n]   │ 112 × n   │ AncestryEntry array           │  │
 │  │  ...   │ signature        │ 64 bytes  │ Schnorr sig over all above    │  │
@@ -442,7 +442,7 @@ Propagates spanning tree state between directly connected peers.
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
-│  │   0    │ node_id          │ 32 bytes  │ SHA-256(npub) of this node    │  │
+│  │   0    │ node_addr          │ 32 bytes  │ SHA-256(pubkey) of this node    │  │
 │  │  32    │ sequence         │ 8 bytes   │ u64 LE, node's seq number     │  │
 │  │  40    │ timestamp        │ 8 bytes   │ u64 LE, node's timestamp      │  │
 │  │  48    │ signature        │ 64 bytes  │ Node's sig over its decl      │  │
@@ -467,29 +467,29 @@ PLAINTEXT BYTES (hex layout):
 10                               ← msg_type = TreeAnnounce
 05 00 00 00 00 00 00 00          ← sequence = 5
 C3 B2 A1 67 00 00 00 00          ← timestamp (Unix seconds)
-[32 bytes P1's node_id]          ← parent
+[32 bytes P1's node_addr]          ← parent
 04 00                            ← ancestry_count = 4
 
 ANCESTRY[0] - Self (D):
-  [32 bytes D's node_id]
+  [32 bytes D's node_addr]
   05 00 00 00 00 00 00 00        ← D's sequence
   C3 B2 A1 67 00 00 00 00        ← D's timestamp
   [64 bytes D's signature]
 
 ANCESTRY[1] - Parent (P1):
-  [32 bytes P1's node_id]
+  [32 bytes P1's node_addr]
   0A 00 00 00 00 00 00 00        ← P1's sequence
   00 B0 A1 67 00 00 00 00        ← P1's timestamp
   [64 bytes P1's signature]
 
 ANCESTRY[2] - Grandparent (P2):
-  [32 bytes P2's node_id]
+  [32 bytes P2's node_addr]
   03 00 00 00 00 00 00 00        ← P2's sequence
   00 A0 A1 67 00 00 00 00        ← P2's timestamp
   [64 bytes P2's signature]
 
 ANCESTRY[3] - Root:
-  [32 bytes Root's node_id]
+  [32 bytes Root's node_addr]
   01 00 00 00 00 00 00 00        ← Root's sequence
   00 90 A1 67 00 00 00 00        ← Root's timestamp
   [64 bytes Root's signature]
@@ -540,10 +540,10 @@ Propagates Bloom filter reachability information.
 │  │ bits 0-7  │ bits 8-15 │     │ bits 8184-8191                       │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  To test membership of node_id:                                             │
+│  To test membership of node_addr:                                             │
 │    filter_bits = 8 * (512 << size_class)  // 8192 for v1                    │
 │    for i in 0..hash_count:                                                  │
-│      bit_index = hash(node_id, i) % filter_bits                             │
+│      bit_index = hash(node_addr, i) % filter_bits                             │
 │      if !bits[bit_index]: return false                                      │
 │    return true  // "maybe present"                                          │
 │                                                                             │
@@ -585,8 +585,8 @@ Discovers tree coordinates for distant destinations.
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
 │  │   0    │ msg_type         │ 1 byte    │ 0x12                          │  │
 │  │   1    │ request_id       │ 8 bytes   │ u64 LE, unique identifier     │  │
-│  │   9    │ target           │ 32 bytes  │ NodeId being searched for     │  │
-│  │  41    │ origin           │ 32 bytes  │ NodeId of requester           │  │
+│  │   9    │ target           │ 32 bytes  │ NodeAddr being searched for     │  │
+│  │  41    │ origin           │ 32 bytes  │ NodeAddr of requester           │  │
 │  │  73    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
 │  │  74    │ origin_coords_cnt│ 2 bytes   │ u16 LE                        │  │
 │  │  76    │ origin_coords    │ 32 × n    │ Requester's ancestry          │  │
@@ -611,8 +611,8 @@ Discovers tree coordinates for distant destinations.
 PLAINTEXT BYTES:
 12                               ← msg_type = LookupRequest
 [8 bytes request_id]             ← random unique ID
-[32 bytes target node_id]        ← who we're looking for
-[32 bytes origin node_id]        ← who's asking
+[32 bytes target node_addr]        ← who we're looking for
+[32 bytes origin node_addr]        ← who's asking
 08                               ← ttl = 8
 04 00                            ← origin_coords_count = 4
 [32 bytes] × 4                   ← origin's ancestry (128 bytes)
@@ -638,7 +638,7 @@ Returns target's coordinates to the requester.
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
 │  │   0    │ msg_type         │ 1 byte    │ 0x13                          │  │
 │  │   1    │ request_id       │ 8 bytes   │ u64 LE, echoes request        │  │
-│  │   9    │ target           │ 32 bytes  │ NodeId that was found         │  │
+│  │   9    │ target           │ 32 bytes  │ NodeAddr that was found         │  │
 │  │  41    │ target_coords_cnt│ 2 bytes   │ u16 LE                        │  │
 │  │  43    │ target_coords    │ 32 × n    │ Target's ancestry to root     │  │
 │  │  ...   │ proof            │ 64 bytes  │ Target's signature            │  │
@@ -664,7 +664,7 @@ Returns target's coordinates to the requester.
 PLAINTEXT BYTES:
 13                               ← msg_type = LookupResponse
 [8 bytes request_id]             ← echoed from request
-[32 bytes target node_id]        ← confirms who was found
+[32 bytes target node_addr]        ← confirms who was found
 05 00                            ← target_coords_count = 5
 [32 bytes] × 5                   ← target's ancestry (160 bytes)
 [64 bytes proof signature]       ← target signs to prove existence

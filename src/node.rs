@@ -23,7 +23,7 @@ use crate::wire::{
     build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
     DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2,
 };
-use crate::{Config, ConfigError, Identity, IdentityError, NodeId, PeerIdentity};
+use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use std::collections::HashMap;
 use std::fmt;
 use std::thread::{self, JoinHandle};
@@ -56,10 +56,10 @@ pub enum NodeError {
     ConnectionNotFound(LinkId),
 
     #[error("peer not found: {0:?}")]
-    PeerNotFound(NodeId),
+    PeerNotFound(NodeAddr),
 
     #[error("peer already exists: {0:?}")]
-    PeerAlreadyExists(NodeId),
+    PeerAlreadyExists(NodeAddr),
 
     #[error("connection already exists for link: {0}")]
     ConnectionAlreadyExists(LinkId),
@@ -142,7 +142,7 @@ type AddrKey = (TransportId, TransportAddr);
 ///
 /// Peers go through two phases:
 /// 1. **Connection phase** (`connections`): Handshake in progress, indexed by LinkId
-/// 2. **Active phase** (`peers`): Authenticated, indexed by NodeId
+/// 2. **Active phase** (`peers`): Authenticated, indexed by NodeAddr
 ///
 /// The `addr_to_link` map enables dispatching incoming packets to the right
 /// connection before authentication completes.
@@ -195,8 +195,8 @@ pub struct Node {
 
     // === Peers (Active Phase) ===
     /// Authenticated peers.
-    /// Indexed by NodeId (verified identity).
-    peers: HashMap<NodeId, ActivePeer>,
+    /// Indexed by NodeAddr (verified identity).
+    peers: HashMap<NodeAddr, ActivePeer>,
 
     // === Resource Limits ===
     /// Maximum connections (0 = unlimited).
@@ -227,9 +227,9 @@ pub struct Node {
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
-    /// O(1) lookup: (transport_id, our_index) → NodeId.
+    /// O(1) lookup: (transport_id, our_index) → NodeAddr.
     /// This maps our session index to the peer that uses it.
-    peers_by_index: HashMap<(TransportId, u32), NodeId>,
+    peers_by_index: HashMap<(TransportId, u32), NodeAddr>,
     /// Pending outbound handshakes by our sender_idx.
     /// Tracks which LinkId corresponds to which session index.
     pending_outbound: HashMap<(TransportId, u32), LinkId>,
@@ -243,13 +243,13 @@ impl Node {
     /// Create a new node from configuration.
     pub fn new(config: Config) -> Result<Self, NodeError> {
         let identity = config.create_identity()?;
-        let node_id = *identity.node_id();
+        let node_addr = *identity.node_addr();
         let is_leaf_only = config.is_leaf_only();
 
         let bloom_state = if is_leaf_only {
-            BloomState::leaf_only(node_id)
+            BloomState::leaf_only(node_addr)
         } else {
-            BloomState::new(node_id)
+            BloomState::new(node_addr)
         };
 
         let tun_state = if config.tun.enabled {
@@ -259,7 +259,7 @@ impl Node {
         };
 
         // Initialize tree state with signed self-declaration
-        let mut tree_state = TreeState::new(node_id);
+        let mut tree_state = TreeState::new(node_addr);
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
@@ -298,7 +298,7 @@ impl Node {
 
     /// Create a node with a specific identity.
     pub fn with_identity(identity: Identity, config: Config) -> Self {
-        let node_id = *identity.node_id();
+        let node_addr = *identity.node_addr();
         let tun_state = if config.tun.enabled {
             TunState::Configured
         } else {
@@ -306,7 +306,7 @@ impl Node {
         };
 
         // Initialize tree state with signed self-declaration
-        let mut tree_state = TreeState::new(node_id);
+        let mut tree_state = TreeState::new(node_addr);
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
@@ -317,7 +317,7 @@ impl Node {
             state: NodeState::Created,
             is_leaf_only: false,
             tree_state,
-            bloom_state: BloomState::new(node_id),
+            bloom_state: BloomState::new(node_addr),
             coord_cache: CoordCache::with_defaults(),
             transports: HashMap::new(),
             links: HashMap::new(),
@@ -347,7 +347,7 @@ impl Node {
     pub fn leaf_only(config: Config) -> Result<Self, NodeError> {
         let mut node = Self::new(config)?;
         node.is_leaf_only = true;
-        node.bloom_state = BloomState::leaf_only(*node.identity.node_id());
+        node.bloom_state = BloomState::leaf_only(*node.identity.node_addr());
         Ok(node)
     }
 
@@ -428,10 +428,10 @@ impl Node {
             }
         })?;
 
-        let peer_node_id = *peer_identity.node_id();
+        let peer_node_addr = *peer_identity.node_addr();
 
         // Check if peer already exists (fully authenticated)
-        if self.peers.contains_key(&peer_node_id) {
+        if self.peers.contains_key(&peer_node_addr) {
             debug!(
                 npub = %peer_config.npub,
                 "Peer already exists, skipping"
@@ -442,7 +442,7 @@ impl Node {
         // Check if connection already in progress to this peer
         let already_connecting = self.connections.values().any(|conn| {
             conn.expected_identity()
-                .map(|id| id.node_id() == &peer_node_id)
+                .map(|id| id.node_addr() == &peer_node_addr)
                 .unwrap_or(false)
         });
         if already_connecting {
@@ -545,7 +545,7 @@ impl Node {
 
             info!("Peer connection initiated{}", alias_display);
             info!("  npub: {}", peer_config.npub);
-            info!("  node_id: {}", peer_node_id);
+            info!("  node_addr: {}", peer_node_addr);
             info!("  transport: {}", addr.transport);
             info!("  addr: {}", addr.addr);
             info!("  link_id: {}", link_id);
@@ -599,9 +599,9 @@ impl Node {
         &self.identity
     }
 
-    /// Get this node's NodeId.
-    pub fn node_id(&self) -> &NodeId {
-        self.identity.node_id()
+    /// Get this node's NodeAddr.
+    pub fn node_addr(&self) -> &NodeAddr {
+        self.identity.node_addr()
     }
 
     /// Get this node's npub.
@@ -855,23 +855,23 @@ impl Node {
             .remove(&link_id)
             .ok_or(NodeError::ConnectionNotFound(link_id))?;
 
-        let peer_node_id = *verified_identity.node_id();
+        let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = connection.is_outbound();
 
         // Check for cross-connection
-        if let Some(existing_peer) = self.peers.get(&peer_node_id) {
+        if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
             let existing_link_id = existing_peer.link_id();
 
             // Determine which connection wins
             let this_wins = cross_connection_winner(
-                self.identity.node_id(),
-                &peer_node_id,
+                self.identity.node_addr(),
+                &peer_node_addr,
                 is_outbound,
             );
 
             if this_wins {
                 // This connection wins, replace the existing peer
-                let old_peer = self.peers.remove(&peer_node_id).unwrap();
+                let old_peer = self.peers.remove(&peer_node_addr).unwrap();
                 let loser_link_id = old_peer.link_id();
 
                 // Create new active peer with stats from handshake
@@ -882,10 +882,10 @@ impl Node {
                     connection.link_stats().clone(),
                 );
 
-                self.peers.insert(peer_node_id, new_peer);
+                self.peers.insert(peer_node_addr, new_peer);
 
                 info!(
-                    node_id = %peer_node_id,
+                    node_addr = %peer_node_addr,
                     winner_link = %link_id,
                     loser_link = %loser_link_id,
                     "Cross-connection resolved: this connection won"
@@ -893,12 +893,12 @@ impl Node {
 
                 Ok(PromotionResult::CrossConnectionWon {
                     loser_link_id,
-                    node_id: peer_node_id,
+                    node_addr: peer_node_addr,
                 })
             } else {
                 // This connection loses, keep existing
                 info!(
-                    node_id = %peer_node_id,
+                    node_addr = %peer_node_addr,
                     winner_link = %existing_link_id,
                     loser_link = %link_id,
                     "Cross-connection resolved: this connection lost"
@@ -921,33 +921,33 @@ impl Node {
                 connection.link_stats().clone(),
             );
 
-            self.peers.insert(peer_node_id, new_peer);
+            self.peers.insert(peer_node_addr, new_peer);
 
             info!(
-                node_id = %peer_node_id,
+                node_addr = %peer_node_addr,
                 link_id = %link_id,
                 "Connection promoted to active peer"
             );
 
-            Ok(PromotionResult::Promoted(peer_node_id))
+            Ok(PromotionResult::Promoted(peer_node_addr))
         }
     }
 
     // === Peer Management (Active Phase) ===
 
-    /// Get a peer by NodeId.
-    pub fn get_peer(&self, node_id: &NodeId) -> Option<&ActivePeer> {
-        self.peers.get(node_id)
+    /// Get a peer by NodeAddr.
+    pub fn get_peer(&self, node_addr: &NodeAddr) -> Option<&ActivePeer> {
+        self.peers.get(node_addr)
     }
 
-    /// Get a mutable peer by NodeId.
-    pub fn get_peer_mut(&mut self, node_id: &NodeId) -> Option<&mut ActivePeer> {
-        self.peers.get_mut(node_id)
+    /// Get a mutable peer by NodeAddr.
+    pub fn get_peer_mut(&mut self, node_addr: &NodeAddr) -> Option<&mut ActivePeer> {
+        self.peers.get_mut(node_addr)
     }
 
     /// Remove a peer.
-    pub fn remove_peer(&mut self, node_id: &NodeId) -> Option<ActivePeer> {
-        self.peers.remove(node_id)
+    pub fn remove_peer(&mut self, node_addr: &NodeAddr) -> Option<ActivePeer> {
+        self.peers.remove(node_addr)
     }
 
     /// Iterate over all peers.
@@ -956,7 +956,7 @@ impl Node {
     }
 
     /// Iterate over all peer node IDs.
-    pub fn peer_ids(&self) -> impl Iterator<Item = &NodeId> {
+    pub fn peer_ids(&self) -> impl Iterator<Item = &NodeAddr> {
         self.peers.keys()
     }
 
@@ -975,13 +975,13 @@ impl Node {
     /// Find next hop for a destination (stub).
     ///
     /// Returns the peer that minimizes tree distance to the destination.
-    pub fn find_next_hop(&self, _dest_node_id: &NodeId) -> Option<&ActivePeer> {
+    pub fn find_next_hop(&self, _dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
         // Stub: would implement greedy tree routing
         None
     }
 
     /// Check if a destination is in any peer's bloom filter.
-    pub fn destination_in_filters(&self, dest: &NodeId) -> Vec<&ActivePeer> {
+    pub fn destination_in_filters(&self, dest: &NodeAddr) -> Vec<&ActivePeer> {
         self.peers.values().filter(|p| p.may_reach(dest)).collect()
     }
 
@@ -1153,7 +1153,7 @@ impl Node {
 
         // O(1) session lookup by our receiver index
         let key = (packet.transport_id, header.receiver_idx.as_u32());
-        let node_id = match self.peers_by_index.get(&key) {
+        let node_addr = match self.peers_by_index.get(&key) {
             Some(id) => *id,
             None => {
                 // Unknown index - could be stale session or attack
@@ -1166,7 +1166,7 @@ impl Node {
             }
         };
 
-        let peer = match self.peers.get_mut(&node_id) {
+        let peer = match self.peers.get_mut(&node_addr) {
             Some(p) => p,
             None => {
                 // Peer removed but index not cleaned up - fix it
@@ -1180,7 +1180,7 @@ impl Node {
             Some(s) => s,
             None => {
                 warn!(
-                    node_id = %node_id,
+                    node_addr = %node_addr,
                     "Peer in index map has no session"
                 );
                 return;
@@ -1193,7 +1193,7 @@ impl Node {
             Ok(p) => p,
             Err(e) => {
                 debug!(
-                    node_id = %node_id,
+                    node_addr = %node_addr,
                     counter = header.counter,
                     error = %e,
                     "Decryption failed"
@@ -1212,7 +1212,7 @@ impl Node {
         peer.touch(packet.timestamp_ms);
 
         // Dispatch to link message handler
-        self.dispatch_link_message(&node_id, &plaintext).await;
+        self.dispatch_link_message(&node_addr, &plaintext).await;
     }
 
     /// Handle handshake message 1 (discriminator 0x01).
@@ -1284,14 +1284,14 @@ impl Node {
                 return;
             }
         };
-        let peer_node_id = *peer_identity.node_id();
+        let peer_node_addr = *peer_identity.node_addr();
 
         // Check if this peer is already connected
-        if self.peers.contains_key(&peer_node_id) {
+        if self.peers.contains_key(&peer_node_addr) {
             // TODO: Handle reconnection case (future: session replacement)
             self.msg1_rate_limiter.complete_handshake();
             debug!(
-                node_id = %peer_node_id,
+                node_addr = %peer_node_addr,
                 "Peer already connected, ignoring msg1"
             );
             return;
@@ -1355,7 +1355,7 @@ impl Node {
         }
 
         info!(
-            node_id = %peer_node_id,
+            node_addr = %peer_node_addr,
             link_id = %link_id,
             our_index = %our_index,
             "Inbound handshake initiated"
@@ -1425,7 +1425,7 @@ impl Node {
         };
 
         info!(
-            node_id = %peer_identity.node_id(),
+            node_addr = %peer_identity.node_addr(),
             link_id = %link_id,
             their_index = %header.sender_idx,
             "Outbound handshake completed"
@@ -1439,15 +1439,15 @@ impl Node {
                 self.pending_outbound.remove(&key);
 
                 match result {
-                    PromotionResult::Promoted(node_id) => {
+                    PromotionResult::Promoted(node_addr) => {
                         info!(
-                            node_id = %node_id,
+                            node_addr = %node_addr,
                             "Peer promoted to active"
                         );
                     }
-                    PromotionResult::CrossConnectionWon { loser_link_id, node_id } => {
+                    PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
                         info!(
-                            node_id = %node_id,
+                            node_addr = %node_addr,
                             loser_link_id = %loser_link_id,
                             "Cross-connection won"
                         );
@@ -1473,7 +1473,7 @@ impl Node {
     /// Dispatch a decrypted link message to the appropriate handler.
     ///
     /// Link messages are protocol messages exchanged between authenticated peers.
-    async fn dispatch_link_message(&mut self, _from: &NodeId, plaintext: &[u8]) {
+    async fn dispatch_link_message(&mut self, _from: &NodeAddr, plaintext: &[u8]) {
         if plaintext.is_empty() {
             return;
         }
@@ -1584,7 +1584,7 @@ impl Node {
 impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
-            .field("node_id", self.node_id())
+            .field("node_addr", self.node_addr())
             .field("state", &self.state)
             .field("is_leaf_only", &self.is_leaf_only)
             .field("connections", &self.connection_count())
@@ -1607,10 +1607,10 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     fn make_peer_identity() -> PeerIdentity {
@@ -1632,12 +1632,12 @@ mod tests {
     #[test]
     fn test_node_with_identity() {
         let identity = Identity::generate();
-        let expected_node_id = *identity.node_id();
+        let expected_node_addr = *identity.node_addr();
         let config = Config::new();
 
         let node = Node::with_identity(identity, config);
 
-        assert_eq!(node.node_id(), &expected_node_id);
+        assert_eq!(node.node_addr(), &expected_node_addr);
     }
 
     #[test]
@@ -1783,7 +1783,7 @@ mod tests {
         let mut node = make_node();
 
         let identity = make_peer_identity();
-        let node_id = *identity.node_id();
+        let node_addr = *identity.node_addr();
         let link_id = LinkId::new(1);
         let conn = PeerConnection::outbound(link_id, identity.clone(), 1000);
 
@@ -1797,7 +1797,7 @@ mod tests {
         assert_eq!(node.connection_count(), 0);
         assert_eq!(node.peer_count(), 1);
 
-        let peer = node.get_peer(&node_id).unwrap();
+        let peer = node.get_peer(&node_addr).unwrap();
         assert_eq!(peer.authenticated_at(), 2000);
     }
 
@@ -1807,7 +1807,7 @@ mod tests {
 
         // First connection and promotion (becomes active peer)
         let identity = make_peer_identity();
-        let node_id = *identity.node_id();
+        let node_addr = *identity.node_addr();
         let link_id1 = LinkId::new(1);
         let conn1 = PeerConnection::outbound(link_id1, identity.clone(), 1000);
 
@@ -1815,7 +1815,7 @@ mod tests {
         node.promote_connection(link_id1, identity.clone(), 1500).unwrap();
 
         assert_eq!(node.peer_count(), 1);
-        assert_eq!(node.get_peer(&node_id).unwrap().link_id(), link_id1);
+        assert_eq!(node.get_peer(&node_addr).unwrap().link_id(), link_id1);
 
         // Second connection (simulates cross-connection scenario)
         let link_id2 = LinkId::new(2);
@@ -1830,11 +1830,11 @@ mod tests {
         match result {
             PromotionResult::CrossConnectionWon { loser_link_id, .. } => {
                 assert_eq!(loser_link_id, link_id1);
-                assert_eq!(node.get_peer(&node_id).unwrap().link_id(), link_id2);
+                assert_eq!(node.get_peer(&node_addr).unwrap().link_id(), link_id2);
             }
             PromotionResult::CrossConnectionLost { winner_link_id } => {
                 assert_eq!(winner_link_id, link_id1);
-                assert_eq!(node.get_peer(&node_id).unwrap().link_id(), link_id1);
+                assert_eq!(node.get_peer(&node_addr).unwrap().link_id(), link_id1);
             }
             PromotionResult::Promoted(_) => {
                 panic!("Expected cross-connection, got normal promotion");
@@ -1912,7 +1912,7 @@ mod tests {
 
         // Add a healthy peer
         let identity1 = make_peer_identity();
-        let node_id1 = *identity1.node_id();
+        let node_addr1 = *identity1.node_addr();
         let link_id1 = LinkId::new(1);
         let conn1 = PeerConnection::outbound(link_id1, identity1.clone(), 1000);
         node.add_connection(conn1).unwrap();
@@ -1927,19 +1927,19 @@ mod tests {
 
         // Add a third peer and mark it disconnected (not sendable)
         let identity3 = make_peer_identity();
-        let node_id3 = *identity3.node_id();
+        let node_addr3 = *identity3.node_addr();
         let link_id3 = LinkId::new(3);
         let conn3 = PeerConnection::outbound(link_id3, identity3.clone(), 1000);
         node.add_connection(conn3).unwrap();
         node.promote_connection(link_id3, identity3, 2000).unwrap();
-        node.get_peer_mut(&node_id3).unwrap().mark_disconnected();
+        node.get_peer_mut(&node_addr3).unwrap().mark_disconnected();
 
         assert_eq!(node.peer_count(), 3);
         assert_eq!(node.sendable_peer_count(), 2);
 
         let sendable: Vec<_> = node.sendable_peers().collect();
         assert_eq!(sendable.len(), 2);
-        assert!(sendable.iter().any(|p| p.node_id() == &node_id1));
+        assert!(sendable.iter().any(|p| p.node_addr() == &node_addr1));
     }
 
     // === RX Loop Tests ===
@@ -1979,17 +1979,17 @@ mod tests {
     fn test_node_peers_by_index_tracking() {
         let mut node = make_node();
         let transport_id = TransportId::new(1);
-        let node_id = make_node_id(42);
+        let node_addr = make_node_addr(42);
 
         // Allocate an index
         let index = node.index_allocator.allocate().unwrap();
 
         // Track in peers_by_index
-        node.peers_by_index.insert((transport_id, index.as_u32()), node_id);
+        node.peers_by_index.insert((transport_id, index.as_u32()), node_addr);
 
         // Verify lookup
         let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
-        assert_eq!(found, Some(&node_id));
+        assert_eq!(found, Some(&node_addr));
 
         // Clean up
         node.peers_by_index.remove(&(transport_id, index.as_u32()));

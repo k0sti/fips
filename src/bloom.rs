@@ -15,7 +15,7 @@
 //! overcounted by assuming mesh connectivity vs tree structure with TTL-bounded
 //! propagation. Actual filter occupancy is ~250-800 entries for typical nodes.
 
-use crate::NodeId;
+use crate::NodeAddr;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use thiserror::Error;
@@ -114,10 +114,10 @@ impl BloomFilter {
         Self::from_bytes(bytes.to_vec(), hash_count)
     }
 
-    /// Insert a NodeId into the filter.
-    pub fn insert(&mut self, node_id: &NodeId) {
+    /// Insert a NodeAddr into the filter.
+    pub fn insert(&mut self, node_addr: &NodeAddr) {
         for i in 0..self.hash_count {
-            let bit_index = self.hash(node_id.as_bytes(), i);
+            let bit_index = self.hash(node_addr.as_bytes(), i);
             self.set_bit(bit_index);
         }
     }
@@ -130,12 +130,12 @@ impl BloomFilter {
         }
     }
 
-    /// Check if the filter might contain a NodeId.
+    /// Check if the filter might contain a NodeAddr.
     ///
     /// Returns `true` if the item might be in the set (possible false positive).
     /// Returns `false` if the item is definitely not in the set.
-    pub fn contains(&self, node_id: &NodeId) -> bool {
-        self.contains_bytes(node_id.as_bytes())
+    pub fn contains(&self, node_addr: &NodeAddr) -> bool {
+        self.contains_bytes(node_addr.as_bytes())
     }
 
     /// Check if the filter might contain raw bytes.
@@ -293,27 +293,27 @@ impl fmt::Debug for BloomFilter {
 /// Tracks local filter state and what needs to be sent to peers.
 #[derive(Clone, Debug)]
 pub struct BloomState {
-    /// This node's NodeId (always included in outgoing filters).
-    own_node_id: NodeId,
+    /// This node's NodeAddr (always included in outgoing filters).
+    own_node_addr: NodeAddr,
     /// Leaf-only nodes we speak for (included in our filter).
-    leaf_dependents: HashSet<NodeId>,
+    leaf_dependents: HashSet<NodeAddr>,
     /// Whether this node operates in leaf-only mode.
     is_leaf_only: bool,
     /// Rate limiting: minimum interval between outgoing updates (milliseconds).
     update_debounce_ms: u64,
     /// Timestamp of last update sent (per peer, in milliseconds).
-    last_update_sent: HashMap<NodeId, u64>,
+    last_update_sent: HashMap<NodeAddr, u64>,
     /// Peers that need a filter update.
-    pending_updates: HashSet<NodeId>,
+    pending_updates: HashSet<NodeAddr>,
     /// Current sequence number for outgoing filters.
     sequence: u64,
 }
 
 impl BloomState {
     /// Create new Bloom state for a node.
-    pub fn new(own_node_id: NodeId) -> Self {
+    pub fn new(own_node_addr: NodeAddr) -> Self {
         Self {
-            own_node_id,
+            own_node_addr,
             leaf_dependents: HashSet::new(),
             is_leaf_only: false,
             update_debounce_ms: 500,
@@ -324,15 +324,15 @@ impl BloomState {
     }
 
     /// Create state for a leaf-only node.
-    pub fn leaf_only(own_node_id: NodeId) -> Self {
-        let mut state = Self::new(own_node_id);
+    pub fn leaf_only(own_node_addr: NodeAddr) -> Self {
+        let mut state = Self::new(own_node_addr);
         state.is_leaf_only = true;
         state
     }
 
     /// Get the node's own ID.
-    pub fn own_node_id(&self) -> &NodeId {
-        &self.own_node_id
+    pub fn own_node_addr(&self) -> &NodeAddr {
+        &self.own_node_addr
     }
 
     /// Check if this is a leaf-only node.
@@ -362,17 +362,17 @@ impl BloomState {
     }
 
     /// Add a leaf dependent that we'll include in our filter.
-    pub fn add_leaf_dependent(&mut self, node_id: NodeId) {
-        self.leaf_dependents.insert(node_id);
+    pub fn add_leaf_dependent(&mut self, node_addr: NodeAddr) {
+        self.leaf_dependents.insert(node_addr);
     }
 
     /// Remove a leaf dependent.
-    pub fn remove_leaf_dependent(&mut self, node_id: &NodeId) -> bool {
-        self.leaf_dependents.remove(node_id)
+    pub fn remove_leaf_dependent(&mut self, node_addr: &NodeAddr) -> bool {
+        self.leaf_dependents.remove(node_addr)
     }
 
     /// Get the set of leaf dependents.
-    pub fn leaf_dependents(&self) -> &HashSet<NodeId> {
+    pub fn leaf_dependents(&self) -> &HashSet<NodeAddr> {
         &self.leaf_dependents
     }
 
@@ -382,22 +382,22 @@ impl BloomState {
     }
 
     /// Mark that a peer needs an update.
-    pub fn mark_update_needed(&mut self, peer_id: NodeId) {
+    pub fn mark_update_needed(&mut self, peer_id: NodeAddr) {
         self.pending_updates.insert(peer_id);
     }
 
     /// Mark all peers as needing updates.
-    pub fn mark_all_updates_needed(&mut self, peer_ids: impl IntoIterator<Item = NodeId>) {
+    pub fn mark_all_updates_needed(&mut self, peer_ids: impl IntoIterator<Item = NodeAddr>) {
         self.pending_updates.extend(peer_ids);
     }
 
     /// Check if a peer needs an update.
-    pub fn needs_update(&self, peer_id: &NodeId) -> bool {
+    pub fn needs_update(&self, peer_id: &NodeAddr) -> bool {
         self.pending_updates.contains(peer_id)
     }
 
     /// Check if we should send an update to a peer (respecting debounce).
-    pub fn should_send_update(&self, peer_id: &NodeId, current_time_ms: u64) -> bool {
+    pub fn should_send_update(&self, peer_id: &NodeAddr, current_time_ms: u64) -> bool {
         if !self.pending_updates.contains(peer_id) {
             return false;
         }
@@ -409,7 +409,7 @@ impl BloomState {
     }
 
     /// Record that we sent an update to a peer.
-    pub fn record_update_sent(&mut self, peer_id: NodeId, current_time_ms: u64) {
+    pub fn record_update_sent(&mut self, peer_id: NodeAddr, current_time_ms: u64) {
         self.last_update_sent.insert(peer_id, current_time_ms);
         self.pending_updates.remove(&peer_id);
     }
@@ -430,13 +430,13 @@ impl BloomState {
     /// The filter for `exclude_peer` is excluded to prevent routing loops.
     pub fn compute_outgoing_filter(
         &self,
-        exclude_peer: &NodeId,
-        peer_filters: &HashMap<NodeId, (BloomFilter, u8)>, // (filter, ttl)
+        exclude_peer: &NodeAddr,
+        peer_filters: &HashMap<NodeAddr, (BloomFilter, u8)>, // (filter, ttl)
     ) -> BloomFilter {
         let mut filter = BloomFilter::new();
 
         // Always include ourselves
-        filter.insert(&self.own_node_id);
+        filter.insert(&self.own_node_addr);
 
         // Include leaf dependents
         for dep in &self.leaf_dependents {
@@ -457,7 +457,7 @@ impl BloomState {
     /// Create a base filter containing just this node and its dependents.
     pub fn base_filter(&self) -> BloomFilter {
         let mut filter = BloomFilter::new();
-        filter.insert(&self.own_node_id);
+        filter.insert(&self.own_node_addr);
         for dep in &self.leaf_dependents {
             filter.insert(dep);
         }
@@ -469,10 +469,10 @@ impl BloomState {
 mod tests {
     use super::*;
 
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     // ===== BloomFilter Tests =====
@@ -489,8 +489,8 @@ mod tests {
     #[test]
     fn test_bloom_filter_insert_contains() {
         let mut filter = BloomFilter::new();
-        let node1 = make_node_id(1);
-        let node2 = make_node_id(2);
+        let node1 = make_node_addr(1);
+        let node2 = make_node_addr(2);
 
         assert!(!filter.contains(&node1));
         assert!(!filter.contains(&node2));
@@ -507,13 +507,13 @@ mod tests {
         let mut filter = BloomFilter::new();
 
         for i in 0..100 {
-            let node = make_node_id(i);
+            let node = make_node_addr(i);
             filter.insert(&node);
         }
 
         // All inserted items should be found
         for i in 0..100 {
-            let node = make_node_id(i);
+            let node = make_node_addr(i);
             assert!(filter.contains(&node), "Node {} not found", i);
         }
 
@@ -527,8 +527,8 @@ mod tests {
         let mut filter1 = BloomFilter::new();
         let mut filter2 = BloomFilter::new();
 
-        let node1 = make_node_id(1);
-        let node2 = make_node_id(2);
+        let node1 = make_node_addr(1);
+        let node2 = make_node_addr(2);
 
         filter1.insert(&node1);
         filter2.insert(&node2);
@@ -544,8 +544,8 @@ mod tests {
         let mut filter1 = BloomFilter::new();
         let mut filter2 = BloomFilter::new();
 
-        let node1 = make_node_id(1);
-        let node2 = make_node_id(2);
+        let node1 = make_node_addr(1);
+        let node2 = make_node_addr(2);
 
         filter1.insert(&node1);
         filter2.insert(&node2);
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn test_bloom_filter_clear() {
         let mut filter = BloomFilter::new();
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
 
         filter.insert(&node);
         assert!(!filter.is_empty());
@@ -631,7 +631,7 @@ mod tests {
 
         // Insert some items
         for i in 0..50 {
-            filter.insert(&make_node_id(i));
+            filter.insert(&make_node_addr(i));
         }
 
         // Estimate should be reasonably close to 50
@@ -650,10 +650,10 @@ mod tests {
 
         assert_eq!(filter1, filter2);
 
-        filter1.insert(&make_node_id(1));
+        filter1.insert(&make_node_addr(1));
         assert_ne!(filter1, filter2);
 
-        filter2.insert(&make_node_id(1));
+        filter2.insert(&make_node_addr(1));
         assert_eq!(filter1, filter2);
     }
 
@@ -661,10 +661,10 @@ mod tests {
 
     #[test]
     fn test_bloom_state_new() {
-        let node = make_node_id(0);
+        let node = make_node_addr(0);
         let state = BloomState::new(node);
 
-        assert_eq!(state.own_node_id(), &node);
+        assert_eq!(state.own_node_addr(), &node);
         assert!(!state.is_leaf_only());
         assert_eq!(state.sequence(), 0);
         assert_eq!(state.leaf_dependent_count(), 0);
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_bloom_state_leaf_only() {
-        let node = make_node_id(0);
+        let node = make_node_addr(0);
         let state = BloomState::leaf_only(node);
 
         assert!(state.is_leaf_only());
@@ -680,11 +680,11 @@ mod tests {
 
     #[test]
     fn test_bloom_state_leaf_dependents() {
-        let node = make_node_id(0);
+        let node = make_node_addr(0);
         let mut state = BloomState::new(node);
 
-        let leaf1 = make_node_id(1);
-        let leaf2 = make_node_id(2);
+        let leaf1 = make_node_addr(1);
+        let leaf2 = make_node_addr(2);
 
         state.add_leaf_dependent(leaf1);
         state.add_leaf_dependent(leaf2);
@@ -698,8 +698,8 @@ mod tests {
 
     #[test]
     fn test_bloom_state_debounce() {
-        let node = make_node_id(0);
-        let peer = make_node_id(1);
+        let node = make_node_addr(0);
+        let peer = make_node_addr(1);
         let mut state = BloomState::new(node);
         state.set_update_debounce_ms(500);
 
@@ -721,7 +721,7 @@ mod tests {
 
     #[test]
     fn test_bloom_state_sequence() {
-        let node = make_node_id(0);
+        let node = make_node_addr(0);
         let mut state = BloomState::new(node);
 
         assert_eq!(state.sequence(), 0);
@@ -732,11 +732,11 @@ mod tests {
 
     #[test]
     fn test_bloom_state_pending_updates() {
-        let node = make_node_id(0);
+        let node = make_node_addr(0);
         let mut state = BloomState::new(node);
 
-        let peer1 = make_node_id(1);
-        let peer2 = make_node_id(2);
+        let peer1 = make_node_addr(1);
+        let peer2 = make_node_addr(2);
 
         assert!(!state.needs_update(&peer1));
 
@@ -755,37 +755,37 @@ mod tests {
 
     #[test]
     fn test_bloom_state_base_filter() {
-        let node = make_node_id(0);
+        let node = make_node_addr(0);
         let mut state = BloomState::new(node);
 
-        let leaf = make_node_id(1);
+        let leaf = make_node_addr(1);
         state.add_leaf_dependent(leaf);
 
         let filter = state.base_filter();
 
         assert!(filter.contains(&node));
         assert!(filter.contains(&leaf));
-        assert!(!filter.contains(&make_node_id(99)));
+        assert!(!filter.contains(&make_node_addr(99)));
     }
 
     #[test]
     fn test_bloom_state_compute_outgoing_filter() {
-        let my_node = make_node_id(0);
+        let my_node = make_node_addr(0);
         let mut state = BloomState::new(my_node);
 
-        let leaf = make_node_id(1);
+        let leaf = make_node_addr(1);
         state.add_leaf_dependent(leaf);
 
-        let peer1 = make_node_id(10);
-        let peer2 = make_node_id(20);
+        let peer1 = make_node_addr(10);
+        let peer2 = make_node_addr(20);
 
         // Create peer filters
         let mut filter1 = BloomFilter::new();
-        filter1.insert(&make_node_id(100));
-        filter1.insert(&make_node_id(101));
+        filter1.insert(&make_node_addr(100));
+        filter1.insert(&make_node_addr(101));
 
         let mut filter2 = BloomFilter::new();
-        filter2.insert(&make_node_id(200));
+        filter2.insert(&make_node_addr(200));
 
         let mut peer_filters = HashMap::new();
         peer_filters.insert(peer1, (filter1, 2)); // TTL 2
@@ -795,38 +795,38 @@ mod tests {
         let outgoing1 = state.compute_outgoing_filter(&peer1, &peer_filters);
         assert!(outgoing1.contains(&my_node)); // self
         assert!(outgoing1.contains(&leaf)); // leaf dependent
-        assert!(outgoing1.contains(&make_node_id(200))); // from peer2
+        assert!(outgoing1.contains(&make_node_addr(200))); // from peer2
         // peer1's nodes may or may not be present (depends on split brain)
 
         // Filter for peer2 should exclude peer2's contributions
         let outgoing2 = state.compute_outgoing_filter(&peer2, &peer_filters);
         assert!(outgoing2.contains(&my_node));
         assert!(outgoing2.contains(&leaf));
-        assert!(outgoing2.contains(&make_node_id(100))); // from peer1
-        assert!(outgoing2.contains(&make_node_id(101))); // from peer1
+        assert!(outgoing2.contains(&make_node_addr(100))); // from peer1
+        assert!(outgoing2.contains(&make_node_addr(101))); // from peer1
     }
 
     #[test]
     fn test_bloom_state_ttl_filtering() {
-        let my_node = make_node_id(0);
+        let my_node = make_node_addr(0);
         let state = BloomState::new(my_node);
 
-        let peer1 = make_node_id(10);
-        let peer2 = make_node_id(20);
+        let peer1 = make_node_addr(10);
+        let peer2 = make_node_addr(20);
 
         let mut filter1 = BloomFilter::new();
-        filter1.insert(&make_node_id(100));
+        filter1.insert(&make_node_addr(100));
 
         let mut filter2 = BloomFilter::new();
-        filter2.insert(&make_node_id(200));
+        filter2.insert(&make_node_addr(200));
 
         let mut peer_filters = HashMap::new();
         peer_filters.insert(peer1, (filter1, 1)); // TTL 1 - included
         peer_filters.insert(peer2, (filter2, 0)); // TTL 0 - excluded
 
-        let outgoing = state.compute_outgoing_filter(&make_node_id(99), &peer_filters);
+        let outgoing = state.compute_outgoing_filter(&make_node_addr(99), &peer_filters);
 
-        assert!(outgoing.contains(&make_node_id(100))); // TTL 1
-        assert!(!outgoing.contains(&make_node_id(200))); // TTL 0 excluded
+        assert!(outgoing.contains(&make_node_addr(100))); // TTL 1
+        assert!(!outgoing.contains(&make_node_addr(200))); // TTL 0 excluded
     }
 }

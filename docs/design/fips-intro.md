@@ -116,37 +116,47 @@ approach, enabling O(1) packet routing without relying on source addresses.
 
 ## Identity System
 
-FIPS uses Nostr keypairs (secp256k1) as node identities. The public key (npub)
-identifies the node; the private key (nsec) signs protocol messages and
-establishes encrypted sessions.
+FIPS uses Nostr keypairs (secp256k1) as node identities. The public key
+identifies the node; the private key signs protocol messages and establishes
+encrypted sessions.
 
-### Node ID Derivation
+The FIPS address (synonymous with the pubkey) is the primary means for
+application-layer software to identify communication endpoints. The
+bech32-encoded npub can be used interchangeably for user interface purposes.
+The FIPS datagram service is exposed to the application layer either via a
+native API to the FIPS node software, or through an IPv6 shim driver that
+converts the node identity into an IPv6 address and provides DNS resolution
+from npub to this address for traditional software.
 
-The npub is hashed to derive a node_id used for routing:
+### Node Address Derivation
+
+The pubkey is hashed to derive a node_addr used for routing:
 
 ```
-npub (secp256k1 x-only pubkey, 32 bytes)
+pubkey (secp256k1 x-only, 32 bytes)
   → SHA-256
-  → node_id (32 bytes)
+  → node_addr (32 bytes)
   → truncate with prefix
-  → FIPS address (128 bits, fd::/8)
+  → IPv6 address (128 bits, fd::/8)
 ```
 
-**Why hash the npub?** The node_id is the only identifier used at the protocol
-level; the associated npub cannot be derived from it. This one-way derivation
-also prevents "grinding" attacks—secp256k1 public keys can be shifted to achieve
-specific prefixes via modular addition, but targeting a node_id prefix requires
-full brute force against SHA-256.
+**Separation of concerns**: The keypair handles cryptographic operations (signing,
+encryption). The node_addr derived from the pubkey handles routing. This keeps
+cryptographic material out of routing tables and packet headers—the node_addr is
+the only identifier used at the protocol level, and the pubkey cannot be derived
+from it.
 
-**Separation of concerns**: The nsec/npub keypair handles cryptographic
-operations (signing, encryption). The node_id derived from the npub handles
-routing. This keeps cryptographic material out of routing tables and packet
-headers.
+The one-way hash also provides privacy from intermediate routing nodes. Routers
+see only node_addrs in packet headers—they can route traffic without learning
+the Nostr identities of the endpoints. An observer can verify "does this
+node_addr belong to pubkey X?" but cannot enumerate which pubkeys are
+communicating by inspecting traffic. Only the endpoints, which complete the
+Noise IK handshake, learn each other's pubkeys.
 
 ### Address Format
 
 When using the IPv6 protocol adapter, FIPS addresses use the IPv6 Unique Local
-Address (ULA) prefix `fd00::/8`, providing 120 bits from the node_id hash.
+Address (ULA) prefix `fd00::/8`, providing 120 bits from the node_addr hash.
 These are overlay identifiers—they appear in the TUN interface for application
 compatibility but are not routable on the underlying transport. The fd prefix
 ensures no collision with addresses that may be in use on the transport network.
@@ -162,6 +172,23 @@ the private key for their claimed identity.
 See [fips-wire-protocol.md](fips-wire-protocol.md) for the Noise IK handshake
 and [fips-session-protocol.md](fips-session-protocol.md) for end-to-end
 session establishment.
+
+### Terminology: Addresses and Identifiers
+
+FIPS uses several related but distinct identifiers at different protocol layers:
+
+| Term                       | Layer               | Visible To     | Description                                           |
+|----------------------------|---------------------|----------------|-------------------------------------------------------|
+| **FIPS address / pubkey**  | Application/Session | Endpoints only | 32-byte secp256k1 public key - the endpoint identity  |
+| **npub**                   | (encoding)          | Human readers  | Bech32 encoding of pubkey for display/config          |
+| **node_addr**              | Routing             | Routing nodes  | SHA-256(pubkey) - cannot be reversed to pubkey        |
+| **link_addr**              | Transport           | Direct peers   | IP:port, MAC, .onion - transport-specific             |
+| **IPv6 address**           | IPv6 shim           | Applications   | fd::/8 derived from node_addr - optional compatibility|
+
+**Privacy property**: The pubkey (FIPS address / Nostr identity) is never exposed to
+intermediate routing nodes. They see only the node_addr, a one-way hash. An observer
+can verify "does this node_addr belong to pubkey X?" but cannot derive the pubkey from
+traffic.
 
 ---
 
@@ -238,7 +265,7 @@ minimizes distance to the destination.
 
 ### Root Election
 
-The root is the node with the lexicographically smallest node_id among all
+The root is the node with the lexicographically smallest node_addr among all
 reachable nodes. This election is deterministic and requires no coordination—
 each node independently examines its view of the network and reaches the same
 conclusion.
@@ -270,7 +297,7 @@ unaffected by local path changes and don't receive updates for them.
 ### Partition Handling
 
 If the network partitions, each isolated segment elects its own root (the
-smallest node_id within that segment). When partitions merge, nodes in the
+smallest node_addr within that segment). When partitions merge, nodes in the
 segment with the larger root discover the globally smaller root and re-parent.
 The tree reconverges automatically.
 
@@ -293,14 +320,14 @@ through a given peer, with occasional false positives handled by backtracking.
 
 ### How It Works
 
-Each node maintains bloom filters summarizing which node_ids are reachable
+Each node maintains bloom filters summarizing which node_addrs are reachable
 through each of its peers. These filters propagate through the tree: a node
 aggregates filters from its children and announces the combined filter to its
 parent (and vice versa).
 
 When a node needs to reach an unknown destination:
 
-1. Check local bloom filters—which peers might be able to reach this node_id?
+1. Check local bloom filters—which peers might be able to reach this node_addr?
 2. Send a LookupRequest to peers whose filters indicate "maybe"
 3. The request propagates through the tree toward matching subtrees
 4. The destination responds with a LookupResponse containing its coordinates
@@ -317,7 +344,7 @@ Filters propagate in the opposite direction from tree announcements:
 - Tree state propagates upward (toward root) via ancestry chains
 - Bloom filters propagate downward (toward leaves) via subtree aggregation
 
-A node's filter contains all node_ids reachable through its subtree. The root's
+A node's filter contains all node_addrs reachable through its subtree. The root's
 filter contains everyone; leaf nodes have empty outbound filters.
 
 See [fips-routing.md](fips-routing.md) for bloom filter design and
@@ -490,11 +517,11 @@ Each entity in the network sees different information:
 |--------|---------|
 | Transport observer | Encrypted packets, timing, packet sizes |
 | Direct peer | Your npub (identity), traffic volume, timing |
-| Intermediate router | Source and destination node_ids, packet size |
+| Intermediate router | Source and destination node_addrs, packet size |
 | Destination | Your npub (identity), payload content |
 
-Intermediate routers see node_ids, not npubs. Since node_ids are derived from
-npubs via one-way SHA-256 hash, routers cannot determine the actual identities
+Intermediate routers see node_addrs, not npubs. Since node_addrs are derived from
+pubkeys via one-way SHA-256 hash, routers cannot determine the actual identities
 of the endpoints they route for.
 
 The session layer hides payload content from intermediate routers. The link
@@ -507,7 +534,7 @@ layer hides everything from passive observers on the underlying transport.
 FIPS combines these elements into a cohesive system that achieves its design
 goals:
 
-- **Self-sovereign identity** through Nostr keypairs, with node_ids providing
+- **Self-sovereign identity** through Nostr keypairs, with node_addrs providing
   routing-level privacy
 - **Transport agnosticism** via the transport abstraction layer, enabling the
   same routing logic across UDP, Ethernet/WiFi, Tor, and other link types

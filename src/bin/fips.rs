@@ -83,7 +83,7 @@ async fn main() {
     // Log node information
     info!("Node created:");
     info!("      npub: {}", node.npub());
-    info!("   node_id: {}", hex::encode(node.node_id().as_bytes()));
+    info!("   node_addr: {}", hex::encode(node.node_addr().as_bytes()));
     info!("   address: {}", node.identity().address());
     info!("     state: {}", node.state());
     info!(" leaf_only: {}", node.is_leaf_only());

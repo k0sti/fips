@@ -331,11 +331,11 @@ When using `PeerSlot` enum, need reverse lookups for packet dispatch:
 ```rust
 struct Node {
     // Primary storage
-    peers: HashMap<NodeId, PeerSlot>,
+    peers: HashMap<NodeAddr, PeerSlot>,
 
-    // Reverse lookup: (transport, remote_addr) → NodeId
-    // Needed because ReceivedPacket has addr, not NodeId
-    addr_to_peer: HashMap<(TransportId, TransportAddr), NodeId>,
+    // Reverse lookup: (transport, remote_addr) → NodeAddr
+    // Needed because ReceivedPacket has addr, not NodeAddr
+    addr_to_peer: HashMap<(TransportId, TransportAddr), NodeAddr>,
 }
 ```
 
@@ -344,7 +344,7 @@ For inbound connections from unknown addresses:
 1. Receive Noise IK msg1 → decrypt to extract sender's static key (identity)
 2. Create new PeerConnection with discovered identity
 3. Add to `connections` (by LinkId) and `addr_to_link`
-4. After handshake completes, promote to ActivePeer (indexed by NodeId)
+4. After handshake completes, promote to ActivePeer (indexed by NodeAddr)
 
 ## Summary
 

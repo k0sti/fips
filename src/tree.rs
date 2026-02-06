@@ -4,7 +4,7 @@
 //! The spanning tree provides a routing topology where each node maintains
 //! a path to a common root, enabling greedy distance-based routing.
 
-use crate::{Identity, IdentityError, NodeId};
+use crate::{Identity, IdentityError, NodeAddr};
 use secp256k1::schnorr::Signature;
 use secp256k1::XOnlyPublicKey;
 use std::collections::HashMap;
@@ -21,13 +21,13 @@ pub enum TreeError {
     AncestryNotToRoot,
 
     #[error("signature verification failed for node {0:?}")]
-    InvalidSignature(NodeId),
+    InvalidSignature(NodeAddr),
 
     #[error("sequence number regression: got {got}, expected > {expected}")]
     SequenceRegression { got: u64, expected: u64 },
 
     #[error("parent not in peers: {0:?}")]
-    ParentNotPeer(NodeId),
+    ParentNotPeer(NodeAddr),
 
     #[error("identity error: {0}")]
     Identity(#[from] IdentityError),
@@ -37,14 +37,14 @@ pub enum TreeError {
 ///
 /// Each node periodically announces its parent selection. The declaration
 /// includes a monotonic sequence number for freshness and a signature
-/// for authenticity. When `parent_id == node_id`, the node declares itself
+/// for authenticity. When `parent_id == node_addr`, the node declares itself
 /// as a root candidate.
 #[derive(Clone)]
 pub struct ParentDeclaration {
     /// The node making this declaration.
-    node_id: NodeId,
-    /// The selected parent (equals node_id if self-declaring as root).
-    parent_id: NodeId,
+    node_addr: NodeAddr,
+    /// The selected parent (equals node_addr if self-declaring as root).
+    parent_id: NodeAddr,
     /// Monotonically increasing sequence number.
     sequence: u64,
     /// Timestamp when this declaration was created (Unix seconds).
@@ -57,9 +57,9 @@ impl ParentDeclaration {
     /// Create a new unsigned parent declaration.
     ///
     /// The declaration must be signed before transmission using `set_signature()`.
-    pub fn new(node_id: NodeId, parent_id: NodeId, sequence: u64, timestamp: u64) -> Self {
+    pub fn new(node_addr: NodeAddr, parent_id: NodeAddr, sequence: u64, timestamp: u64) -> Self {
         Self {
-            node_id,
+            node_addr,
             parent_id,
             sequence,
             timestamp,
@@ -68,20 +68,20 @@ impl ParentDeclaration {
     }
 
     /// Create a self-declaration (node is root candidate).
-    pub fn self_root(node_id: NodeId, sequence: u64, timestamp: u64) -> Self {
-        Self::new(node_id, node_id, sequence, timestamp)
+    pub fn self_root(node_addr: NodeAddr, sequence: u64, timestamp: u64) -> Self {
+        Self::new(node_addr, node_addr, sequence, timestamp)
     }
 
     /// Create a declaration with a pre-computed signature.
     pub fn with_signature(
-        node_id: NodeId,
-        parent_id: NodeId,
+        node_addr: NodeAddr,
+        parent_id: NodeAddr,
         sequence: u64,
         timestamp: u64,
         signature: Signature,
     ) -> Self {
         Self {
-            node_id,
+            node_addr,
             parent_id,
             sequence,
             timestamp,
@@ -90,12 +90,12 @@ impl ParentDeclaration {
     }
 
     /// Get the declaring node's ID.
-    pub fn node_id(&self) -> &NodeId {
-        &self.node_id
+    pub fn node_addr(&self) -> &NodeAddr {
+        &self.node_addr
     }
 
     /// Get the parent node's ID.
-    pub fn parent_id(&self) -> &NodeId {
+    pub fn parent_id(&self) -> &NodeAddr {
         &self.parent_id
     }
 
@@ -121,11 +121,11 @@ impl ParentDeclaration {
 
     /// Sign this declaration with the given identity.
     ///
-    /// The identity's node_id must match this declaration's node_id.
-    /// Returns an error if the node_ids don't match.
+    /// The identity's node_addr must match this declaration's node_addr.
+    /// Returns an error if the node_addrs don't match.
     pub fn sign(&mut self, identity: &Identity) -> Result<(), TreeError> {
-        if identity.node_id() != &self.node_id {
-            return Err(TreeError::InvalidSignature(self.node_id));
+        if identity.node_addr() != &self.node_addr {
+            return Err(TreeError::InvalidSignature(self.node_addr));
         }
         let signature = identity.sign(&self.signing_bytes());
         self.signature = Some(signature);
@@ -134,7 +134,7 @@ impl ParentDeclaration {
 
     /// Check if this is a root declaration (parent == self).
     pub fn is_root(&self) -> bool {
-        self.node_id == self.parent_id
+        self.node_addr == self.parent_id
     }
 
     /// Check if this declaration is signed.
@@ -144,10 +144,10 @@ impl ParentDeclaration {
 
     /// Get the bytes that should be signed.
     ///
-    /// Format: node_id (32) || parent_id (32) || sequence (8) || timestamp (8)
+    /// Format: node_addr (32) || parent_id (32) || sequence (8) || timestamp (8)
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(80);
-        bytes.extend_from_slice(self.node_id.as_bytes());
+        bytes.extend_from_slice(self.node_addr.as_bytes());
         bytes.extend_from_slice(self.parent_id.as_bytes());
         bytes.extend_from_slice(&self.sequence.to_le_bytes());
         bytes.extend_from_slice(&self.timestamp.to_le_bytes());
@@ -161,13 +161,13 @@ impl ParentDeclaration {
         let signature = self
             .signature
             .as_ref()
-            .ok_or(TreeError::InvalidSignature(self.node_id))?;
+            .ok_or(TreeError::InvalidSignature(self.node_addr))?;
 
         let secp = secp256k1::Secp256k1::verification_only();
         let hash = self.signing_hash();
 
         secp.verify_schnorr(signature, &hash, pubkey)
-            .map_err(|_| TreeError::InvalidSignature(self.node_id))
+            .map_err(|_| TreeError::InvalidSignature(self.node_addr))
     }
 
     /// Compute the SHA-256 hash of the signing bytes.
@@ -187,7 +187,7 @@ impl ParentDeclaration {
 impl fmt::Debug for ParentDeclaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParentDeclaration")
-            .field("node_id", &self.node_id)
+            .field("node_addr", &self.node_addr)
             .field("parent_id", &self.parent_id)
             .field("sequence", &self.sequence)
             .field("is_root", &self.is_root())
@@ -198,7 +198,7 @@ impl fmt::Debug for ParentDeclaration {
 
 impl PartialEq for ParentDeclaration {
     fn eq(&self, other: &Self) -> bool {
-        self.node_id == other.node_id
+        self.node_addr == other.node_addr
             && self.parent_id == other.parent_id
             && self.sequence == other.sequence
             && self.timestamp == other.timestamp
@@ -216,13 +216,13 @@ impl Eq for ParentDeclaration {}
 /// Two nodes can compute the hops between them by finding their lowest
 /// common ancestor (LCA) in the tree.
 #[derive(Clone, PartialEq, Eq)]
-pub struct TreeCoordinate(Vec<NodeId>);
+pub struct TreeCoordinate(Vec<NodeAddr>);
 
 impl TreeCoordinate {
     /// Create a coordinate from a path (self to root).
     ///
     /// The path must be non-empty and ordered from the node to the root.
-    pub fn new(path: Vec<NodeId>) -> Result<Self, TreeError> {
+    pub fn new(path: Vec<NodeAddr>) -> Result<Self, TreeError> {
         if path.is_empty() {
             return Err(TreeError::EmptyCoordinate);
         }
@@ -230,22 +230,22 @@ impl TreeCoordinate {
     }
 
     /// Create a coordinate for a root node.
-    pub fn root(node_id: NodeId) -> Self {
-        Self(vec![node_id])
+    pub fn root(node_addr: NodeAddr) -> Self {
+        Self(vec![node_addr])
     }
 
     /// The node this coordinate belongs to (first element).
-    pub fn node_id(&self) -> &NodeId {
+    pub fn node_addr(&self) -> &NodeAddr {
         &self.0[0]
     }
 
     /// The root of the tree (last element).
-    pub fn root_id(&self) -> &NodeId {
+    pub fn root_id(&self) -> &NodeAddr {
         self.0.last().expect("coordinate never empty")
     }
 
     /// The immediate parent (second element, or self if root).
-    pub fn parent_id(&self) -> &NodeId {
+    pub fn parent_id(&self) -> &NodeAddr {
         self.0.get(1).unwrap_or(&self.0[0])
     }
 
@@ -255,7 +255,7 @@ impl TreeCoordinate {
     }
 
     /// The full ancestry path.
-    pub fn path(&self) -> &[NodeId] {
+    pub fn path(&self) -> &[NodeAddr] {
         &self.0
     }
 
@@ -302,7 +302,7 @@ impl TreeCoordinate {
     }
 
     /// Get the lowest common ancestor node ID.
-    pub fn lca(&self, other: &TreeCoordinate) -> Option<&NodeId> {
+    pub fn lca(&self, other: &TreeCoordinate) -> Option<&NodeAddr> {
         let self_rev: Vec<_> = self.0.iter().rev().collect();
         let other_rev: Vec<_> = other.0.iter().rev().collect();
 
@@ -318,19 +318,19 @@ impl TreeCoordinate {
     }
 
     /// Check if `other` is an ancestor (appears in our path after self).
-    pub fn has_ancestor(&self, other: &NodeId) -> bool {
+    pub fn has_ancestor(&self, other: &NodeAddr) -> bool {
         self.0.iter().skip(1).any(|id| id == other)
     }
 
     /// Check if `other` is in our ancestry (including self).
-    pub fn contains(&self, other: &NodeId) -> bool {
+    pub fn contains(&self, other: &NodeAddr) -> bool {
         self.0.iter().any(|id| id == other)
     }
 
     /// Get the ancestor at a specific depth from self.
     ///
     /// `ancestor_at(0)` returns self, `ancestor_at(1)` returns parent, etc.
-    pub fn ancestor_at(&self, depth: usize) -> Option<&NodeId> {
+    pub fn ancestor_at(&self, depth: usize) -> Option<&NodeAddr> {
         self.0.get(depth)
     }
 }
@@ -349,8 +349,8 @@ impl fmt::Debug for TreeCoordinate {
     }
 }
 
-impl AsRef<[NodeId]> for TreeCoordinate {
-    fn as_ref(&self) -> &[NodeId] {
+impl AsRef<[NodeAddr]> for TreeCoordinate {
+    fn as_ref(&self) -> &[NodeAddr] {
         &self.0
     }
 }
@@ -361,46 +361,46 @@ impl AsRef<[NodeId]> for TreeCoordinate {
 /// tree positions. State is bounded by O(P × D) where P is peer count
 /// and D is tree depth.
 pub struct TreeState {
-    /// This node's NodeId.
-    my_node_id: NodeId,
+    /// This node's NodeAddr.
+    my_node_addr: NodeAddr,
     /// This node's current parent declaration.
     my_declaration: ParentDeclaration,
     /// This node's current coordinates (computed from declaration chain).
     my_coords: TreeCoordinate,
-    /// The current elected root (smallest reachable node_id).
-    root: NodeId,
+    /// The current elected root (smallest reachable node_addr).
+    root: NodeAddr,
     /// Each peer's most recent parent declaration.
-    peer_declarations: HashMap<NodeId, ParentDeclaration>,
+    peer_declarations: HashMap<NodeAddr, ParentDeclaration>,
     /// Each peer's full ancestry to root.
-    peer_ancestry: HashMap<NodeId, TreeCoordinate>,
+    peer_ancestry: HashMap<NodeAddr, TreeCoordinate>,
 }
 
 impl TreeState {
     /// Create initial tree state for a node (as root candidate).
     ///
-    /// The node starts as its own root until it learns of a smaller node_id.
+    /// The node starts as its own root until it learns of a smaller node_addr.
     /// Initial sequence is 1 per protocol spec; timestamp is current Unix time.
-    pub fn new(my_node_id: NodeId) -> Self {
+    pub fn new(my_node_addr: NodeAddr) -> Self {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let my_declaration = ParentDeclaration::self_root(my_node_id, 1, timestamp);
-        let my_coords = TreeCoordinate::root(my_node_id);
+        let my_declaration = ParentDeclaration::self_root(my_node_addr, 1, timestamp);
+        let my_coords = TreeCoordinate::root(my_node_addr);
 
         Self {
-            my_node_id,
+            my_node_addr,
             my_declaration,
             my_coords,
-            root: my_node_id,
+            root: my_node_addr,
             peer_declarations: HashMap::new(),
             peer_ancestry: HashMap::new(),
         }
     }
 
-    /// Get this node's NodeId.
-    pub fn my_node_id(&self) -> &NodeId {
-        &self.my_node_id
+    /// Get this node's NodeAddr.
+    pub fn my_node_addr(&self) -> &NodeAddr {
+        &self.my_node_addr
     }
 
     /// Get this node's current declaration.
@@ -414,22 +414,22 @@ impl TreeState {
     }
 
     /// Get the current root.
-    pub fn root(&self) -> &NodeId {
+    pub fn root(&self) -> &NodeAddr {
         &self.root
     }
 
     /// Check if this node is currently the root.
     pub fn is_root(&self) -> bool {
-        self.root == self.my_node_id
+        self.root == self.my_node_addr
     }
 
     /// Get coordinates for a peer, if known.
-    pub fn peer_coords(&self, peer_id: &NodeId) -> Option<&TreeCoordinate> {
+    pub fn peer_coords(&self, peer_id: &NodeAddr) -> Option<&TreeCoordinate> {
         self.peer_ancestry.get(peer_id)
     }
 
     /// Get declaration for a peer, if known.
-    pub fn peer_declaration(&self, peer_id: &NodeId) -> Option<&ParentDeclaration> {
+    pub fn peer_declaration(&self, peer_id: &NodeAddr) -> Option<&ParentDeclaration> {
         self.peer_declarations.get(peer_id)
     }
 
@@ -439,7 +439,7 @@ impl TreeState {
     }
 
     /// Iterate over all peer node IDs.
-    pub fn peer_ids(&self) -> impl Iterator<Item = &NodeId> {
+    pub fn peer_ids(&self) -> impl Iterator<Item = &NodeAddr> {
         self.peer_declarations.keys()
     }
 
@@ -451,7 +451,7 @@ impl TreeState {
         declaration: ParentDeclaration,
         ancestry: TreeCoordinate,
     ) -> bool {
-        let peer_id = *declaration.node_id();
+        let peer_id = *declaration.node_addr();
 
         // Check if this is a fresh update
         if let Some(existing) = self.peer_declarations.get(&peer_id)
@@ -466,7 +466,7 @@ impl TreeState {
     }
 
     /// Remove a peer from the tree state.
-    pub fn remove_peer(&mut self, peer_id: &NodeId) {
+    pub fn remove_peer(&mut self, peer_id: &NodeAddr) {
         self.peer_declarations.remove(peer_id);
         self.peer_ancestry.remove(peer_id);
     }
@@ -474,23 +474,23 @@ impl TreeState {
     /// Update this node's parent selection.
     ///
     /// Call this when switching parents. Updates the declaration and coordinates.
-    pub fn set_parent(&mut self, parent_id: NodeId, sequence: u64, timestamp: u64) {
-        self.my_declaration = ParentDeclaration::new(self.my_node_id, parent_id, sequence, timestamp);
+    pub fn set_parent(&mut self, parent_id: NodeAddr, sequence: u64, timestamp: u64) {
+        self.my_declaration = ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
         // Coordinates will be recomputed when ancestry is available
     }
 
     /// Update this node's coordinates based on current parent's ancestry.
     pub fn recompute_coords(&mut self) {
         if self.my_declaration.is_root() {
-            self.my_coords = TreeCoordinate::root(self.my_node_id);
-            self.root = self.my_node_id;
+            self.my_coords = TreeCoordinate::root(self.my_node_addr);
+            self.root = self.my_node_addr;
             return;
         }
 
         let parent_id = self.my_declaration.parent_id();
         if let Some(parent_coords) = self.peer_ancestry.get(parent_id) {
             // Our coords = [self] ++ parent_coords
-            let mut path = vec![self.my_node_id];
+            let mut path = vec![self.my_node_addr];
             path.extend_from_slice(parent_coords.path());
             self.my_coords = TreeCoordinate::new(path).expect("non-empty path");
             self.root = *self.my_coords.root_id();
@@ -498,7 +498,7 @@ impl TreeState {
     }
 
     /// Calculate tree distance to a peer.
-    pub fn distance_to_peer(&self, peer_id: &NodeId) -> Option<usize> {
+    pub fn distance_to_peer(&self, peer_id: &NodeAddr) -> Option<usize> {
         self.peer_ancestry
             .get(peer_id)
             .map(|coords| self.my_coords.distance_to(coords))
@@ -508,7 +508,7 @@ impl TreeState {
     ///
     /// Returns the peer that minimizes tree distance to the destination.
     /// This is a stub - full implementation requires greedy routing logic.
-    pub fn find_next_hop(&self, _dest_coords: &TreeCoordinate) -> Option<NodeId> {
+    pub fn find_next_hop(&self, _dest_coords: &TreeCoordinate) -> Option<NodeAddr> {
         // Stub: would implement greedy tree routing
         None
     }
@@ -516,14 +516,14 @@ impl TreeState {
     /// Check if a parent switch to `candidate` would be beneficial.
     ///
     /// This is a stub - full implementation requires policy decisions.
-    pub fn should_switch_parent(&self, _candidate: &NodeId) -> bool {
+    pub fn should_switch_parent(&self, _candidate: &NodeAddr) -> bool {
         // Stub: would evaluate parent switch criteria
         false
     }
 
     /// Sign this node's declaration with the given identity.
     ///
-    /// The identity's node_id must match this TreeState's node_id.
+    /// The identity's node_addr must match this TreeState's node_addr.
     pub fn sign_declaration(&mut self, identity: &Identity) -> Result<(), TreeError> {
         self.my_declaration.sign(identity)
     }
@@ -537,7 +537,7 @@ impl TreeState {
 impl fmt::Debug for TreeState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TreeState")
-            .field("my_node_id", &self.my_node_id)
+            .field("my_node_addr", &self.my_node_addr)
             .field("root", &self.root)
             .field("is_root", &self.is_root())
             .field("depth", &self.my_coords.depth())
@@ -550,37 +550,37 @@ impl fmt::Debug for TreeState {
 mod tests {
     use super::*;
 
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     // ===== TreeCoordinate Tests =====
 
     #[test]
     fn test_tree_coordinate_root() {
-        let root_id = make_node_id(1);
+        let root_id = make_node_addr(1);
         let coord = TreeCoordinate::root(root_id);
 
         assert!(coord.is_root());
         assert_eq!(coord.depth(), 0);
-        assert_eq!(coord.node_id(), &root_id);
+        assert_eq!(coord.node_addr(), &root_id);
         assert_eq!(coord.root_id(), &root_id);
         assert_eq!(coord.parent_id(), &root_id);
     }
 
     #[test]
     fn test_tree_coordinate_path() {
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
-        let root = make_node_id(3);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
+        let root = make_node_addr(3);
 
         let coord = TreeCoordinate::new(vec![node, parent, root]).unwrap();
 
         assert!(!coord.is_root());
         assert_eq!(coord.depth(), 2);
-        assert_eq!(coord.node_id(), &node);
+        assert_eq!(coord.node_addr(), &node);
         assert_eq!(coord.parent_id(), &parent);
         assert_eq!(coord.root_id(), &root);
     }
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_tree_distance_same_node() {
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
         let coord = TreeCoordinate::root(node);
 
         assert_eq!(coord.distance_to(&coord), 0);
@@ -601,9 +601,9 @@ mod tests {
 
     #[test]
     fn test_tree_distance_siblings() {
-        let root = make_node_id(0);
-        let a = make_node_id(1);
-        let b = make_node_id(2);
+        let root = make_node_addr(0);
+        let a = make_node_addr(1);
+        let b = make_node_addr(2);
 
         let coord_a = TreeCoordinate::new(vec![a, root]).unwrap();
         let coord_b = TreeCoordinate::new(vec![b, root]).unwrap();
@@ -614,9 +614,9 @@ mod tests {
 
     #[test]
     fn test_tree_distance_ancestor() {
-        let root = make_node_id(0);
-        let parent = make_node_id(1);
-        let child = make_node_id(2);
+        let root = make_node_addr(0);
+        let parent = make_node_addr(1);
+        let child = make_node_addr(2);
 
         let coord_parent = TreeCoordinate::new(vec![parent, root]).unwrap();
         let coord_child = TreeCoordinate::new(vec![child, parent, root]).unwrap();
@@ -633,11 +633,11 @@ mod tests {
         //     a      b
         //    /        \
         //   c          d
-        let root = make_node_id(0);
-        let a = make_node_id(1);
-        let b = make_node_id(2);
-        let c = make_node_id(3);
-        let d = make_node_id(4);
+        let root = make_node_addr(0);
+        let a = make_node_addr(1);
+        let b = make_node_addr(2);
+        let c = make_node_addr(3);
+        let d = make_node_addr(4);
 
         let coord_c = TreeCoordinate::new(vec![c, a, root]).unwrap();
         let coord_d = TreeCoordinate::new(vec![d, b, root]).unwrap();
@@ -648,8 +648,8 @@ mod tests {
 
     #[test]
     fn test_tree_distance_different_roots() {
-        let root1 = make_node_id(1);
-        let root2 = make_node_id(2);
+        let root1 = make_node_addr(1);
+        let root2 = make_node_addr(2);
 
         let coord1 = TreeCoordinate::root(root1);
         let coord2 = TreeCoordinate::root(root2);
@@ -659,9 +659,9 @@ mod tests {
 
     #[test]
     fn test_has_ancestor() {
-        let root = make_node_id(0);
-        let parent = make_node_id(1);
-        let child = make_node_id(2);
+        let root = make_node_addr(0);
+        let parent = make_node_addr(1);
+        let child = make_node_addr(2);
 
         let coord = TreeCoordinate::new(vec![child, parent, root]).unwrap();
 
@@ -672,10 +672,10 @@ mod tests {
 
     #[test]
     fn test_contains() {
-        let root = make_node_id(0);
-        let parent = make_node_id(1);
-        let child = make_node_id(2);
-        let other = make_node_id(99);
+        let root = make_node_addr(0);
+        let parent = make_node_addr(1);
+        let child = make_node_addr(2);
+        let other = make_node_addr(99);
 
         let coord = TreeCoordinate::new(vec![child, parent, root]).unwrap();
 
@@ -687,9 +687,9 @@ mod tests {
 
     #[test]
     fn test_ancestor_at() {
-        let root = make_node_id(0);
-        let parent = make_node_id(1);
-        let child = make_node_id(2);
+        let root = make_node_addr(0);
+        let parent = make_node_addr(1);
+        let child = make_node_addr(2);
 
         let coord = TreeCoordinate::new(vec![child, parent, root]).unwrap();
 
@@ -701,11 +701,11 @@ mod tests {
 
     #[test]
     fn test_lca() {
-        let root = make_node_id(0);
-        let a = make_node_id(1);
-        let b = make_node_id(2);
-        let c = make_node_id(3);
-        let d = make_node_id(4);
+        let root = make_node_addr(0);
+        let a = make_node_addr(1);
+        let b = make_node_addr(2);
+        let c = make_node_addr(3);
+        let d = make_node_addr(4);
 
         // c under a, d under b, both under root
         let coord_c = TreeCoordinate::new(vec![c, a, root]).unwrap();
@@ -722,12 +722,12 @@ mod tests {
 
     #[test]
     fn test_parent_declaration_new() {
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
 
         let decl = ParentDeclaration::new(node, parent, 1, 1000);
 
-        assert_eq!(decl.node_id(), &node);
+        assert_eq!(decl.node_addr(), &node);
         assert_eq!(decl.parent_id(), &parent);
         assert_eq!(decl.sequence(), 1);
         assert_eq!(decl.timestamp(), 1000);
@@ -737,18 +737,18 @@ mod tests {
 
     #[test]
     fn test_parent_declaration_self_root() {
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
 
         let decl = ParentDeclaration::self_root(node, 5, 2000);
 
         assert!(decl.is_root());
-        assert_eq!(decl.node_id(), decl.parent_id());
+        assert_eq!(decl.node_addr(), decl.parent_id());
     }
 
     #[test]
     fn test_parent_declaration_freshness() {
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
 
         let old_decl = ParentDeclaration::new(node, parent, 1, 1000);
         let new_decl = ParentDeclaration::new(node, parent, 2, 2000);
@@ -760,8 +760,8 @@ mod tests {
 
     #[test]
     fn test_parent_declaration_signing_bytes() {
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
 
         let decl = ParentDeclaration::new(node, parent, 100, 1234567890);
         let bytes = decl.signing_bytes();
@@ -778,8 +778,8 @@ mod tests {
 
     #[test]
     fn test_parent_declaration_equality() {
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
 
         let decl1 = ParentDeclaration::new(node, parent, 1, 1000);
         let decl2 = ParentDeclaration::new(node, parent, 1, 1000);
@@ -793,10 +793,10 @@ mod tests {
 
     #[test]
     fn test_tree_state_new() {
-        let node = make_node_id(1);
+        let node = make_node_addr(1);
         let state = TreeState::new(node);
 
-        assert_eq!(state.my_node_id(), &node);
+        assert_eq!(state.my_node_addr(), &node);
         assert!(state.is_root());
         assert_eq!(state.root(), &node);
         assert_eq!(state.my_coords().depth(), 0);
@@ -805,11 +805,11 @@ mod tests {
 
     #[test]
     fn test_tree_state_update_peer() {
-        let my_node = make_node_id(0);
+        let my_node = make_node_addr(0);
         let mut state = TreeState::new(my_node);
 
-        let peer = make_node_id(1);
-        let root = make_node_id(2);
+        let peer = make_node_addr(1);
+        let root = make_node_addr(2);
 
         let decl = ParentDeclaration::new(peer, root, 1, 1000);
         let coords = TreeCoordinate::new(vec![peer, root]).unwrap();
@@ -830,11 +830,11 @@ mod tests {
 
     #[test]
     fn test_tree_state_remove_peer() {
-        let my_node = make_node_id(0);
+        let my_node = make_node_addr(0);
         let mut state = TreeState::new(my_node);
 
-        let peer = make_node_id(1);
-        let root = make_node_id(2);
+        let peer = make_node_addr(1);
+        let root = make_node_addr(2);
 
         let decl = ParentDeclaration::new(peer, root, 1, 1000);
         let coords = TreeCoordinate::new(vec![peer, root]).unwrap();
@@ -849,10 +849,10 @@ mod tests {
 
     #[test]
     fn test_tree_state_distance_to_peer() {
-        let my_node = make_node_id(0);
+        let my_node = make_node_addr(0);
         let mut state = TreeState::new(my_node);
 
-        let peer = make_node_id(1);
+        let peer = make_node_addr(1);
 
         // Both are roots in their own trees initially - different roots
         let peer_coords = TreeCoordinate::root(peer);
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(state.distance_to_peer(&peer), Some(usize::MAX));
 
         // If they share a root, distance should be finite
-        let shared_root = make_node_id(99);
+        let shared_root = make_node_addr(99);
 
         // Update my state to have shared root
         state.set_parent(shared_root, 1, 1000);
@@ -883,11 +883,11 @@ mod tests {
 
     #[test]
     fn test_tree_state_peer_ids() {
-        let my_node = make_node_id(0);
+        let my_node = make_node_addr(0);
         let mut state = TreeState::new(my_node);
 
-        let peer1 = make_node_id(1);
-        let peer2 = make_node_id(2);
+        let peer1 = make_node_addr(1);
+        let peer2 = make_node_addr(2);
 
         state.update_peer(
             ParentDeclaration::self_root(peer1, 1, 1000),

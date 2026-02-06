@@ -14,7 +14,7 @@ pub use active::{ActivePeer, ConnectivityState};
 pub use connection::{HandshakeState, PeerConnection};
 
 use crate::transport::LinkId;
-use crate::NodeId;
+use crate::NodeAddr;
 use std::fmt;
 use thiserror::Error;
 
@@ -29,13 +29,13 @@ pub enum PeerError {
     NotAuthenticated,
 
     #[error("peer not found: {0:?}")]
-    NotFound(NodeId),
+    NotFound(NodeAddr),
 
     #[error("connection not found: {0}")]
     ConnectionNotFound(LinkId),
 
     #[error("peer already exists: {0:?}")]
-    AlreadyExists(NodeId),
+    AlreadyExists(NodeAddr),
 
     #[error("handshake failed: {0}")]
     HandshakeFailed(String),
@@ -44,7 +44,7 @@ pub enum PeerError {
     HandshakeTimeout,
 
     #[error("identity mismatch: expected {expected:?}, got {actual:?}")]
-    IdentityMismatch { expected: NodeId, actual: NodeId },
+    IdentityMismatch { expected: NodeAddr, actual: NodeAddr },
 
     #[error("peer disconnected")]
     Disconnected,
@@ -66,13 +66,13 @@ pub enum PeerError {
 /// connection to this peer (cross-connection). The tie-breaker rule
 /// determines which connection survives.
 ///
-/// Note: Returns NodeId instead of ActivePeer because ActivePeer cannot
+/// Note: Returns NodeAddr instead of ActivePeer because ActivePeer cannot
 /// be cloned (it contains NoiseSession which has cryptographic state).
-/// Callers can look up the peer from the peers map using the NodeId.
+/// Callers can look up the peer from the peers map using the NodeAddr.
 #[derive(Debug, Clone, Copy)]
 pub enum PromotionResult {
     /// New peer created successfully.
-    Promoted(NodeId),
+    Promoted(NodeAddr),
 
     /// Cross-connection detected. This connection lost the tie-breaker
     /// and should be closed.
@@ -87,16 +87,16 @@ pub enum PromotionResult {
         /// The link that lost (previous connection, now closed).
         loser_link_id: LinkId,
         /// The node ID of the peer.
-        node_id: NodeId,
+        node_addr: NodeAddr,
     },
 }
 
 impl PromotionResult {
     /// Get the node ID if promotion succeeded.
-    pub fn node_id(&self) -> Option<NodeId> {
+    pub fn node_addr(&self) -> Option<NodeAddr> {
         match self {
-            PromotionResult::Promoted(node_id) => Some(*node_id),
-            PromotionResult::CrossConnectionWon { node_id, .. } => Some(*node_id),
+            PromotionResult::Promoted(node_addr) => Some(*node_addr),
+            PromotionResult::CrossConnectionWon { node_addr, .. } => Some(*node_addr),
             PromotionResult::CrossConnectionLost { .. } => None,
         }
     }
@@ -118,22 +118,22 @@ impl PromotionResult {
 
 /// Determine winner of cross-connection tie-breaker.
 ///
-/// Rule: The node with the smaller node_id prefers its OUTBOUND connection.
+/// Rule: The node with the smaller node_addr prefers its OUTBOUND connection.
 /// This is deterministic and symmetric: both nodes will reach the same conclusion.
 ///
 /// # Arguments
-/// * `our_node_id` - Our node's ID
-/// * `their_node_id` - The peer's node ID
+/// * `our_node_addr` - Our node's ID
+/// * `their_node_addr` - The peer's node ID
 /// * `this_is_outbound` - Whether the connection being evaluated is our outbound
 ///
 /// # Returns
 /// `true` if this connection should win (survive), `false` if it should close.
 pub fn cross_connection_winner(
-    our_node_id: &NodeId,
-    their_node_id: &NodeId,
+    our_node_addr: &NodeAddr,
+    their_node_addr: &NodeAddr,
     this_is_outbound: bool,
 ) -> bool {
-    let we_are_smaller = our_node_id < their_node_id;
+    let we_are_smaller = our_node_addr < their_node_addr;
 
     // Smaller node's outbound wins
     // If we're smaller: our outbound wins, our inbound loses
@@ -224,14 +224,14 @@ impl PeerSlot {
         }
     }
 
-    /// Get the known node_id, if any.
+    /// Get the known node_addr, if any.
     ///
     /// For connections, this is the expected identity (may be None for inbound).
     /// For active peers, this is always known.
-    pub fn node_id(&self) -> Option<&NodeId> {
+    pub fn node_addr(&self) -> Option<&NodeAddr> {
         match self {
-            PeerSlot::Connecting(conn) => conn.expected_identity().map(|id| id.node_id()),
-            PeerSlot::Active(peer) => Some(peer.node_id()),
+            PeerSlot::Connecting(conn) => conn.expected_identity().map(|id| id.node_addr()),
+            PeerSlot::Active(peer) => Some(peer.node_addr()),
         }
     }
 }
@@ -243,7 +243,7 @@ impl fmt::Display for PeerSlot {
                 write!(f, "connecting(link={}, state={})", conn.link_id(), conn.handshake_state())
             }
             PeerSlot::Active(peer) => {
-                write!(f, "active(node={:?}, link={})", peer.node_id(), peer.link_id())
+                write!(f, "active(node={:?}, link={})", peer.node_addr(), peer.link_id())
             }
         }
     }
@@ -259,10 +259,10 @@ mod tests {
     use crate::transport::LinkId;
     use crate::{Identity, PeerIdentity};
 
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     fn make_peer_identity() -> PeerIdentity {
@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn test_cross_connection_smaller_node_wins_outbound() {
-        let node_a = make_node_id(1); // smaller
-        let node_b = make_node_id(2); // larger
+        let node_a = make_node_addr(1); // smaller
+        let node_b = make_node_addr(2); // larger
 
         // Node A's perspective
         assert!(cross_connection_winner(&node_a, &node_b, true)); // A's outbound wins
@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn test_cross_connection_symmetric() {
-        let node_a = make_node_id(1);
-        let node_b = make_node_id(2);
+        let node_a = make_node_addr(1);
+        let node_b = make_node_addr(2);
 
         // A's outbound = B's inbound
         let a_outbound_wins = cross_connection_winner(&node_a, &node_b, true);
@@ -332,11 +332,11 @@ mod tests {
     #[test]
     fn test_promotion_result_promoted() {
         let identity = make_peer_identity();
-        let node_id = *identity.node_id();
-        let result = PromotionResult::Promoted(node_id);
+        let node_addr = *identity.node_addr();
+        let result = PromotionResult::Promoted(node_addr);
 
-        assert!(result.node_id().is_some());
-        assert_eq!(result.node_id(), Some(node_id));
+        assert!(result.node_addr().is_some());
+        assert_eq!(result.node_addr(), Some(node_addr));
         assert!(!result.should_close_this_connection());
         assert!(result.link_to_close().is_none());
     }
@@ -347,7 +347,7 @@ mod tests {
             winner_link_id: LinkId::new(1),
         };
 
-        assert!(result.node_id().is_none());
+        assert!(result.node_addr().is_none());
         assert!(result.should_close_this_connection());
         assert!(result.link_to_close().is_none()); // Caller closes their own
     }
@@ -355,37 +355,37 @@ mod tests {
     #[test]
     fn test_promotion_result_cross_won() {
         let identity = make_peer_identity();
-        let node_id = *identity.node_id();
+        let node_addr = *identity.node_addr();
         let result = PromotionResult::CrossConnectionWon {
             loser_link_id: LinkId::new(1),
-            node_id,
+            node_addr,
         };
 
-        assert!(result.node_id().is_some());
-        assert_eq!(result.node_id(), Some(node_id));
+        assert!(result.node_addr().is_some());
+        assert_eq!(result.node_addr(), Some(node_addr));
         assert!(!result.should_close_this_connection());
         assert_eq!(result.link_to_close(), Some(LinkId::new(1)));
     }
 
     #[test]
-    fn test_peer_slot_node_id() {
+    fn test_peer_slot_node_addr() {
         // Outbound connection knows expected identity
         let identity = make_peer_identity();
-        let expected_node_id = *identity.node_id();
+        let expected_node_addr = *identity.node_addr();
         let conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
         let slot = PeerSlot::Connecting(conn);
-        assert_eq!(slot.node_id(), Some(&expected_node_id));
+        assert_eq!(slot.node_addr(), Some(&expected_node_addr));
 
         // Inbound connection doesn't know identity yet
         let conn_inbound = PeerConnection::inbound(LinkId::new(2), 2000);
         let slot_inbound = PeerSlot::Connecting(conn_inbound);
-        assert!(slot_inbound.node_id().is_none());
+        assert!(slot_inbound.node_addr().is_none());
 
         // Active peer always knows identity
         let identity2 = make_peer_identity();
-        let active_node_id = *identity2.node_id();
+        let active_node_addr = *identity2.node_addr();
         let peer = ActivePeer::new(identity2, LinkId::new(3), 3000);
         let slot_active = PeerSlot::Active(peer);
-        assert_eq!(slot_active.node_id(), Some(&active_node_id));
+        assert_eq!(slot_active.node_addr(), Some(&active_node_addr));
     }
 }

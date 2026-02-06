@@ -64,7 +64,7 @@ maintains roughly 50 TreeState entries, not 1000.
 
 ### Root Election
 
-The root is deterministic: the node with the lexicographically smallest node_id
+The root is deterministic: the node with the lexicographically smallest node_addr
 among all reachable nodes. No explicit election protocol exists—each node
 independently derives the same answer from its local TreeState.
 
@@ -86,7 +86,7 @@ When a node starts with no peers, it bootstraps as a single-node network.
 ```
 Time T0: Node A starts
 ├── Generates or loads keypair (npub_A, nsec_A)
-├── Computes node_id_A = SHA-256(npub_A)
+├── Computes node_addr_A = SHA-256(npub_A)
 ├── Initializes empty TreeState
 ├── Sets parent = self (A is its own root)
 ├── Sets sequence = 1
@@ -125,7 +125,7 @@ integrates it into the spanning tree.
 
 ```
 Existing tree structure:
-        A (root, smallest node_id)
+        A (root, smallest node_addr)
        /|\
       C D E
 
@@ -157,8 +157,8 @@ B receives D's TreeAnnounce:
 │   └── TreeState_B = { (B, parent=B, seq=1), (D, parent=A, seq=47), (A, parent=A, seq=203) }
 │
 ├── Evaluates root:
-│   └── Compares node_id_A vs node_id_B
-│   └── If A < B: Root_B = A (A has smaller node_id)
+│   └── Compares node_addr_A vs node_addr_B
+│   └── If A < B: Root_B = A (A has smaller node_addr)
 │
 └── Evaluates parent selection:
     └── Only peer is D
@@ -195,7 +195,7 @@ D receives and merges:
 **T5: D updates its bloom filter**:
 
 ```
-D adds B's node_id to its bloom filter
+D adds B's node_addr to its bloom filter
 D sends FilterAnnounce to parent A
 
 A merges D's bloom filter with its view of D's subtree
@@ -241,7 +241,7 @@ each node only knows its own ancestry and peers. Convergence means:
 
 When multiple isolated nodes connect simultaneously, the network must:
 
-1. Elect a single root (determined by smallest node_id)
+1. Elect a single root (determined by smallest node_addr)
 2. Form a loop-free tree structure
 3. Propagate ancestry information along peer links
 
@@ -250,7 +250,7 @@ When multiple isolated nodes connect simultaneously, the network must:
 ```
 T0: Nodes A, B, C start isolated
     Each is its own root
-    node_id ordering: A < B < C
+    node_addr ordering: A < B < C
 
 T1: Links form: A ←→ B, B ←→ C
 
@@ -301,7 +301,7 @@ depth D with gossip interval G:
 
 **No coordination required**: Convergence emerges from:
 
-- Deterministic root election (smallest node_id)
+- Deterministic root election (smallest node_addr)
 - Deterministic merge rules (highest sequence wins)
 - Eventually consistent gossip
 
@@ -420,7 +420,7 @@ Link C ←→ D fails:
 
 After:
     Partition 1: A ← B ← C
-    Partition 2: D ← E (or E ← D, depending on node_ids)
+    Partition 2: D ← E (or E ← D, depending on node_addrs)
 ```
 
 ### Partition Detection
@@ -455,7 +455,7 @@ Partition 1 (nodes A, B, C):
 Partition 2 (nodes D, E):
 ├── Previous root A is unreachable
 ├── D and E exchange announcements
-├── New root = min(node_id_D, node_id_E)
+├── New root = min(node_addr_D, node_addr_E)
 ├── Tree forms between D and E
 └── Routing works within partition
 ```
@@ -489,10 +489,10 @@ T4: Merged network
 ### Root Stability Across Partitions
 
 A key design consideration: the root should be stable to minimize reconvergence.
-If partition 2 elected a "temporary" root with a large node_id, healing is cheap—
+If partition 2 elected a "temporary" root with a large node_addr, healing is cheap—
 that root immediately defers to the global root.
 
-If by chance partition 2's root has a smaller node_id than partition 1's root,
+If by chance partition 2's root has a smaller node_addr than partition 1's root,
 healing causes partition 1 to reconverge to the new global root.
 
 ---
@@ -837,7 +837,7 @@ Physical topology (full mesh via switch):
     │╱   ╲│
     D ──── C ──── E
 
-node_id ordering: A < C < B < E < D
+node_addr ordering: A < C < B < E < D
 ```
 
 **Tree formation**:
@@ -911,7 +911,7 @@ Physical topology:
       (DSL)     (fiber)
       1 Mbps
 
-node_id ordering: B < A < D < E < C
+node_addr ordering: B < A < D < E < C
 ```
 
 **Cost calculation** (using bandwidth as primary):
@@ -928,7 +928,7 @@ A ~ C: cost = 100000 (9600 bps)
 **Tree formation with costs**:
 
 ```
-Root = B (smallest node_id)
+Root = B (smallest node_addr)
 
 Parent selection:
 ├── A: peers are B (cost 1), C (cost 100000)
@@ -982,7 +982,7 @@ A ─── B ──────────────────────
       │                                   │
       C                                   G
 
-node_id ordering: A < E < B < F < C < G
+node_addr ordering: A < E < B < F < C < G
 ```
 
 **Normal operation**:
@@ -1014,7 +1014,7 @@ T3: Site 2 state:
     E loses path to A
     E evaluates remaining peers: F
     F has no path to A either
-    E compares: node_id_E < node_id_F
+    E compares: node_addr_E < node_addr_F
     E becomes new root for Site 2
 
 T4: Site 2 reconverges:
@@ -1033,7 +1033,7 @@ T5: WAN link restored
 
 T6: E receives B's announcement:
     B's ancestry: [A, B]
-    E learns: A exists, node_id_A < node_id_E
+    E learns: A exists, node_addr_A < node_addr_E
     E adopts A as root
     E selects B as parent
 
@@ -1064,7 +1064,7 @@ initial exchange).
 The gossip-based spanning tree protocol achieves distributed coordination
 through:
 
-1. **Deterministic root election** - Smallest node_id, no negotiation needed
+1. **Deterministic root election** - Smallest node_addr, no negotiation needed
 2. **Local parent selection** - Each node independently chooses best path to root
 3. **CRDT merge semantics** - Conflicts resolved by sequence number, then timestamp
 4. **Bounded state** - O(peers × depth) entries per node, not O(network size)

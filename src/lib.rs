@@ -22,7 +22,7 @@ pub mod wire;
 // Re-export identity types
 pub use identity::{
     decode_npub, decode_nsec, decode_secret, encode_npub, encode_nsec, AuthChallenge, AuthResponse,
-    FipsAddress, Identity, IdentityError, NodeId, PeerIdentity,
+    FipsAddress, Identity, IdentityError, NodeAddr, PeerIdentity,
 };
 
 // Re-export config types

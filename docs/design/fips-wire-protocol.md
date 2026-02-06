@@ -38,6 +38,11 @@ authoritative. Only successful cryptographic verification establishes authentici
 When a valid packet arrives from a different address than expected, the peer's
 address is updated rather than the packet being rejected.
 
+> **Terminology note**: "Source address" in this document refers to the transport-layer
+> address (link_addr)—e.g., IP:port for UDP, MAC for Ethernet, .onion for Tor. This is
+> distinct from node_addr (the routing identifier) and FIPS address/pubkey (the endpoint
+> identity). See [fips-intro.md](fips-intro.md) §Identity System for the full terminology.
+
 ---
 
 ## 2. Wire Format
@@ -170,11 +175,11 @@ Packet dispatch follows a two-phase approach:
 ```
 Node:
     // === Authenticated sessions ===
-    // Primary dispatch: our_index → NodeId
-    peers_by_index: HashMap<(TransportId, u32), NodeId>
+    // Primary dispatch: our_index → NodeAddr
+    peers_by_index: HashMap<(TransportId, u32), NodeAddr>
 
     // Peer data by identity
-    peers: HashMap<NodeId, ActivePeer>
+    peers: HashMap<NodeAddr, ActivePeer>
 
     // === Pending handshakes ===
     // Outbound: our sender_idx → connection state
@@ -201,11 +206,11 @@ receive_encrypted(transport_id, source_addr, data):
     ciphertext = data[13..]
 
     // O(1) session lookup by index
-    node_id = peers_by_index.get((transport_id, receiver_idx))
-    if node_id is None:
+    node_addr = peers_by_index.get((transport_id, receiver_idx))
+    if node_addr is None:
         drop("unknown index")  // No crypto, minimal CPU cost
 
-    peer = peers.get(node_id)
+    peer = peers.get(node_addr)
 
     // Replay check BEFORE decryption (cheap)
     if not peer.replay_window.check(counter):
@@ -228,7 +233,7 @@ receive_encrypted(transport_id, source_addr, data):
     peer.stats.record_recv(data.len())
 
     // Dispatch to message handler
-    dispatch_link_message(node_id, plaintext)
+    dispatch_link_message(node_addr, plaintext)
 ```
 
 **Key properties**:
@@ -316,7 +321,7 @@ receive_msg1(transport_id, source_addr, data):
     // === IDENTITY CHECKS ===
 
     // Check if this is a known peer reconnecting
-    if peers.contains(peer_identity.node_id):
+    if peers.contains(peer_identity.node_addr):
         // Existing peer from new address - handle reconnection
         handle_peer_reconnection(peer_identity, source_addr, ...)
         return
@@ -612,14 +617,14 @@ release(transport_id, idx):
 When a session rekeys, new indices are allocated:
 
 ```
-rekey(node_id):
-    peer = peers.get(node_id)
+rekey(node_addr):
+    peer = peers.get(node_addr)
     old_index = peer.our_index
     new_index = index_allocator.allocate(peer.transport_id)
 
     // Update index mapping
     peers_by_index.remove((peer.transport_id, old_index))
-    peers_by_index.insert((peer.transport_id, new_index), node_id)
+    peers_by_index.insert((peer.transport_id, new_index), node_addr)
 
     // Release old index
     index_allocator.release(peer.transport_id, old_index)

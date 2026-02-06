@@ -8,7 +8,7 @@ use crate::index::SessionIndex;
 use crate::noise::NoiseSession;
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};
-use crate::{FipsAddress, NodeId, PeerIdentity};
+use crate::{FipsAddress, NodeAddr, PeerIdentity};
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
 
@@ -203,9 +203,9 @@ impl ActivePeer {
         &self.identity
     }
 
-    /// Get the peer's NodeId.
-    pub fn node_id(&self) -> &NodeId {
-        self.identity.node_id()
+    /// Get the peer's NodeAddr.
+    pub fn node_addr(&self) -> &NodeAddr {
+        self.identity.node_addr()
     }
 
     /// Get the peer's FIPS address.
@@ -338,9 +338,9 @@ impl ActivePeer {
     }
 
     /// Check if a destination might be reachable through this peer.
-    pub fn may_reach(&self, node_id: &NodeId) -> bool {
+    pub fn may_reach(&self, node_addr: &NodeAddr) -> bool {
         match &self.inbound_filter {
-            Some(filter) => filter.contains(node_id),
+            Some(filter) => filter.contains(node_addr),
             None => false,
         }
     }
@@ -487,14 +487,14 @@ mod tests {
         PeerIdentity::from_pubkey(identity.pubkey())
     }
 
-    fn make_node_id(val: u8) -> NodeId {
+    fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
-        NodeId::from_bytes(bytes)
+        NodeAddr::from_bytes(bytes)
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
-        TreeCoordinate::new(ids.iter().map(|&v| make_node_id(v)).collect()).unwrap()
+        TreeCoordinate::new(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
 
     #[test]
@@ -516,7 +516,7 @@ mod tests {
         let identity = make_peer_identity();
         let peer = ActivePeer::new(identity.clone(), LinkId::new(1), 1000);
 
-        assert_eq!(peer.identity().node_id(), identity.node_id());
+        assert_eq!(peer.identity().node_addr(), identity.node_addr());
         assert_eq!(peer.link_id(), LinkId::new(1));
         assert!(peer.is_healthy());
         assert!(peer.can_send());
@@ -558,8 +558,8 @@ mod tests {
         assert!(!peer.has_tree_position());
         assert!(peer.coords().is_none());
 
-        let node = make_node_id(1);
-        let parent = make_node_id(2);
+        let node = make_node_addr(1);
+        let parent = make_node_addr(2);
         let decl = ParentDeclaration::new(node, parent, 1, 1000);
         let coords = make_coords(&[1, 2, 0]);
 
@@ -574,7 +574,7 @@ mod tests {
     fn test_bloom_filter() {
         let identity = make_peer_identity();
         let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
-        let target = make_node_id(42);
+        let target = make_node_addr(42);
 
         assert!(!peer.may_reach(&target));
         assert!(peer.filter_is_stale(2000, 500));

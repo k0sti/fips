@@ -5,13 +5,31 @@
 This document captures design considerations for FIPS protocol message flow,
 including peer discovery, authentication, tree announcements, and data routing.
 
+### Access to the FIPS Datagram Service
+
+Applications can access FIPS datagram delivery through two interfaces:
+
+- **Native FIPS API**: Applications address destinations directly by npub or
+  public key. The FIPS stack resolves the destination's node_addr and routes
+  without any DNS involvement. This is the preferred interface for
+  FIPS-aware applications.
+
+- **IPv6 adapter (TUN interface)**: Unmodified IPv6 applications use a TUN
+  device with `fd::/8` routing. Because IPv6 addresses are one-way hashes of
+  public keys, a local DNS service maps npub → IPv6 address and primes the
+  identity cache so the TUN can route arriving packets.
+
+The remainder of this document details the sequence of actions initiated through
+the IPv6 adapter path. The native FIPS API bypasses sections 1.1–1.4 (DNS
+entry point, identity cache) entirely, entering the flow at route discovery.
+
 ---
 
-## 1. Application-Initiated Traffic Flow
+## 1. Application-Initiated Traffic Flow (IPv6 Adapter)
 
 > **Note**: This section applies to traditional IP-based applications using the
-> TUN interface. Applications using the native FIPS datagram service address
-> destinations directly by npub, and routing proceeds from there without DNS.
+> TUN interface. Applications using the native FIPS API address destinations
+> directly by npub or public key; routing proceeds from there without DNS.
 
 Traffic flow begins at the application layer with a DNS query, which triggers
 a cascade of events through the FIPS stack.
@@ -27,7 +45,7 @@ an npub. The flow:
 2. **FIPS DNS service** performs two functions:
    - **Address derivation**: Converts the npub to an identity and derives the
      corresponding `fd::/8` IPv6 address
-   - **Cache priming**: Stores the identity mapping (IPv6 address ↔ npub ↔ node_id)
+   - **Cache priming**: Stores the identity mapping (IPv6 address ↔ npub ↔ node_addr)
      in the local FIPS routing cache
 
 3. **DNS Response**: Returns the derived IPv6 address to the application
@@ -65,7 +83,7 @@ for address derivation.
 
 ### 1.4 Identity Cache Lifetime
 
-The identity cache (IPv6 address ↔ npub ↔ node_id) has the following lifetime
+The identity cache (IPv6 address ↔ npub ↔ node_addr) has the following lifetime
 semantics:
 
 - **Configurable timeout**: Cache entries expire after a configured duration
@@ -91,7 +109,7 @@ Cache entry expires
 A packet may arrive at the TUN for an `fd::/8` destination without a prior
 DNS lookup (cached address, manual configuration, etc.). Since address
 derivation is one-way (SHA-256), the npub cannot be recovered from the address,
-and without the npub we cannot determine the node_id needed for routing.
+and without the npub we cannot determine the node_addr needed for routing.
 
 FIPS returns ICMPv6 Destination Unreachable (Code 0: No route to destination)
 for packets to unknown addresses. The identity cache must be populated before
@@ -139,13 +157,13 @@ On receiving a packet, the TUN reader:
 
 4. **Retrieve routing identity**: Cache hit provides:
    - `npub`: The Nostr public key of the destination
-   - `node_id`: SHA-256(npub), used for spanning tree routing
+   - `node_addr`: SHA-256(pubkey), used for spanning tree routing
 
 5. **Session lookup**: Check for existing FIPS session with destination npub
    - **Hit**: Use existing session for encryption/signing
    - **Miss**: Initiate session establishment (see §3)
 
-6. **Route determination**: Using node_id, determine the next hop peer:
+6. **Route determination**: Using node_addr, determine the next hop peer:
    - Check route cache for destination's spanning tree coordinates
    - If cache miss, initiate route discovery (see §4.4)
    - Select next hop via greedy routing toward destination coordinates
@@ -166,7 +184,7 @@ between two FIPS nodes.
 
 Each session contains:
 
-- **Peer identity**: The remote node's npub and node_id
+- **Peer identity**: The remote node's npub and node_addr
 - **Symmetric session keys**: Directional keys for encryption (send_key, recv_key)
 - **Nonce counters**: Per-direction counters for replay protection
 
@@ -185,7 +203,7 @@ When the TUN reader has a packet for a destination with no existing session:
 ```text
 TUN reader
     │
-    ├─► Identity cache lookup → node_id
+    ├─► Identity cache lookup → node_addr
     │
     ├─► Session lookup (by npub) → MISS
     │
@@ -243,7 +261,7 @@ FIPS routing combines three mechanisms:
 2. **Discovery protocol**: Query-based lookup for distant destinations
 3. **Greedy tree routing**: Coordinate-based forwarding using spanning tree position
 
-The routing layer maintains a route cache mapping `node_id → (coordinates,
+The routing layer maintains a route cache mapping `node_addr → (coordinates,
 next_hop_peer)`. Cache hits enable immediate greedy routing; cache misses
 trigger route discovery via bloom filter queries or LookupRequest flooding.
 
@@ -400,8 +418,8 @@ The Noise handshake messages embed in SessionSetup/SessionAck:
 ```text
 SessionSetup {
     // Routing portion (processed by routers)
-    src_coords: Vec<NodeId>,
-    dest_coords: Vec<NodeId>,
+    src_coords: Vec<NodeAddr>,
+    dest_coords: Vec<NodeAddr>,
     src_addr: Ipv6Addr,
     dest_addr: Ipv6Addr,
 
@@ -411,7 +429,7 @@ SessionSetup {
 
 SessionAck {
     // Routing portion
-    src_coords: Vec<NodeId>,  // Responder's coordinates
+    src_coords: Vec<NodeAddr>,  // Responder's coordinates
 
     // Crypto portion
     handshake_payload: Vec<u8>,  // Noise IK message 2
@@ -514,6 +532,12 @@ the inner payload is encrypted end-to-end with session keys.
 | 0x20      | CoordsRequired | R → S     | Router cache miss                 |
 | 0x21      | PathBroken     | R → S     | Greedy routing failed             |
 
+> **Address terminology**: The `src_addr` and `dest_addr` fields in session packet
+> headers are node_addrs (32-byte SHA-256 hashes of pubkeys). These are visible to
+> intermediate routers for routing decisions. The actual FIPS addresses (pubkeys/npubs)
+> are exchanged only during the Noise IK handshake and never appear in packet
+> headers—routers cannot determine endpoint identities from the node_addrs they see.
+
 ### 8.2 SessionSetup (0x00)
 
 Establishes a crypto session and warms router coordinate caches along the path.
@@ -527,12 +551,12 @@ Establishes a crypto session and warms router coordinate caches along the path.
 │   0    │ msg_type         │ 1 byte    │ 0x00                                │
 │   1    │ flags            │ 1 byte    │ Bit 0: REQUEST_ACK                  │
 │        │                  │           │ Bit 1: BIDIRECTIONAL                │
-│   2    │ src_addr         │ 16 bytes  │ Source fd::/8 address               │
-│  18    │ dest_addr        │ 16 bytes  │ Destination fd::/8 address          │
-│  34    │ src_coords_count │ 2 bytes   │ u16 LE, number of src coord entries │
-│  36    │ src_coords       │ 32 × n    │ NodeId array (self → root)          │
+│   2    │ src_addr         │ 32 bytes  │ Source node_addr                    │
+│  34    │ dest_addr        │ 32 bytes  │ Destination node_addr               │
+│  66    │ src_coords_count │ 2 bytes   │ u16 LE, number of src coord entries │
+│  68    │ src_coords       │ 32 × n    │ NodeAddr array (self → root)          │
 │  ...   │ dest_coords_count│ 2 bytes   │ u16 LE, number of dest coord entries│
-│  ...   │ dest_coords      │ 32 × m    │ NodeId array (dest → root)          │
+│  ...   │ dest_coords      │ 32 × m    │ NodeAddr array (dest → root)          │
 │  ...   │ handshake_len    │ 2 bytes   │ u16 LE, Noise payload length        │
 │  ...   │ handshake_payload│ variable  │ Noise IK msg1 (82 bytes typical)    │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
@@ -543,13 +567,13 @@ Establishes a crypto session and warms router coordinate caches along the path.
 ```text
 ┌──────┬───────┬──────────────────┬──────────────────┬───────┬─────────────┐
 │ 0x00 │ 0x01  │ src_addr         │ dest_addr        │ 0x03  │ src_coords  │
-│ type │ flags │ 16 bytes         │ 16 bytes         │ count │ 3 × 32 bytes│
+│ type │ flags │ 32 bytes         │ 32 bytes         │ count │ 3 × 32 bytes│
 ├──────┴───────┴──────────────────┴──────────────────┴───────┴─────────────┤
 │ 0x04  │ dest_coords   │ 0x52  │ handshake_payload                        │
 │ count │ 4 × 32 bytes  │ len=82│ 82 bytes (Noise IK msg1)                 │
 └───────┴───────────────┴───────┴──────────────────────────────────────────┘
 
-Total: 1 + 1 + 16 + 16 + 2 + 96 + 2 + 128 + 2 + 82 = 346 bytes
+Total: 1 + 1 + 32 + 32 + 2 + 96 + 2 + 128 + 2 + 82 = 378 bytes
 ```
 
 ### 8.3 SessionAck (0x01)
@@ -564,10 +588,10 @@ Confirms session establishment and completes the Noise handshake.
 ├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
 │   0    │ msg_type         │ 1 byte    │ 0x01                                │
 │   1    │ flags            │ 1 byte    │ Reserved                            │
-│   2    │ src_addr         │ 16 bytes  │ Acknowledger's address              │
-│  18    │ dest_addr        │ 16 bytes  │ Original sender's address           │
-│  34    │ src_coords_count │ 2 bytes   │ u16 LE                              │
-│  36    │ src_coords       │ 32 × n    │ Acknowledger's coords (for caching) │
+│   2    │ src_addr         │ 32 bytes  │ Acknowledger's node_addr            │
+│  34    │ dest_addr        │ 32 bytes  │ Original sender's node_addr         │
+│  66    │ src_coords_count │ 2 bytes   │ u16 LE                              │
+│  68    │ src_coords       │ 32 × n    │ Acknowledger's coords (for caching) │
 │  ...   │ handshake_len    │ 2 bytes   │ u16 LE, Noise payload length        │
 │  ...   │ handshake_payload│ variable  │ Noise IK msg2 (33 bytes typical)    │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
@@ -588,12 +612,12 @@ Carries encrypted application data (typically IPv6 payloads).
 │   2    │ hop_limit        │ 1 byte    │ Decremented each hop                │
 │   3    │ reserved         │ 1 byte    │ Alignment padding                   │
 │   4    │ payload_length   │ 2 bytes   │ u16 LE                              │
-│   6    │ src_addr         │ 16 bytes  │ Source fd::/8 address               │
-│  22    │ dest_addr        │ 16 bytes  │ Destination fd::/8 address          │
-│  38    │ payload          │ variable  │ Encrypted application data          │
+│   6    │ src_addr         │ 32 bytes  │ Source node_addr                    │
+│  38    │ dest_addr        │ 32 bytes  │ Destination node_addr               │
+│  70    │ payload          │ variable  │ Encrypted application data          │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 
-Minimal header: 38 bytes (comparable to IPv6's 40 bytes)
+Minimal header: 70 bytes
 ```
 
 When `COORDS_PRESENT` flag is set (route warming after CoordsRequired):
@@ -609,16 +633,16 @@ When `COORDS_PRESENT` flag is set (route warming after CoordsRequired):
 │   2    │ hop_limit        │ 1 byte    │ Decremented each hop                │
 │   3    │ reserved         │ 1 byte    │ Alignment padding                   │
 │   4    │ payload_length   │ 2 bytes   │ u16 LE                              │
-│   6    │ src_addr         │ 16 bytes  │ Source fd::/8 address               │
-│  22    │ dest_addr        │ 16 bytes  │ Destination fd::/8 address          │
-│  38    │ src_coords_count │ 2 bytes   │ u16 LE                              │
-│  40    │ src_coords       │ 32 × n    │ Source coordinates                  │
+│   6    │ src_addr         │ 32 bytes  │ Source node_addr                    │
+│  38    │ dest_addr        │ 32 bytes  │ Destination node_addr               │
+│  70    │ src_coords_count │ 2 bytes   │ u16 LE                              │
+│  72    │ src_coords       │ 32 × n    │ Source coordinates                  │
 │  ...   │ dest_coords_count│ 2 bytes   │ u16 LE                              │
 │  ...   │ dest_coords      │ 32 × m    │ Destination coordinates             │
 │  ...   │ payload          │ variable  │ Encrypted application data          │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 
-With depth-4 coords both directions: 38 + 2 + 128 + 2 + 128 = 298 bytes header
+With depth-4 coords both directions: 70 + 2 + 128 + 2 + 128 = 330 bytes header
 ```
 
 ### 8.5 CoordsRequired (0x20)
@@ -634,11 +658,11 @@ coordinate cache miss.
 ├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
 │   0    │ msg_type         │ 1 byte    │ 0x20                                │
 │   1    │ flags            │ 1 byte    │ Reserved                            │
-│   2    │ dest_addr        │ 16 bytes  │ The address we couldn't route       │
-│  18    │ reporter         │ 32 bytes  │ NodeId of reporting router          │
+│   2    │ dest_addr        │ 32 bytes  │ The node_addr we couldn't route     │
+│  34    │ reporter         │ 32 bytes  │ NodeAddr of reporting router        │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 
-Total: 50 bytes
+Total: 66 bytes
 ```
 
 ### 8.6 PathBroken (0x21)
@@ -653,10 +677,10 @@ Sent when greedy routing fails (no peer is closer to destination).
 ├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
 │   0    │ msg_type         │ 1 byte    │ 0x21                                │
 │   1    │ flags            │ 1 byte    │ Reserved                            │
-│   2    │ dest_addr        │ 16 bytes  │ The unreachable destination         │
-│  18    │ reporter         │ 32 bytes  │ NodeId of reporting router          │
-│  50    │ last_coords_count│ 2 bytes   │ u16 LE                              │
-│  52    │ last_known_coords│ 32 × n    │ Stale coords that failed            │
+│   2    │ dest_addr        │ 32 bytes  │ The unreachable node_addr           │
+│  34    │ reporter         │ 32 bytes  │ NodeAddr of reporting router        │
+│  66    │ last_coords_count│ 2 bytes   │ u16 LE                              │
+│  68    │ last_known_coords│ 32 × n    │ Stale coords that failed            │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 ```
 
@@ -711,12 +735,12 @@ Router R cannot see: payload contents (encrypted with S↔D keys)
 ### 8.8 Encoding Rules
 
 - All multi-byte integers are **little-endian**
-- NodeId is 32 bytes (SHA-256 hash of npub)
+- NodeAddr is 32 bytes (SHA-256 hash of npub)
 - IPv6 addresses are 16 bytes (network byte order)
 - Variable-length coordinate arrays use 2-byte u16 count prefix
 
 ```text
-Vec<NodeId> encoding:
+Vec<NodeAddr> encoding:
   count: u16 (little-endian)
   items: [u8; 32] × count
 ```

@@ -177,7 +177,7 @@ node's npub, truncated or used directly as the filter key.
 Each node maintains a Bloom filter for each peer direction:
 
 ```rust
-peer_filters: HashMap<NodeId, BloomFilter>
+peer_filters: HashMap<NodeAddr, BloomFilter>
 ```
 
 The filter for peer P answers: "Which destinations are reachable through P?"
@@ -287,11 +287,11 @@ Discovered coordinates are cached:
 
 ```rust
 struct RouteCache {
-    entries: HashMap<NodeId, CachedCoords>,
+    entries: HashMap<NodeAddr, CachedCoords>,
 }
 
 struct CachedCoords {
-    coords: Vec<NodeId>,
+    coords: Vec<NodeAddr>,
     discovered_at: Timestamp,
     last_used: Timestamp,
 }
@@ -320,7 +320,7 @@ Example: Node D at depth 4 has coordinates `[D, P1, P2, P3, Root]`.
 Distance between two nodes is hops through their lowest common ancestor (LCA):
 
 ```rust
-fn tree_distance(a_coords: &[NodeId], b_coords: &[NodeId]) -> usize {
+fn tree_distance(a_coords: &[NodeAddr], b_coords: &[NodeAddr]) -> usize {
     let lca_depth = longest_common_suffix_length(a_coords, b_coords);
     let a_to_lca = a_coords.len() - lca_depth;
     let b_to_lca = b_coords.len() - lca_depth;
@@ -333,16 +333,16 @@ Note: Coordinates are ordered self-to-root, so common ancestry is a suffix.
 ### Greedy Routing Algorithm
 
 ```rust
-fn greedy_next_hop(&self, dest_coords: &[NodeId]) -> NodeId {
+fn greedy_next_hop(&self, dest_coords: &[NodeAddr]) -> NodeAddr {
     // Check if we are the destination
-    if dest_coords[0] == self.node_id {
+    if dest_coords[0] == self.node_addr {
         return LOCAL_DELIVERY;
     }
 
     // Check if destination is a direct peer
     for peer in &self.peers {
-        if peer.node_id == dest_coords[0] {
-            return peer.node_id;
+        if peer.node_addr == dest_coords[0] {
+            return peer.node_addr;
         }
     }
 
@@ -350,7 +350,7 @@ fn greedy_next_hop(&self, dest_coords: &[NodeId]) -> NodeId {
     self.peers
         .iter()
         .min_by_key(|p| tree_distance(&p.coords, dest_coords))
-        .map(|p| p.node_id)
+        .map(|p| p.node_addr)
         .expect("no peers")
 }
 ```
@@ -389,7 +389,7 @@ relying on application-layer timeouts to detect failures, FIPS provides explicit
 feedback that allows rapid route recovery. The tradeoff favors responsiveness
 over metadata privacy.
 
-**Partial mitigation**: FIPS addresses are derived from `SHA-256(npub)`, not the
+**Partial mitigation**: FIPS addresses are derived from `SHA-256(pubkey)`, not the
 npub itself. An observer learns that `fd12:3456:...` is communicating with
 `fd78:9abc:...`, but cannot directly determine the Nostr identities without
 additional information (e.g., DNS lookup correlation, prior knowledge of the
@@ -493,7 +493,7 @@ impl Router {
                 // Cache miss — request coordinates
                 self.send_error(from, CoordsRequired {
                     dest_addr: packet.dest_addr,
-                    reporter: self.node_id,
+                    reporter: self.node_addr,
                 });
             }
         }
@@ -510,7 +510,7 @@ struct CoordCache {
 }
 
 struct CacheEntry {
-    coords: Vec<NodeId>,
+    coords: Vec<NodeAddr>,
     created: Timestamp,
     last_used: Timestamp,
     expires: Timestamp,

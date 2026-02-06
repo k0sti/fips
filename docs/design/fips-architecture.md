@@ -35,7 +35,7 @@ Node
 ├── coord_cache: CoordCache         // address → coordinates for routing
 ├── transports: HashMap<TransportId, Transport>
 ├── links: HashMap<LinkId, Link>
-└── peers: HashMap<NodeId, Peer>
+└── peers: HashMap<NodeAddr, Peer>
 ```
 
 ### Identity
@@ -46,12 +46,26 @@ Cryptographic identity using Nostr keys (secp256k1).
 Identity
 ├── npub: PublicKey                 // public key (bech32: npub1...)
 ├── nsec: SecretKey                 // secret key (bech32: nsec1...)
-├── node_id: NodeId                 // SHA-256(npub), 32 bytes
-└── address: FipsAddress            // IPv6 ULA derived from node_id (fd::/8)
+├── node_addr: NodeAddr                 // SHA-256(pubkey), 32 bytes
+└── address: FipsAddress            // IPv6 ULA derived from node_addr (fd::/8)
 ```
 
-`NodeId` is the routing identifier, derived deterministically from `npub`.
+`NodeAddr` is the routing identifier, derived deterministically from `npub`.
 Transport addresses and FIPS identity are fully decoupled.
+
+### Protocol Layer Visibility
+
+| Observer                      | Link Addr     | Node Addr    | FIPS Addr (pubkey) | Payload |
+|-------------------------------|---------------|--------------|--------------------| --------|
+| Transport (IP router, switch) | Yes           | No           | No                 | No      |
+| FIPS routing node             | Last hop only | Yes (header) | No                 | No      |
+| Destination endpoint          | Yes           | Yes          | Yes                | Yes     |
+
+**Key insight**: Three independent encryption layers ensure:
+
+- Passive transport observers see only encrypted blobs
+- FIPS routing nodes see node_addrs but not pubkeys (FIPS addresses) or payload
+- Only endpoints know each other's FIPS addresses (pubkeys) and can decrypt payload
 
 ### Transport
 
@@ -130,14 +144,14 @@ An authenticated remote FIPS node, reachable via a link.
 
 ```
 Peer
-├── node_id: NodeId                 // routing identity
+├── node_addr: NodeAddr                 // routing identity
 ├── npub: PublicKey                 // cryptographic identity
 ├── link_id: LinkId                 // which link reaches this peer
 ├── state: PeerState                // lifecycle state
 │
 │  // Spanning tree
 ├── declaration: ParentDeclaration  // their latest
-├── ancestry: Vec<NodeId>           // their path to root
+├── ancestry: Vec<NodeAddr>           // their path to root
 │
 │  // Bloom filter (inbound—what's reachable through them)
 ├── inbound_filter: BloomFilter
@@ -182,12 +196,12 @@ transport per peer).
 ```
 TreeState
 ├── my_declaration: ParentDeclaration
-│   ├── node_id: NodeId
-│   ├── parent_id: NodeId           // self if root candidate
+│   ├── node_addr: NodeAddr
+│   ├── parent_id: NodeAddr           // self if root candidate
 │   ├── sequence: u64               // monotonic
 │   └── signature: Signature
-├── my_coords: Vec<NodeId>          // [self, parent, grandparent, ..., root]
-└── root: NodeId                    // elected root (smallest reachable node_id)
+├── my_coords: Vec<NodeAddr>          // [self, parent, grandparent, ..., root]
+└── root: NodeAddr                    // elected root (smallest reachable node_addr)
 ```
 
 ### Per-Peer State
@@ -222,8 +236,8 @@ Nodes do NOT know about other subtrees—only paths toward root.
 
 ```
 BloomState
-├── own_node_id: NodeId             // always included in outgoing filters
-├── leaf_dependents: HashSet<NodeId>  // leaf-only nodes we speak for
+├── own_node_addr: NodeAddr             // always included in outgoing filters
+├── leaf_dependents: HashSet<NodeAddr>  // leaf-only nodes we speak for
 ├── is_leaf_only: bool              // if true, no filter processing
 └── update_debounce: Duration       // rate limit outgoing updates
 ```
@@ -243,7 +257,7 @@ Outgoing filter to peer Q is computed, not stored:
 
 ```
 outbound_filter(Q) =
-    own_node_id
+    own_node_addr
     ∪ leaf_dependents
     ∪ { entries from peer[P].inbound_filter for all P ≠ Q where filter_ttl > 0 }
 ```
@@ -373,7 +387,7 @@ PeerEvent
 ├── LinkFailed { reason }
 ├── Msg1Received { noise_payload }
 ├── Msg2Received { noise_payload }
-├── HandshakeComplete { npub, node_id }
+├── HandshakeComplete { npub, node_addr }
 ├── HandshakeFailed { reason }
 ├── TreeAnnounceReceived { declaration, ancestry }
 ├── FilterAnnounceReceived { filter, sequence, ttl }
@@ -582,7 +596,7 @@ A leaf-only node uses a minimal subset of the full architecture:
 
 ```
 LeafOnlyNode
-├── identity: Identity              // full (npub, nsec, node_id, address)
+├── identity: Identity              // full (npub, nsec, node_addr, address)
 ├── config: Config                  // simplified
 ├── tun: TunInterface               // full (provides IPv6 to local apps)
 ├── transport: Transport            // one
@@ -622,7 +636,7 @@ The upstream peer entry for a leaf-only node:
 
 ```
 UpstreamPeer (leaf-only)
-├── node_id: NodeId
+├── node_addr: NodeAddr
 ├── npub: PublicKey
 ├── link_id: LinkId
 ├── state: PeerState                // auth lifecycle only
@@ -739,7 +753,7 @@ The startup sequence initializes components in dependency order:
 
 2. Initialize identity
    ├── Load nsec from config (or generate if absent)
-   ├── Derive npub, node_id, and FIPS address
+   ├── Derive npub, node_addr, and FIPS address
    └── Log identity information
 
 3. Initialize transports
