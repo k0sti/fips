@@ -288,7 +288,7 @@ The crypto session handshake (SessionSetup/SessionAck) warms route caches at
 intermediate routers as it transits. Each message carries the sender's
 coordinates; routers extract and cache `(src_addr, dest_addr) → next_hop` for
 both directions. After the handshake completes, data packets use minimal
-68-byte headers and routers forward based on cached routes.
+36-byte headers and routers forward based on cached routes.
 
 ### 5.2 Cache Miss Recovery
 
@@ -533,7 +533,7 @@ the inner payload is encrypted end-to-end with session keys.
 | 0x21      | PathBroken     | R → S     | Greedy routing failed             |
 
 > **Address terminology**: The `src_addr` and `dest_addr` fields in session packet
-> headers are node_addrs (32-byte SHA-256 hashes of pubkeys). These are visible to
+> headers are node_addrs (16-byte truncated SHA-256 hashes of pubkeys). These are visible to
 > intermediate routers for routing decisions. The actual FIPS addresses (pubkeys/npubs)
 > are exchanged only during the Noise IK handshake and never appear in packet
 > headers—routers cannot determine endpoint identities from the node_addrs they see.
@@ -551,12 +551,12 @@ Establishes a crypto session and warms router coordinate caches along the path.
 │   0    │ msg_type         │ 1 byte    │ 0x00                                │
 │   1    │ flags            │ 1 byte    │ Bit 0: REQUEST_ACK                  │
 │        │                  │           │ Bit 1: BIDIRECTIONAL                │
-│   2    │ src_addr         │ 32 bytes  │ Source node_addr                    │
-│  34    │ dest_addr        │ 32 bytes  │ Destination node_addr               │
-│  66    │ src_coords_count │ 2 bytes   │ u16 LE, number of src coord entries │
-│  68    │ src_coords       │ 32 × n    │ NodeAddr array (self → root)          │
+│   2    │ src_addr         │ 16 bytes  │ Source node_addr                    │
+│  18    │ dest_addr        │ 16 bytes  │ Destination node_addr               │
+│  34    │ src_coords_count │ 2 bytes   │ u16 LE, number of src coord entries │
+│  36    │ src_coords       │ 16 × n    │ NodeAddr array (self → root)          │
 │  ...   │ dest_coords_count│ 2 bytes   │ u16 LE, number of dest coord entries│
-│  ...   │ dest_coords      │ 32 × m    │ NodeAddr array (dest → root)          │
+│  ...   │ dest_coords      │ 16 × m    │ NodeAddr array (dest → root)          │
 │  ...   │ handshake_len    │ 2 bytes   │ u16 LE, Noise payload length        │
 │  ...   │ handshake_payload│ variable  │ Noise IK msg1 (82 bytes typical)    │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
@@ -567,13 +567,13 @@ Establishes a crypto session and warms router coordinate caches along the path.
 ```text
 ┌──────┬───────┬──────────────────┬──────────────────┬───────┬─────────────┐
 │ 0x00 │ 0x01  │ src_addr         │ dest_addr        │ 0x03  │ src_coords  │
-│ type │ flags │ 32 bytes         │ 32 bytes         │ count │ 3 × 32 bytes│
+│ type │ flags │ 16 bytes         │ 16 bytes         │ count │ 3 × 16 bytes│
 ├──────┴───────┴──────────────────┴──────────────────┴───────┴─────────────┤
 │ 0x04  │ dest_coords   │ 0x52  │ handshake_payload                        │
-│ count │ 4 × 32 bytes  │ len=82│ 82 bytes (Noise IK msg1)                 │
+│ count │ 4 × 16 bytes  │ len=82│ 82 bytes (Noise IK msg1)                 │
 └───────┴───────────────┴───────┴──────────────────────────────────────────┘
 
-Total: 1 + 1 + 32 + 32 + 2 + 96 + 2 + 128 + 2 + 82 = 378 bytes
+Total: 1 + 1 + 16 + 16 + 2 + 48 + 2 + 64 + 2 + 82 = 234 bytes
 ```
 
 ### 8.3 SessionAck (0x01)
@@ -588,10 +588,10 @@ Confirms session establishment and completes the Noise handshake.
 ├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
 │   0    │ msg_type         │ 1 byte    │ 0x01                                │
 │   1    │ flags            │ 1 byte    │ Reserved                            │
-│   2    │ src_addr         │ 32 bytes  │ Acknowledger's node_addr            │
-│  34    │ dest_addr        │ 32 bytes  │ Original sender's node_addr         │
-│  66    │ src_coords_count │ 2 bytes   │ u16 LE                              │
-│  68    │ src_coords       │ 32 × n    │ Acknowledger's coords (for caching) │
+│   2    │ src_addr         │ 16 bytes  │ Acknowledger's node_addr            │
+│  18    │ dest_addr        │ 16 bytes  │ Original sender's node_addr         │
+│  34    │ src_coords_count │ 2 bytes   │ u16 LE                              │
+│  36    │ src_coords       │ 16 × n    │ Acknowledger's coords (for caching) │
 │  ...   │ handshake_len    │ 2 bytes   │ u16 LE, Noise payload length        │
 │  ...   │ handshake_payload│ variable  │ Noise IK msg2 (33 bytes typical)    │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
@@ -612,12 +612,12 @@ Carries encrypted application data (typically IPv6 payloads).
 │   2    │ hop_limit        │ 1 byte    │ Decremented each hop                │
 │   3    │ reserved         │ 1 byte    │ Alignment padding                   │
 │   4    │ payload_length   │ 2 bytes   │ u16 LE                              │
-│   6    │ src_addr         │ 32 bytes  │ Source node_addr                    │
-│  38    │ dest_addr        │ 32 bytes  │ Destination node_addr               │
-│  70    │ payload          │ variable  │ Encrypted application data          │
+│   6    │ src_addr         │ 16 bytes  │ Source node_addr                    │
+│  22    │ dest_addr        │ 16 bytes  │ Destination node_addr               │
+│  38    │ payload          │ variable  │ Encrypted application data          │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 
-Minimal header: 70 bytes
+Minimal header: 38 bytes
 ```
 
 When `COORDS_PRESENT` flag is set (route warming after CoordsRequired):
@@ -633,16 +633,16 @@ When `COORDS_PRESENT` flag is set (route warming after CoordsRequired):
 │   2    │ hop_limit        │ 1 byte    │ Decremented each hop                │
 │   3    │ reserved         │ 1 byte    │ Alignment padding                   │
 │   4    │ payload_length   │ 2 bytes   │ u16 LE                              │
-│   6    │ src_addr         │ 32 bytes  │ Source node_addr                    │
-│  38    │ dest_addr        │ 32 bytes  │ Destination node_addr               │
-│  70    │ src_coords_count │ 2 bytes   │ u16 LE                              │
-│  72    │ src_coords       │ 32 × n    │ Source coordinates                  │
+│   6    │ src_addr         │ 16 bytes  │ Source node_addr                    │
+│  22    │ dest_addr        │ 16 bytes  │ Destination node_addr               │
+│  38    │ src_coords_count │ 2 bytes   │ u16 LE                              │
+│  40    │ src_coords       │ 16 × n    │ Source coordinates                  │
 │  ...   │ dest_coords_count│ 2 bytes   │ u16 LE                              │
-│  ...   │ dest_coords      │ 32 × m    │ Destination coordinates             │
+│  ...   │ dest_coords      │ 16 × m    │ Destination coordinates             │
 │  ...   │ payload          │ variable  │ Encrypted application data          │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 
-With depth-4 coords both directions: 70 + 2 + 128 + 2 + 128 = 330 bytes header
+With depth-4 coords both directions: 38 + 2 + 64 + 2 + 64 = 170 bytes header
 ```
 
 ### 8.5 CoordsRequired (0x20)
@@ -658,11 +658,11 @@ coordinate cache miss.
 ├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
 │   0    │ msg_type         │ 1 byte    │ 0x20                                │
 │   1    │ flags            │ 1 byte    │ Reserved                            │
-│   2    │ dest_addr        │ 32 bytes  │ The node_addr we couldn't route     │
-│  34    │ reporter         │ 32 bytes  │ NodeAddr of reporting router        │
+│   2    │ dest_addr        │ 16 bytes  │ The node_addr we couldn't route     │
+│  18    │ reporter         │ 16 bytes  │ NodeAddr of reporting router        │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 
-Total: 66 bytes
+Total: 34 bytes
 ```
 
 ### 8.6 PathBroken (0x21)
@@ -677,10 +677,10 @@ Sent when greedy routing fails (no peer is closer to destination).
 ├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
 │   0    │ msg_type         │ 1 byte    │ 0x21                                │
 │   1    │ flags            │ 1 byte    │ Reserved                            │
-│   2    │ dest_addr        │ 32 bytes  │ The unreachable node_addr           │
-│  34    │ reporter         │ 32 bytes  │ NodeAddr of reporting router        │
-│  66    │ last_coords_count│ 2 bytes   │ u16 LE                              │
-│  68    │ last_known_coords│ 32 × n    │ Stale coords that failed            │
+│   2    │ dest_addr        │ 16 bytes  │ The unreachable node_addr           │
+│  18    │ reporter         │ 16 bytes  │ NodeAddr of reporting router        │
+│  34    │ last_coords_count│ 2 bytes   │ u16 LE                              │
+│  36    │ last_known_coords│ 16 × n    │ Stale coords that failed            │
 └────────┴──────────────────┴───────────┴─────────────────────────────────────┘
 ```
 
@@ -715,7 +715,7 @@ A DataPacket from source S to destination D, transiting router R:
 │  │              SESSION LAYER (S↔D encrypted)                            │  │
 │  ├───────────┬───────┬──────────┬──────────┬─────────────────────────────┤  │
 │  │ 0x10      │ flags │ hop_limit│ pay_len  │ src_addr     │ dest_addr    │  │
-│  │ DataPacket│ 0x00  │ 64       │ 1400     │ 32 bytes     │ 32 bytes     │  │
+│  │ DataPacket│ 0x00  │ 64       │ 1400     │ 16 bytes     │ 16 bytes     │  │
 │  ├───────────┴───────┴──────────┴──────────┴──────────────┴──────────────┤  │
 │  │                                                                       │  │
 │  │                    ENCRYPTED PAYLOAD (S↔D session keys)               │  │
@@ -735,12 +735,12 @@ Router R cannot see: payload contents (encrypted with S↔D keys)
 ### 8.8 Encoding Rules
 
 - All multi-byte integers are **little-endian**
-- NodeAddr is 32 bytes (SHA-256 hash of npub)
+- NodeAddr is 16 bytes (truncated SHA-256 hash of npub)
 - IPv6 addresses are 16 bytes (network byte order)
 - Variable-length coordinate arrays use 2-byte u16 count prefix
 
 ```text
 Vec<NodeAddr> encoding:
   count: u16 (little-endian)
-  items: [u8; 32] × count
+  items: [u8; 16] × count
 ```

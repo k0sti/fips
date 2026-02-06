@@ -584,7 +584,7 @@ enum RouteState {
 | LookupResponse | Return coordinates | ~400 bytes | Reply to discovery |
 | SessionSetup | Warm router caches + crypto init | ~400-700 bytes | Before data transfer |
 | SessionAck | Confirm session + crypto response | ~300-500 bytes | Session confirmation |
-| DataPacket | Application data | 68 bytes + payload (minimal) | Bulk of traffic |
+| DataPacket | Application data | 36 bytes + payload (minimal) | Bulk of traffic |
 | DataPacket | With coordinates | ~300-500 bytes + payload | After CoordsRequired |
 | CoordsRequired | Request coords in next packet | ~50 bytes | Cache miss recovery |
 
@@ -601,7 +601,7 @@ enum RouteState {
 - **Bloom filter traffic**: Near zero (event-driven, no changes)
 - **Discovery traffic**: Rare (warm caches)
 - **Session traffic**: Rare (established sessions)
-- **Data traffic**: Minimal overhead (68-byte header)
+- **Data traffic**: Minimal overhead (36-byte header)
 
 ### Network Churn
 

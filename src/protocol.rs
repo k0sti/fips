@@ -31,8 +31,8 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Data packet header size in bytes (excluding payload).
-/// flags(1) + hop_limit(1) + payload_length(2) + src_addr(32) + dest_addr(32) = 68
-pub const DATA_HEADER_SIZE: usize = 68;
+/// flags(1) + hop_limit(1) + payload_length(2) + src_addr(16) + dest_addr(16) = 36
+pub const DATA_HEADER_SIZE: usize = 36;
 
 // ============================================================================
 // Link Layer Message Types (peer-to-peer, hop-by-hop)
@@ -479,9 +479,9 @@ impl LookupResponse {
 
     /// Get the bytes that should be signed as proof.
     ///
-    /// Format: request_id (8) || target (32)
+    /// Format: request_id (8) || target (16)
     pub fn proof_bytes(request_id: u64, target: &NodeAddr) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(40);
+        let mut bytes = Vec::with_capacity(24);
         bytes.extend_from_slice(&request_id.to_le_bytes());
         bytes.extend_from_slice(target.as_bytes());
         bytes
@@ -716,12 +716,12 @@ impl DataFlags {
 
 /// Minimal data packet with addresses only (no coordinates).
 ///
-/// The 68-byte header contains:
+/// The 36-byte header contains:
 /// - flags (1 byte)
 /// - hop_limit (1 byte)
 /// - payload_length (2 bytes)
-/// - src_addr (32 bytes)
-/// - dest_addr (32 bytes)
+/// - src_addr (16 bytes)
+/// - dest_addr (16 bytes)
 ///
 /// Routers use cached coordinates for routing decisions.
 #[derive(Clone, Debug)]
@@ -852,7 +852,7 @@ mod tests {
     use super::*;
 
     fn make_node_addr(val: u8) -> NodeAddr {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; 16];
         bytes[0] = val;
         NodeAddr::from_bytes(bytes)
     }
@@ -971,9 +971,9 @@ mod tests {
     fn test_data_packet_size() {
         let packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![0u8; 100]);
 
-        // 68 byte header + 100 byte payload
-        assert_eq!(packet.total_size(), 168);
-        assert_eq!(packet.header_size(), 68);
+        // 36 byte header + 100 byte payload
+        assert_eq!(packet.total_size(), 136);
+        assert_eq!(packet.header_size(), 36);
         assert_eq!(packet.payload_len(), 100);
     }
 
@@ -1086,9 +1086,9 @@ mod tests {
         let target = make_node_addr(42);
         let bytes = LookupResponse::proof_bytes(12345, &target);
 
-        assert_eq!(bytes.len(), 40); // 8 + 32
+        assert_eq!(bytes.len(), 24); // 8 + 16
         assert_eq!(&bytes[0..8], &12345u64.to_le_bytes());
-        assert_eq!(&bytes[8..40], target.as_bytes());
+        assert_eq!(&bytes[8..24], target.as_bytes());
     }
 
     // ===== FilterAnnounce Tests =====

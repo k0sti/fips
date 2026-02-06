@@ -46,7 +46,7 @@ Cryptographic identity using Nostr keys (secp256k1).
 Identity
 ├── npub: PublicKey                 // public key (bech32: npub1...)
 ├── nsec: SecretKey                 // secret key (bech32: nsec1...)
-├── node_addr: NodeAddr                 // SHA-256(pubkey), 32 bytes
+├── node_addr: NodeAddr                 // SHA-256(pubkey) truncated, 16 bytes
 └── address: FipsAddress            // IPv6 ULA derived from node_addr (fd::/8)
 ```
 

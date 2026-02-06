@@ -144,9 +144,9 @@ impl ParentDeclaration {
 
     /// Get the bytes that should be signed.
     ///
-    /// Format: node_addr (32) || parent_id (32) || sequence (8) || timestamp (8)
+    /// Format: node_addr (16) || parent_id (16) || sequence (8) || timestamp (8)
     pub fn signing_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(80);
+        let mut bytes = Vec::with_capacity(48);
         bytes.extend_from_slice(self.node_addr.as_bytes());
         bytes.extend_from_slice(self.parent_id.as_bytes());
         bytes.extend_from_slice(&self.sequence.to_le_bytes());
@@ -551,7 +551,7 @@ mod tests {
     use super::*;
 
     fn make_node_addr(val: u8) -> NodeAddr {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; 16];
         bytes[0] = val;
         NodeAddr::from_bytes(bytes)
     }
@@ -766,14 +766,14 @@ mod tests {
         let decl = ParentDeclaration::new(node, parent, 100, 1234567890);
         let bytes = decl.signing_bytes();
 
-        // Should be 80 bytes: 32 + 32 + 8 + 8
-        assert_eq!(bytes.len(), 80);
+        // Should be 48 bytes: 16 + 16 + 8 + 8
+        assert_eq!(bytes.len(), 48);
 
         // Verify structure
-        assert_eq!(&bytes[0..32], node.as_bytes());
-        assert_eq!(&bytes[32..64], parent.as_bytes());
-        assert_eq!(&bytes[64..72], &100u64.to_le_bytes());
-        assert_eq!(&bytes[72..80], &1234567890u64.to_le_bytes());
+        assert_eq!(&bytes[0..16], node.as_bytes());
+        assert_eq!(&bytes[16..32], parent.as_bytes());
+        assert_eq!(&bytes[32..40], &100u64.to_le_bytes());
+        assert_eq!(&bytes[40..48], &1234567890u64.to_le_bytes());
     }
 
     #[test]

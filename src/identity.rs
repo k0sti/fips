@@ -33,7 +33,7 @@ pub enum IdentityError {
     #[error("signature verification failed")]
     SignatureVerificationFailed,
 
-    #[error("invalid node_addr length: expected 32, got {0}")]
+    #[error("invalid node_addr length: expected 16, got {0}")]
     InvalidNodeAddrLength(usize),
 
     #[error("invalid address length: expected 16, got {0}")]
@@ -64,42 +64,44 @@ pub enum IdentityError {
     InvalidHex(#[from] hex::FromHexError),
 }
 
-/// 32-byte node identifier derived from SHA-256(pubkey).
+/// 16-byte node identifier derived from truncated SHA-256(pubkey).
 ///
-/// The node_addr is used in protocol messages and bloom filters. Hashing the
-/// public key prevents grinding attacks that exploit secp256k1's algebraic
-/// structure.
+/// The node_addr is the first 16 bytes of SHA-256(pubkey), providing 128 bits
+/// of collision resistance. Hashing the public key prevents grinding attacks
+/// that exploit secp256k1's algebraic structure.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeAddr([u8; 32]);
+pub struct NodeAddr([u8; 16]);
 
 impl NodeAddr {
-    /// Create a NodeAddr from a 32-byte array.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    /// Create a NodeAddr from a 16-byte array.
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
 
     /// Create a NodeAddr from a slice.
     pub fn from_slice(slice: &[u8]) -> Result<Self, IdentityError> {
-        if slice.len() != 32 {
+        if slice.len() != 16 {
             return Err(IdentityError::InvalidNodeAddrLength(slice.len()));
         }
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; 16];
         bytes.copy_from_slice(slice);
         Ok(Self(bytes))
     }
 
     /// Derive a NodeAddr from an x-only public key (npub).
+    ///
+    /// Computes SHA-256(pubkey) and takes the first 16 bytes.
     pub fn from_pubkey(pubkey: &XOnlyPublicKey) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(pubkey.serialize());
         let hash = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&hash);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash[..16]);
         Self(bytes)
     }
 
     /// Return the raw bytes.
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 
@@ -547,8 +549,8 @@ mod tests {
     fn test_identity_generation() {
         let identity = Identity::generate();
 
-        // NodeAddr should be 32 bytes
-        assert_eq!(identity.node_addr().as_bytes().len(), 32);
+        // NodeAddr should be 16 bytes
+        assert_eq!(identity.node_addr().as_bytes().len(), 16);
 
         // Address should start with 0xfd
         assert_eq!(identity.address().as_bytes()[0], 0xfd);
@@ -663,15 +665,15 @@ mod tests {
 
     #[test]
     fn test_node_addr_from_slice() {
-        let bytes = [0u8; 32];
+        let bytes = [0u8; 16];
         let node_addr = NodeAddr::from_slice(&bytes).unwrap();
         assert_eq!(node_addr.as_bytes(), &bytes);
 
         // Wrong length should fail
-        let short = [0u8; 16];
+        let short = [0u8; 8];
         assert!(matches!(
             NodeAddr::from_slice(&short),
-            Err(IdentityError::InvalidNodeAddrLength(16))
+            Err(IdentityError::InvalidNodeAddrLength(8))
         ));
     }
 

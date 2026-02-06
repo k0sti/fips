@@ -135,7 +135,7 @@ The pubkey is hashed to derive a node_addr used for routing:
 ```
 pubkey (secp256k1 x-only, 32 bytes)
   → SHA-256
-  → node_addr (32 bytes)
+  → node_addr (16 bytes)
   → truncate with prefix
   → IPv6 address (128 bits, fd::/8)
 ```
@@ -177,13 +177,13 @@ session establishment.
 
 FIPS uses several related but distinct identifiers at different protocol layers:
 
-| Term                       | Layer               | Visible To     | Description                                           |
-|----------------------------|---------------------|----------------|-------------------------------------------------------|
-| **FIPS address / pubkey**  | Application/Session | Endpoints only | 32-byte secp256k1 public key - the endpoint identity  |
-| **npub**                   | (encoding)          | Human readers  | Bech32 encoding of pubkey for display/config          |
-| **node_addr**              | Routing             | Routing nodes  | SHA-256(pubkey) - cannot be reversed to pubkey        |
-| **link_addr**              | Transport           | Direct peers   | IP:port, MAC, .onion - transport-specific             |
-| **IPv6 address**           | IPv6 shim           | Applications   | fd::/8 derived from node_addr - optional compatibility|
+| Term                       | Layer               | Visible To     | Description                                                          |
+|----------------------------|---------------------|----------------|----------------------------------------------------------------------|
+| **FIPS address / pubkey**  | Application/Session | Endpoints only | 32-byte secp256k1 public key - the endpoint identity                 |
+| **npub**                   | (encoding)          | Human readers  | Bech32 encoding of pubkey for display/config                         |
+| **node_addr**              | Routing             | Routing nodes  | SHA-256(pubkey) truncated to 128 bits - cannot be reversed to pubkey |
+| **link_addr**              | Transport           | Direct peers   | IP:port, MAC, .onion - transport-specific                            |
+| **IPv6 address**           | IPv6 shim           | Applications   | fd::/8 derived from node_addr - optional compatibility               |
 
 **Privacy property**: The pubkey (FIPS address / Nostr identity) is never exposed to
 intermediate routing nodes. They see only the node_addr, a one-way hash. An observer

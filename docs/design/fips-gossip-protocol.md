@@ -38,13 +38,13 @@ coordinates and distances.
 TreeAnnounce {
     sequence: u64,              // Monotonic, increments on parent change
     timestamp: u64,             // Unix timestamp (seconds)
-    parent: NodeAddr,             // 32 bytes, SHA-256(pubkey) of selected parent
+    parent: NodeAddr,             // 16 bytes, truncated SHA-256(pubkey) of selected parent
     ancestry: Vec<AncestryEntry>,  // Path from self to root
     signature: Signature,       // 64 bytes, signs (sequence || timestamp || parent || ancestry)
 }
 
 AncestryEntry {
-    node_addr: NodeAddr,            // 32 bytes
+    node_addr: NodeAddr,            // 16 bytes
     sequence: u64,              // That node's sequence number
     timestamp: u64,             // That node's timestamp
     signature: Signature,       // That node's signature over its declaration
@@ -72,11 +72,11 @@ signed by the declaring node, allowing verification of the entire chain.
 |-----------|------|
 | sequence | 8 bytes |
 | timestamp | 8 bytes |
-| parent | 32 bytes |
+| parent | 16 bytes |
 | signature | 64 bytes |
-| Per ancestry entry | 32 + 8 + 8 + 64 = 112 bytes |
+| Per ancestry entry | 16 + 8 + 8 + 64 = 96 bytes |
 
-For tree depth D: `112 + D * 112` bytes. At depth 10: ~1.2 KB.
+For tree depth D: `96 + D * 96` bytes. At depth 10: ~1.1 KB.
 
 ### 2.4 Exchange Rules
 
@@ -248,8 +248,8 @@ local Bloom filters.
 ```text
 LookupRequest {
     request_id: u64,            // Unique identifier for this request
-    target: NodeAddr,             // 32 bytes, who we're looking for
-    origin: NodeAddr,             // 32 bytes, who's asking
+    target: NodeAddr,             // 16 bytes, who we're looking for
+    origin: NodeAddr,             // 16 bytes, who's asking
     origin_coords: Vec<NodeAddr>, // Origin's ancestry (for return path)
     ttl: u8,                    // Remaining propagation hops
     visited: CompactBloomFilter,// ~256 bytes, prevents loops
@@ -313,7 +313,7 @@ LookupResponse returns the target's coordinates to the requester.
 ```text
 LookupResponse {
     request_id: u64,            // Echoes LookupRequest.request_id
-    target: NodeAddr,             // 32 bytes, confirms who was found
+    target: NodeAddr,             // 16 bytes, confirms who was found
     target_coords: Vec<NodeAddr>, // Target's ancestry (the key payload)
     proof: Signature,           // 64 bytes, target signs to prove existence
 }
@@ -384,7 +384,7 @@ handshake completion.
 
 ## 8. Encoding
 
-All multi-byte integers are little-endian. NodeAddr is 32 bytes (SHA-256 hash).
+All multi-byte integers are little-endian. NodeAddr is 16 bytes (truncated SHA-256 hash).
 Signatures are 64 bytes (secp256k1 Schnorr).
 
 Variable-length fields (ancestry, coordinates) are prefixed with a 2-byte
@@ -431,34 +431,34 @@ Propagates spanning tree state between directly connected peers.
 │  │   0    │ msg_type         │ 1 byte    │ 0x10                          │  │
 │  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
 │  │   9    │ timestamp        │ 8 bytes   │ u64 LE, Unix seconds          │  │
-│  │  17    │ parent           │ 32 bytes  │ NodeAddr of selected parent     │  │
-│  │  49    │ ancestry_count   │ 2 bytes   │ u16 LE, number of entries     │  │
-│  │  51    │ ancestry[0..n]   │ 112 × n   │ AncestryEntry array           │  │
+│  │  17    │ parent           │ 16 bytes  │ NodeAddr of selected parent     │  │
+│  │  33    │ ancestry_count   │ 2 bytes   │ u16 LE, number of entries     │  │
+│  │  35    │ ancestry[0..n]   │ 96 × n    │ AncestryEntry array           │  │
 │  │  ...   │ signature        │ 64 bytes  │ Schnorr sig over all above    │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                    ANCESTRY ENTRY (112 bytes each)                    │  │
+│  │                    ANCESTRY ENTRY (96 bytes each)                     │  │
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
-│  │   0    │ node_addr          │ 32 bytes  │ SHA-256(pubkey) of this node    │  │
-│  │  32    │ sequence         │ 8 bytes   │ u64 LE, node's seq number     │  │
-│  │  40    │ timestamp        │ 8 bytes   │ u64 LE, node's timestamp      │  │
-│  │  48    │ signature        │ 64 bytes  │ Node's sig over its decl      │  │
+│  │   0    │ node_addr          │ 16 bytes  │ Truncated SHA-256(pubkey)       │  │
+│  │  16    │ sequence         │ 8 bytes   │ u64 LE, node's seq number     │  │
+│  │  24    │ timestamp        │ 8 bytes   │ u64 LE, node's timestamp      │  │
+│  │  32    │ signature        │ 64 bytes  │ Node's sig over its decl      │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Size calculation**: `1 + 8 + 8 + 32 + 2 + (depth × 112) + 64` bytes
+**Size calculation**: `1 + 8 + 8 + 16 + 2 + (depth × 96) + 64` bytes
 
 | Tree Depth | Payload Size | With Link Overhead |
 |------------|--------------|-------------------|
-| 1 (root)   | 227 bytes    | 256 bytes         |
-| 3          | 451 bytes    | 480 bytes         |
-| 5          | 675 bytes    | 704 bytes         |
-| 10         | 1235 bytes   | 1264 bytes        |
+| 1 (root)   | 195 bytes    | 224 bytes         |
+| 3          | 387 bytes    | 416 bytes         |
+| 5          | 579 bytes    | 608 bytes         |
+| 10         | 1059 bytes   | 1088 bytes        |
 
 **Concrete example** (node D at depth 3, ancestry = [D, P1, P2, Root]):
 
@@ -467,36 +467,36 @@ PLAINTEXT BYTES (hex layout):
 10                               ← msg_type = TreeAnnounce
 05 00 00 00 00 00 00 00          ← sequence = 5
 C3 B2 A1 67 00 00 00 00          ← timestamp (Unix seconds)
-[32 bytes P1's node_addr]          ← parent
+[16 bytes P1's node_addr]          ← parent
 04 00                            ← ancestry_count = 4
 
 ANCESTRY[0] - Self (D):
-  [32 bytes D's node_addr]
+  [16 bytes D's node_addr]
   05 00 00 00 00 00 00 00        ← D's sequence
   C3 B2 A1 67 00 00 00 00        ← D's timestamp
   [64 bytes D's signature]
 
 ANCESTRY[1] - Parent (P1):
-  [32 bytes P1's node_addr]
+  [16 bytes P1's node_addr]
   0A 00 00 00 00 00 00 00        ← P1's sequence
   00 B0 A1 67 00 00 00 00        ← P1's timestamp
   [64 bytes P1's signature]
 
 ANCESTRY[2] - Grandparent (P2):
-  [32 bytes P2's node_addr]
+  [16 bytes P2's node_addr]
   03 00 00 00 00 00 00 00        ← P2's sequence
   00 A0 A1 67 00 00 00 00        ← P2's timestamp
   [64 bytes P2's signature]
 
 ANCESTRY[3] - Root:
-  [32 bytes Root's node_addr]
+  [16 bytes Root's node_addr]
   01 00 00 00 00 00 00 00        ← Root's sequence
   00 90 A1 67 00 00 00 00        ← Root's timestamp
   [64 bytes Root's signature]
 
 [64 bytes D's outer signature]   ← signs entire message
 
-Total payload: 1 + 8 + 8 + 32 + 2 + (4 × 112) + 64 = 563 bytes
+Total payload: 1 + 8 + 8 + 16 + 2 + (4 × 96) + 64 = 483 bytes
 ```
 
 ### A.2 FilterAnnounce (0x11)
@@ -585,11 +585,11 @@ Discovers tree coordinates for distant destinations.
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
 │  │   0    │ msg_type         │ 1 byte    │ 0x12                          │  │
 │  │   1    │ request_id       │ 8 bytes   │ u64 LE, unique identifier     │  │
-│  │   9    │ target           │ 32 bytes  │ NodeAddr being searched for     │  │
-│  │  41    │ origin           │ 32 bytes  │ NodeAddr of requester           │  │
-│  │  73    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
-│  │  74    │ origin_coords_cnt│ 2 bytes   │ u16 LE                        │  │
-│  │  76    │ origin_coords    │ 32 × n    │ Requester's ancestry          │  │
+│  │   9    │ target           │ 16 bytes  │ NodeAddr being searched for     │  │
+│  │  25    │ origin           │ 16 bytes  │ NodeAddr of requester           │  │
+│  │  41    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
+│  │  42    │ origin_coords_cnt│ 2 bytes   │ u16 LE                        │  │
+│  │  44    │ origin_coords    │ 16 × n    │ Requester's ancestry          │  │
 │  │  ...   │ visited_hash_cnt │ 1 byte    │ Hash functions for visited    │  │
 │  │  ...   │ visited_bits     │ 256 bytes │ Compact bloom of visited nodes│  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
@@ -597,13 +597,13 @@ Discovers tree coordinates for distant destinations.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Size calculation**: `1 + 8 + 32 + 32 + 1 + 2 + (depth × 32) + 1 + 256` bytes
+**Size calculation**: `1 + 8 + 16 + 16 + 1 + 2 + (depth × 16) + 1 + 256` bytes
 
 | Origin Depth | Payload Size |
 |--------------|--------------|
-| 3            | 429 bytes    |
-| 5            | 493 bytes    |
-| 10           | 653 bytes    |
+| 3            | 349 bytes    |
+| 5            | 381 bytes    |
+| 10           | 461 bytes    |
 
 **Concrete example** (origin at depth 4):
 
@@ -611,15 +611,15 @@ Discovers tree coordinates for distant destinations.
 PLAINTEXT BYTES:
 12                               ← msg_type = LookupRequest
 [8 bytes request_id]             ← random unique ID
-[32 bytes target node_addr]        ← who we're looking for
-[32 bytes origin node_addr]        ← who's asking
+[16 bytes target node_addr]        ← who we're looking for
+[16 bytes origin node_addr]        ← who's asking
 08                               ← ttl = 8
 04 00                            ← origin_coords_count = 4
-[32 bytes] × 4                   ← origin's ancestry (128 bytes)
+[16 bytes] × 4                   ← origin's ancestry (64 bytes)
 07                               ← visited hash_count = 7
 [256 bytes visited bloom]        ← nodes that have seen this request
 
-Total: 1 + 8 + 32 + 32 + 1 + 2 + 128 + 1 + 256 = 461 bytes
+Total: 1 + 8 + 16 + 16 + 1 + 2 + 64 + 1 + 256 = 365 bytes
 ```
 
 ### A.4 LookupResponse (0x13)
@@ -638,9 +638,9 @@ Returns target's coordinates to the requester.
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
 │  │   0    │ msg_type         │ 1 byte    │ 0x13                          │  │
 │  │   1    │ request_id       │ 8 bytes   │ u64 LE, echoes request        │  │
-│  │   9    │ target           │ 32 bytes  │ NodeAddr that was found         │  │
-│  │  41    │ target_coords_cnt│ 2 bytes   │ u16 LE                        │  │
-│  │  43    │ target_coords    │ 32 × n    │ Target's ancestry to root     │  │
+│  │   9    │ target           │ 16 bytes  │ NodeAddr that was found         │  │
+│  │  25    │ target_coords_cnt│ 2 bytes   │ u16 LE                        │  │
+│  │  27    │ target_coords    │ 16 × n    │ Target's ancestry to root     │  │
 │  │  ...   │ proof            │ 64 bytes  │ Target's signature            │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
@@ -650,13 +650,13 @@ Returns target's coordinates to the requester.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Size calculation**: `1 + 8 + 32 + 2 + (depth × 32) + 64` bytes
+**Size calculation**: `1 + 8 + 16 + 2 + (depth × 16) + 64` bytes
 
 | Target Depth | Payload Size |
 |--------------|--------------|
-| 3            | 203 bytes    |
-| 5            | 267 bytes    |
-| 10           | 427 bytes    |
+| 3            | 139 bytes    |
+| 5            | 171 bytes    |
+| 10           | 251 bytes    |
 
 **Concrete example** (target at depth 5):
 
@@ -664,12 +664,12 @@ Returns target's coordinates to the requester.
 PLAINTEXT BYTES:
 13                               ← msg_type = LookupResponse
 [8 bytes request_id]             ← echoed from request
-[32 bytes target node_addr]        ← confirms who was found
+[16 bytes target node_addr]        ← confirms who was found
 05 00                            ← target_coords_count = 5
-[32 bytes] × 5                   ← target's ancestry (160 bytes)
+[16 bytes] × 5                   ← target's ancestry (80 bytes)
 [64 bytes proof signature]       ← target signs to prove existence
 
-Total: 1 + 8 + 32 + 2 + 160 + 64 = 267 bytes
+Total: 1 + 8 + 16 + 2 + 80 + 64 = 171 bytes
 ```
 
 ### A.5 Message Flow Example

@@ -470,7 +470,7 @@ mod tests {
     use super::*;
 
     fn make_node_addr(val: u8) -> NodeAddr {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; 16];
         bytes[0] = val;
         NodeAddr::from_bytes(bytes)
     }
