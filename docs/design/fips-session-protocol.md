@@ -288,7 +288,7 @@ The crypto session handshake (SessionSetup/SessionAck) warms route caches at
 intermediate routers as it transits. Each message carries the sender's
 coordinates; routers extract and cache `(src_addr, dest_addr) → next_hop` for
 both directions. After the handshake completes, data packets use minimal
-36-byte headers and routers forward based on cached routes.
+68-byte headers and routers forward based on cached routes.
 
 ### 5.2 Cache Miss Recovery
 
@@ -715,7 +715,7 @@ A DataPacket from source S to destination D, transiting router R:
 │  │              SESSION LAYER (S↔D encrypted)                            │  │
 │  ├───────────┬───────┬──────────┬──────────┬─────────────────────────────┤  │
 │  │ 0x10      │ flags │ hop_limit│ pay_len  │ src_addr     │ dest_addr    │  │
-│  │ DataPacket│ 0x00  │ 64       │ 1400     │ 16 bytes     │ 16 bytes     │  │
+│  │ DataPacket│ 0x00  │ 64       │ 1400     │ 32 bytes     │ 32 bytes     │  │
 │  ├───────────┴───────┴──────────┴──────────┴──────────────┴──────────────┤  │
 │  │                                                                       │  │
 │  │                    ENCRYPTED PAYLOAD (S↔D session keys)               │  │

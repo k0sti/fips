@@ -5,7 +5,7 @@
 //! RouteCache stores coordinates learned from discovery queries.
 
 use crate::tree::TreeCoordinate;
-use crate::{FipsAddress, NodeAddr};
+use crate::NodeAddr;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -116,13 +116,13 @@ impl CacheEntry {
 
 /// Coordinate cache for routing decisions.
 ///
-/// Maps FIPS addresses to their tree coordinates, enabling data packets
+/// Maps node addresses to their tree coordinates, enabling data packets
 /// to be routed without carrying coordinates in every packet. Populated
 /// by SessionSetup packets.
 #[derive(Clone, Debug)]
 pub struct CoordCache {
-    /// Address -> coordinates mapping.
-    entries: HashMap<FipsAddress, CacheEntry>,
+    /// NodeAddr -> coordinates mapping.
+    entries: HashMap<NodeAddr, CacheEntry>,
     /// Maximum number of entries.
     max_entries: usize,
     /// Default TTL for entries (milliseconds).
@@ -160,7 +160,7 @@ impl CoordCache {
     }
 
     /// Insert or update a cache entry.
-    pub fn insert(&mut self, addr: FipsAddress, coords: TreeCoordinate, current_time_ms: u64) {
+    pub fn insert(&mut self, addr: NodeAddr, coords: TreeCoordinate, current_time_ms: u64) {
         // Update existing entry if present
         if let Some(entry) = self.entries.get_mut(&addr) {
             entry.update(coords, current_time_ms, self.default_ttl_ms);
@@ -179,7 +179,7 @@ impl CoordCache {
     /// Insert with a custom TTL.
     pub fn insert_with_ttl(
         &mut self,
-        addr: FipsAddress,
+        addr: NodeAddr,
         coords: TreeCoordinate,
         current_time_ms: u64,
         ttl_ms: u64,
@@ -198,7 +198,7 @@ impl CoordCache {
     }
 
     /// Look up coordinates for an address (without touching).
-    pub fn get(&self, addr: &FipsAddress, current_time_ms: u64) -> Option<&TreeCoordinate> {
+    pub fn get(&self, addr: &NodeAddr, current_time_ms: u64) -> Option<&TreeCoordinate> {
         self.entries.get(addr).and_then(|entry| {
             if entry.is_expired(current_time_ms) {
                 None
@@ -211,7 +211,7 @@ impl CoordCache {
     /// Look up coordinates and touch (update last_used).
     pub fn get_and_touch(
         &mut self,
-        addr: &FipsAddress,
+        addr: &NodeAddr,
         current_time_ms: u64,
     ) -> Option<&TreeCoordinate> {
         // Check and remove if expired
@@ -232,17 +232,17 @@ impl CoordCache {
     }
 
     /// Get the full cache entry.
-    pub fn get_entry(&self, addr: &FipsAddress) -> Option<&CacheEntry> {
+    pub fn get_entry(&self, addr: &NodeAddr) -> Option<&CacheEntry> {
         self.entries.get(addr)
     }
 
     /// Remove an entry.
-    pub fn remove(&mut self, addr: &FipsAddress) -> Option<CacheEntry> {
+    pub fn remove(&mut self, addr: &NodeAddr) -> Option<CacheEntry> {
         self.entries.remove(addr)
     }
 
     /// Check if an address is cached (and not expired).
-    pub fn contains(&self, addr: &FipsAddress, current_time_ms: u64) -> bool {
+    pub fn contains(&self, addr: &NodeAddr, current_time_ms: u64) -> bool {
         self.get(addr, current_time_ms).is_some()
     }
 
@@ -413,7 +413,7 @@ impl CachedCoords {
 ///
 /// Separate from CoordCache, this stores routes learned from the discovery
 /// protocol (LookupRequest/LookupResponse) rather than session establishment.
-/// Keyed by NodeAddr rather than FipsAddress.
+/// Keyed by NodeAddr.
 #[derive(Clone, Debug)]
 pub struct RouteCache {
     /// NodeAddr -> discovered coordinates.
@@ -539,12 +539,6 @@ mod tests {
         NodeAddr::from_bytes(bytes)
     }
 
-    fn make_address(val: u8) -> FipsAddress {
-        let mut bytes = [0xfdu8; 16];
-        bytes[1] = val;
-        FipsAddress::from_bytes(bytes).unwrap()
-    }
-
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
         TreeCoordinate::new(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
@@ -595,7 +589,7 @@ mod tests {
     #[test]
     fn test_coord_cache_basic() {
         let mut cache = CoordCache::new(100, 1000);
-        let addr = make_address(1);
+        let addr = make_node_addr(1);
         let coords = make_coords(&[1, 0]);
 
         cache.insert(addr, coords.clone(), 0);
@@ -608,7 +602,7 @@ mod tests {
     #[test]
     fn test_coord_cache_expiry() {
         let mut cache = CoordCache::new(100, 1000);
-        let addr = make_address(1);
+        let addr = make_node_addr(1);
         let coords = make_coords(&[1, 0]);
 
         cache.insert(addr, coords, 0);
@@ -620,7 +614,7 @@ mod tests {
     #[test]
     fn test_coord_cache_update() {
         let mut cache = CoordCache::new(100, 1000);
-        let addr = make_address(1);
+        let addr = make_node_addr(1);
 
         cache.insert(addr, make_coords(&[1, 0]), 0);
         cache.insert(addr, make_coords(&[1, 2, 0]), 500);
@@ -634,9 +628,9 @@ mod tests {
     fn test_coord_cache_eviction() {
         let mut cache = CoordCache::new(2, 10000);
 
-        let addr1 = make_address(1);
-        let addr2 = make_address(2);
-        let addr3 = make_address(3);
+        let addr1 = make_node_addr(1);
+        let addr2 = make_node_addr(2);
+        let addr3 = make_node_addr(3);
 
         cache.insert(addr1, make_coords(&[1, 0]), 0);
         cache.insert(addr2, make_coords(&[2, 0]), 100);
@@ -656,25 +650,25 @@ mod tests {
     fn test_coord_cache_evict_expired_first() {
         let mut cache = CoordCache::new(2, 100);
 
-        cache.insert(make_address(1), make_coords(&[1, 0]), 0);
-        cache.insert(make_address(2), make_coords(&[2, 0]), 50);
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0);
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 50);
 
         // At time 150, addr1 is expired, addr2 is not
-        cache.insert(make_address(3), make_coords(&[3, 0]), 150);
+        cache.insert(make_node_addr(3), make_coords(&[3, 0]), 150);
 
         // addr1 should be evicted (expired), not addr2 (LRU but not expired)
-        assert!(!cache.contains(&make_address(1), 150));
-        assert!(cache.contains(&make_address(2), 150));
-        assert!(cache.contains(&make_address(3), 150));
+        assert!(!cache.contains(&make_node_addr(1), 150));
+        assert!(cache.contains(&make_node_addr(2), 150));
+        assert!(cache.contains(&make_node_addr(3), 150));
     }
 
     #[test]
     fn test_coord_cache_purge_expired() {
         let mut cache = CoordCache::new(100, 100);
 
-        cache.insert(make_address(1), make_coords(&[1, 0]), 0); // expires at 100
-        cache.insert(make_address(2), make_coords(&[2, 0]), 50); // expires at 150
-        cache.insert(make_address(3), make_coords(&[3, 0]), 200); // expires at 300
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0); // expires at 100
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 50); // expires at 150
+        cache.insert(make_node_addr(3), make_coords(&[3, 0]), 200); // expires at 300
 
         assert_eq!(cache.len(), 3);
 
@@ -683,15 +677,15 @@ mod tests {
         // Entry 1 and 2 expired, entry 3 still valid
         assert_eq!(purged, 2);
         assert_eq!(cache.len(), 1);
-        assert!(cache.contains(&make_address(3), 151));
+        assert!(cache.contains(&make_node_addr(3), 151));
     }
 
     #[test]
     fn test_coord_cache_stats() {
         let mut cache = CoordCache::new(100, 100);
 
-        cache.insert(make_address(1), make_coords(&[1, 0]), 0);
-        cache.insert(make_address(2), make_coords(&[2, 0]), 50);
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0);
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 50);
 
         let stats = cache.stats(150);
 

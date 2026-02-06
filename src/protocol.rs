@@ -22,7 +22,7 @@
 
 use crate::bloom::BloomFilter;
 use crate::tree::{ParentDeclaration, TreeCoordinate};
-use crate::{FipsAddress, NodeAddr};
+use crate::NodeAddr;
 use secp256k1::schnorr::Signature;
 use std::fmt;
 use thiserror::Error;
@@ -31,7 +31,8 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Data packet header size in bytes (excluding payload).
-pub const DATA_HEADER_SIZE: usize = 36;
+/// flags(1) + hop_limit(1) + payload_length(2) + src_addr(32) + dest_addr(32) = 68
+pub const DATA_HEADER_SIZE: usize = 68;
 
 // ============================================================================
 // Link Layer Message Types (peer-to-peer, hop-by-hop)
@@ -496,8 +497,8 @@ impl LookupResponse {
 /// address but cannot decrypt the payload.
 #[derive(Clone, Debug)]
 pub struct SessionDatagram {
-    /// Destination FIPS address (for routing decisions).
-    pub dest_addr: FipsAddress,
+    /// Destination node address (for routing decisions).
+    pub dest_addr: NodeAddr,
     /// Hop limit (decremented at each hop).
     pub hop_limit: u8,
     /// Encrypted session-layer payload (opaque to intermediate nodes).
@@ -506,7 +507,7 @@ pub struct SessionDatagram {
 
 impl SessionDatagram {
     /// Create a new session datagram.
-    pub fn new(dest_addr: FipsAddress, payload: Vec<u8>) -> Self {
+    pub fn new(dest_addr: NodeAddr, payload: Vec<u8>) -> Self {
         Self {
             dest_addr,
             hop_limit: 64,
@@ -594,10 +595,10 @@ impl SessionFlags {
 /// information. Routers along the path cache the mappings.
 #[derive(Clone, Debug)]
 pub struct SessionSetup {
-    /// Source FIPS address.
-    pub src_addr: FipsAddress,
-    /// Destination FIPS address.
-    pub dest_addr: FipsAddress,
+    /// Source node address.
+    pub src_addr: NodeAddr,
+    /// Destination node address.
+    pub dest_addr: NodeAddr,
     /// Source coordinates (for return path caching).
     pub src_coords: TreeCoordinate,
     /// Destination coordinates (for forward routing).
@@ -609,8 +610,8 @@ pub struct SessionSetup {
 impl SessionSetup {
     /// Create a new session setup message.
     pub fn new(
-        src_addr: FipsAddress,
-        dest_addr: FipsAddress,
+        src_addr: NodeAddr,
+        dest_addr: NodeAddr,
         src_coords: TreeCoordinate,
         dest_coords: TreeCoordinate,
     ) -> Self {
@@ -635,17 +636,17 @@ impl SessionSetup {
 /// Sent in response to SessionSetup when request_ack is set.
 #[derive(Clone, Debug)]
 pub struct SessionAck {
-    /// Source address (the acknowledger).
-    pub src_addr: FipsAddress,
-    /// Destination address (original session initiator).
-    pub dest_addr: FipsAddress,
+    /// Source node address (the acknowledger).
+    pub src_addr: NodeAddr,
+    /// Destination node address (original session initiator).
+    pub dest_addr: NodeAddr,
     /// Acknowledger's coordinates.
     pub src_coords: TreeCoordinate,
 }
 
 impl SessionAck {
     /// Create a new session acknowledgement.
-    pub fn new(src_addr: FipsAddress, dest_addr: FipsAddress, src_coords: TreeCoordinate) -> Self {
+    pub fn new(src_addr: NodeAddr, dest_addr: NodeAddr, src_coords: TreeCoordinate) -> Self {
         Self {
             src_addr,
             dest_addr,
@@ -715,12 +716,12 @@ impl DataFlags {
 
 /// Minimal data packet with addresses only (no coordinates).
 ///
-/// The 36-byte header contains:
+/// The 68-byte header contains:
 /// - flags (1 byte)
 /// - hop_limit (1 byte)
 /// - payload_length (2 bytes)
-/// - src_addr (16 bytes)
-/// - dest_addr (16 bytes)
+/// - src_addr (32 bytes)
+/// - dest_addr (32 bytes)
 ///
 /// Routers use cached coordinates for routing decisions.
 #[derive(Clone, Debug)]
@@ -729,17 +730,17 @@ pub struct DataPacket {
     pub flags: DataFlags,
     /// Hop limit (TTL).
     pub hop_limit: u8,
-    /// Source FIPS address.
-    pub src_addr: FipsAddress,
-    /// Destination FIPS address.
-    pub dest_addr: FipsAddress,
+    /// Source node address.
+    pub src_addr: NodeAddr,
+    /// Destination node address.
+    pub dest_addr: NodeAddr,
     /// Payload data.
     pub payload: Vec<u8>,
 }
 
 impl DataPacket {
     /// Create a new data packet.
-    pub fn new(src_addr: FipsAddress, dest_addr: FipsAddress, payload: Vec<u8>) -> Self {
+    pub fn new(src_addr: NodeAddr, dest_addr: NodeAddr, payload: Vec<u8>) -> Self {
         Self {
             flags: DataFlags::new(),
             hop_limit: 64,
@@ -801,14 +802,14 @@ impl DataPacket {
 #[derive(Clone, Debug)]
 pub struct CoordsRequired {
     /// Destination that couldn't be routed.
-    pub dest_addr: FipsAddress,
+    pub dest_addr: NodeAddr,
     /// Router reporting the miss.
     pub reporter: NodeAddr,
 }
 
 impl CoordsRequired {
     /// Create a new CoordsRequired error.
-    pub fn new(dest_addr: FipsAddress, reporter: NodeAddr) -> Self {
+    pub fn new(dest_addr: NodeAddr, reporter: NodeAddr) -> Self {
         Self { dest_addr, reporter }
     }
 }
@@ -819,9 +820,9 @@ impl CoordsRequired {
 #[derive(Clone, Debug)]
 pub struct PathBroken {
     /// Original source of the failed packet.
-    pub original_src: FipsAddress,
+    pub original_src: NodeAddr,
     /// Destination that couldn't be reached.
-    pub dest_addr: FipsAddress,
+    pub dest_addr: NodeAddr,
     /// Node that detected the failure.
     pub reporter: NodeAddr,
     /// Optional: last known coordinates of destination.
@@ -830,7 +831,7 @@ pub struct PathBroken {
 
 impl PathBroken {
     /// Create a new PathBroken error.
-    pub fn new(original_src: FipsAddress, dest_addr: FipsAddress, reporter: NodeAddr) -> Self {
+    pub fn new(original_src: NodeAddr, dest_addr: NodeAddr, reporter: NodeAddr) -> Self {
         Self {
             original_src,
             dest_addr,
@@ -854,12 +855,6 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
         NodeAddr::from_bytes(bytes)
-    }
-
-    fn make_address(val: u8) -> FipsAddress {
-        let mut bytes = [0xfdu8; 16];
-        bytes[1] = val;
-        FipsAddress::from_bytes(bytes).unwrap()
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
@@ -974,17 +969,17 @@ mod tests {
 
     #[test]
     fn test_data_packet_size() {
-        let packet = DataPacket::new(make_address(1), make_address(2), vec![0u8; 100]);
+        let packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![0u8; 100]);
 
-        // 36 byte header + 100 byte payload
-        assert_eq!(packet.total_size(), 136);
-        assert_eq!(packet.header_size(), 36);
+        // 68 byte header + 100 byte payload
+        assert_eq!(packet.total_size(), 168);
+        assert_eq!(packet.header_size(), 68);
         assert_eq!(packet.payload_len(), 100);
     }
 
     #[test]
     fn test_data_packet_hop_limit() {
-        let mut packet = DataPacket::new(make_address(1), make_address(2), vec![]);
+        let mut packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![]);
 
         packet.hop_limit = 2;
         assert!(packet.can_forward());
@@ -1002,7 +997,7 @@ mod tests {
 
     #[test]
     fn test_data_packet_builder() {
-        let packet = DataPacket::new(make_address(1), make_address(2), vec![1, 2, 3])
+        let packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![1, 2, 3])
             .with_hop_limit(32)
             .with_flags(DataFlags::from_byte(0x80));
 
@@ -1151,8 +1146,8 @@ mod tests {
     #[test]
     fn test_session_setup() {
         let setup = SessionSetup::new(
-            make_address(1),
-            make_address(2),
+            make_node_addr(1),
+            make_node_addr(2),
             make_coords(&[1, 0]),
             make_coords(&[2, 0]),
         )
@@ -1166,9 +1161,9 @@ mod tests {
 
     #[test]
     fn test_coords_required() {
-        let err = CoordsRequired::new(make_address(1), make_node_addr(2));
+        let err = CoordsRequired::new(make_node_addr(1), make_node_addr(2));
 
-        assert_eq!(err.dest_addr, make_address(1));
+        assert_eq!(err.dest_addr, make_node_addr(1));
         assert_eq!(err.reporter, make_node_addr(2));
     }
 
@@ -1176,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_path_broken() {
-        let err = PathBroken::new(make_address(1), make_address(2), make_node_addr(3))
+        let err = PathBroken::new(make_node_addr(1), make_node_addr(2), make_node_addr(3))
             .with_last_coords(make_coords(&[2, 0]));
 
         assert!(err.last_known_coords.is_some());
