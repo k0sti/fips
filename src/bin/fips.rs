@@ -96,14 +96,23 @@ async fn main() {
 
     info!("FIPS running, press Ctrl+C to exit");
 
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => info!("Shutdown signal received"),
-        Err(e) => error!("Failed to listen for shutdown signal: {}", e),
+    // Run the RX event loop until shutdown signal.
+    // stop() drops the packet channel, causing run_rx_loop to exit.
+    tokio::select! {
+        result = node.run_rx_loop() => {
+            match result {
+                Ok(()) => info!("RX loop exited"),
+                Err(e) => error!("RX loop error: {}", e),
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Shutdown signal received");
+        }
     }
 
     info!("FIPS shutting down");
 
-    // Stop the node (shuts down TUN, stops I/O threads)
+    // Stop the node (shuts down transports, TUN, I/O threads)
     if let Err(e) = node.stop().await {
         warn!("Error during shutdown: {}", e);
     }
