@@ -7,6 +7,7 @@
 mod handlers;
 mod lifecycle;
 mod retry;
+mod tree;
 #[cfg(test)]
 mod tests;
 
@@ -255,6 +256,10 @@ pub struct Node {
     /// Rate limiter for msg1 processing (DoS protection).
     msg1_rate_limiter: HandshakeRateLimiter,
 
+    // === Tree Announce Timing ===
+    /// Last time we refreshed our root announcement (Unix seconds).
+    last_root_refresh_secs: u64,
+
     // === Connection Retry ===
     /// Retry state for peers whose outbound connections have failed.
     /// Keyed by NodeAddr. Entries are created when a handshake times out
@@ -317,6 +322,7 @@ impl Node {
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
             msg1_rate_limiter: HandshakeRateLimiter::new(),
+            last_root_refresh_secs: 0,
             retry_pending: HashMap::new(),
         })
     }
@@ -365,6 +371,7 @@ impl Node {
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
             msg1_rate_limiter: HandshakeRateLimiter::new(),
+            last_root_refresh_secs: 0,
             retry_pending: HashMap::new(),
         }
     }

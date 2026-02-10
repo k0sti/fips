@@ -540,7 +540,7 @@ mod tests {
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
-        TreeCoordinate::new(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
+        TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
 
     // ===== CacheEntry Tests =====

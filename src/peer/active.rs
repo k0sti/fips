@@ -94,6 +94,12 @@ pub struct ActivePeer {
     /// Their path to root.
     ancestry: Option<TreeCoordinate>,
 
+    // === Tree Announce Rate Limiting ===
+    /// Last time we sent a TreeAnnounce to this peer (Unix milliseconds).
+    last_tree_announce_sent_ms: u64,
+    /// Whether a tree announce is pending (deferred due to rate limit).
+    pending_tree_announce: bool,
+
     // === Bloom Filter ===
     /// What's reachable through them (inbound filter).
     inbound_filter: Option<BloomFilter>,
@@ -132,6 +138,8 @@ impl ActivePeer {
             current_addr: None,
             declaration: None,
             ancestry: None,
+            last_tree_announce_sent_ms: 0,
+            pending_tree_announce: false,
             inbound_filter: None,
             filter_sequence: 0,
             filter_ttl: 0,
@@ -185,6 +193,8 @@ impl ActivePeer {
             current_addr: Some(current_addr),
             declaration: None,
             ancestry: None,
+            last_tree_announce_sent_ms: 0,
+            pending_tree_announce: false,
             inbound_filter: None,
             filter_sequence: 0,
             filter_ttl: 0,
@@ -441,6 +451,32 @@ impl ActivePeer {
         self.ancestry = None;
     }
 
+    // === Tree Announce Rate Limiting ===
+
+    /// Minimum interval between TreeAnnounce messages to the same peer (milliseconds).
+    const TREE_ANNOUNCE_MIN_INTERVAL_MS: u64 = 500;
+
+    /// Check if we can send a TreeAnnounce now (rate limiting).
+    pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_tree_announce_sent_ms) >= Self::TREE_ANNOUNCE_MIN_INTERVAL_MS
+    }
+
+    /// Record that we sent a TreeAnnounce to this peer.
+    pub fn record_tree_announce_sent(&mut self, now_ms: u64) {
+        self.last_tree_announce_sent_ms = now_ms;
+        self.pending_tree_announce = false;
+    }
+
+    /// Mark that a tree announce is pending (deferred due to rate limit).
+    pub fn mark_tree_announce_pending(&mut self) {
+        self.pending_tree_announce = true;
+    }
+
+    /// Check if a deferred tree announce is waiting to be sent.
+    pub fn has_pending_tree_announce(&self) -> bool {
+        self.pending_tree_announce
+    }
+
     // === Filter Updates ===
 
     /// Update peer's inbound filter.
@@ -494,7 +530,7 @@ mod tests {
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
-        TreeCoordinate::new(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
+        TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
 
     #[test]

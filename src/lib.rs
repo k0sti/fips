@@ -29,7 +29,7 @@ pub use identity::{
 pub use config::{Config, ConfigError, IdentityConfig, TunConfig, UdpConfig};
 
 // Re-export tree types
-pub use tree::{ParentDeclaration, TreeCoordinate, TreeError, TreeState};
+pub use tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
 
 // Re-export bloom filter types
 pub use bloom::{BloomError, BloomFilter, BloomState};

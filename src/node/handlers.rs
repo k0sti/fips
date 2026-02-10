@@ -43,6 +43,7 @@ impl Node {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     self.process_pending_retries(now_ms).await;
+                    self.check_tree_state().await;
                 }
             }
         }
@@ -315,6 +316,10 @@ impl Node {
                             our_index = %our_index,
                             "Inbound peer promoted to active"
                         );
+                        // Send initial tree announce to new peer
+                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
+                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                        }
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
                         // Clean up the losing connection's link
@@ -324,6 +329,10 @@ impl Node {
                             loser_link_id = %loser_link_id,
                             "Inbound cross-connection won, loser link cleaned up"
                         );
+                        // Send initial tree announce to peer (new or reconnected)
+                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
+                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                        }
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
                         // This connection lost — clean up its link
@@ -435,6 +444,10 @@ impl Node {
                             node_addr = %node_addr,
                             "Peer promoted to active"
                         );
+                        // Send initial tree announce to new peer
+                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
+                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                        }
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
                         // Clean up the losing connection's link
@@ -449,6 +462,10 @@ impl Node {
                             loser_link_id = %loser_link_id,
                             "Outbound cross-connection won, loser link cleaned up"
                         );
+                        // Send initial tree announce to peer (new or reconnected)
+                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
+                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                        }
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
                         // This connection lost — clean up its link
@@ -673,7 +690,7 @@ impl Node {
         match msg_type {
             0x10 => {
                 // TreeAnnounce
-                debug!("Received TreeAnnounce (not yet implemented)");
+                self.handle_tree_announce(from, payload).await;
             }
             0x20 => {
                 // FilterAnnounce
@@ -727,6 +744,10 @@ impl Node {
     ///
     /// Frees session index, removes link and address mappings. Used for
     /// both graceful disconnect and timeout-based eviction.
+    ///
+    /// Also handles tree state cleanup: if the removed peer was our parent,
+    /// selects an alternative or becomes root, and marks remaining peers
+    /// for pending tree announce (delivered on next tick).
     pub(super) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
         let peer = match self.peers.remove(node_addr) {
             Some(p) => p,
@@ -747,9 +768,20 @@ impl Node {
         // Remove link and address mapping
         self.remove_link(&link_id);
 
+        // Tree state cleanup
+        let tree_changed = self.handle_peer_removal_tree_cleanup(node_addr);
+        if tree_changed {
+            // Mark all remaining peers for pending tree announce.
+            // These will be sent on the next tick via check_tree_state().
+            for peer in self.peers.values_mut() {
+                peer.mark_tree_announce_pending();
+            }
+        }
+
         info!(
             node_addr = %node_addr,
             link_id = %link_id,
+            tree_changed = tree_changed,
             "Peer removed and state cleaned up"
         );
     }

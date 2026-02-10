@@ -35,23 +35,29 @@ coordinates and distances.
 ### 2.1 Wire Format
 
 ```text
-TreeAnnounce {
+TreeAnnounce (v1) {
+    version: u8,                // Protocol version (0x01 for v1)
     sequence: u64,              // Monotonic, increments on parent change
     timestamp: u64,             // Unix timestamp (seconds)
-    parent: NodeAddr,             // 16 bytes, truncated SHA-256(pubkey) of selected parent
-    ancestry: Vec<AncestryEntry>,  // Path from self to root
-    signature: Signature,       // 64 bytes, signs (sequence || timestamp || parent || ancestry)
+    parent: NodeAddr,           // 16 bytes, truncated SHA-256(pubkey) of selected parent
+    ancestry_count: u16,        // Number of ancestry entries
+    ancestry: [AncestryEntry],  // Path from self to root
+    signature: Signature,       // 64 bytes, outer signature over entire message
 }
 
-AncestryEntry {
-    node_addr: NodeAddr,            // 16 bytes
+AncestryEntry (v1) {
+    node_addr: NodeAddr,        // 16 bytes
     sequence: u64,              // That node's sequence number
     timestamp: u64,             // That node's timestamp
-    signature: Signature,       // That node's signature over its declaration
 }
 ```
 
+Note: v1 ancestry entries are 32 bytes each (no per-entry signature). See §2.7 Trust Model.
+
 ### 2.2 Field Semantics
+
+**version**: Protocol version number. v1 = 0x01. Receivers MUST reject messages
+with unrecognized version numbers to ensure forward compatibility.
 
 **sequence**: Incremented each time the node changes its parent declaration.
 Higher sequence numbers supersede lower ones for conflict resolution.
@@ -63,20 +69,33 @@ stale if `now - timestamp > ROOT_TIMEOUT` (default 60 minutes for root).
 the node is declaring itself as root.
 
 **ancestry**: The chain from this node up to the root. The first entry is this
-node's own declaration, followed by parent, grandparent, etc. Each entry is
-signed by the declaring node, allowing verification of the entire chain.
+node's own declaration, followed by parent, grandparent, etc. In v1, entries
+carry only routing metadata (node_addr, sequence, timestamp) without per-entry
+signatures. See §2.7 for the trust model.
 
 ### 2.3 Size Estimate
 
 | Component | Size |
 |-----------|------|
+| version | 1 byte |
 | sequence | 8 bytes |
 | timestamp | 8 bytes |
 | parent | 16 bytes |
+| ancestry_count | 2 bytes |
 | signature | 64 bytes |
-| Per ancestry entry | 16 + 8 + 8 + 64 = 96 bytes |
+| Per ancestry entry (v1) | 16 + 8 + 8 = 32 bytes |
 
-For tree depth D: `96 + D * 96` bytes. At depth 10: ~1.1 KB.
+For tree depth D (ancestry_count = D + 1): `100 + (D + 1) × 32` bytes payload.
+
+| Tree Depth | Payload Size | With Link Overhead |
+|------------|--------------|--------------------|
+| 0 (root)   | 132 bytes    | 161 bytes          |
+| 3          | 228 bytes    | 257 bytes          |
+| 5          | 292 bytes    | 321 bytes          |
+| 10         | 452 bytes    | 481 bytes          |
+
+Note: v1 ancestry entries omit per-entry signatures (32 bytes vs 96 bytes in
+the original design). See §2.7 for the rationale.
 
 ### 2.4 Exchange Rules
 
@@ -104,17 +123,21 @@ For tree depth D: `96 + D * 96` bytes. At depth 10: ~1.1 KB.
 When receiving TreeAnnounce from peer P:
 
 ```text
-1. Verify signature on sender's declaration
-2. Verify signatures on all ancestry entries
-3. For each entry in ancestry:
-   - If entry.sequence > stored.sequence: update stored entry
-   - If entry.sequence == stored.sequence && entry.timestamp > stored.timestamp: update
-   - Otherwise: keep existing entry
-4. Update peer P's record with new ancestry
-5. Re-evaluate parent selection:
-   - If better path to root available: change parent, announce to all peers
-   - Apply stability threshold to prevent flapping
+1. Decode message; reject if version != 0x01
+2. Verify P's declaration signature using P's known public key (from Noise IK)
+3. Verify that declaration node_addr matches sender's identity
+4. Check sequence freshness:
+   - If sequence <= stored sequence for P: discard (stale)
+5. Update peer P's tree state (declaration + ancestry)
+6. Re-evaluate parent selection:
+   - Find smallest root visible across all peers
+   - Among peers reaching smallest root, prefer shallowest depth
+   - Apply stability threshold to prevent flapping (depth improvement ≥ 1)
+   - If parent changed: increment own sequence, sign, recompute coords, announce to all
 ```
+
+Note: In v1, only the sender's declaration signature is verified (step 2).
+Ancestry entries beyond the direct peer are accepted on trust. See §2.7.
 
 ### 2.6 Rate Limiting
 
@@ -123,6 +146,34 @@ To prevent announcement storms during reconvergence:
 - Minimum interval between announcements to same peer: 500ms
 - If change occurs during cooldown: mark pending, send after cooldown
 - Coalesce multiple pending changes into single announcement
+
+### 2.7 Trust Model (v1)
+
+**v1 uses transitive trust**: each node verifies only its direct peer's
+declaration signature. The peer's public key is known from the Noise IK
+handshake, so verification is straightforward. Ancestry entries from nodes
+beyond the direct peer are accepted on trust from the authenticated sender.
+
+**Why transitive trust?** NodeAddr values are truncated SHA-256 hashes of
+public keys — this mapping is intentionally one-way. To verify an ancestry
+entry's signature, a node would need the entry's public key, but FIPS does not
+distribute node_addr→pubkey mappings by design. Exposing these mappings would
+enable traffic analysis, undermining a core privacy property.
+
+**Limitation**: An adversarial interior node could fabricate ancestry chains,
+potentially attracting traffic to itself (sinkhole attack) or manipulating tree
+topology. This risk is mitigated by:
+
+- **Authenticated peers have reputation cost**: Misbehaving nodes can be
+  disconnected and blocked by their direct peers.
+- **Multi-path observation**: Nodes receiving conflicting tree state from
+  multiple peers can detect inconsistencies (future enhancement).
+
+**Versioning**: The wire format includes a version byte (v1 = 0x01) to enable
+future protocol evolution. A future version could introduce stronger ancestry
+verification (e.g., zero-knowledge proofs of key ownership) without breaking
+backward compatibility. Nodes MUST reject TreeAnnounce messages with
+unrecognized version numbers.
 
 ---
 
@@ -433,79 +484,79 @@ Propagates spanning tree state between directly connected peers.
 │                    │ Decrypt                                                │
 │                    ▼                                                        │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                    TREE ANNOUNCE (plaintext)                          │  │
+│  │                    TREE ANNOUNCE v1 (plaintext)                      │  │
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
 │  │   0    │ msg_type         │ 1 byte    │ 0x10                          │  │
-│  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
-│  │   9    │ timestamp        │ 8 bytes   │ u64 LE, Unix seconds          │  │
-│  │  17    │ parent           │ 16 bytes  │ NodeAddr of selected parent     │  │
-│  │  33    │ ancestry_count   │ 2 bytes   │ u16 LE, number of entries     │  │
-│  │  35    │ ancestry[0..n]   │ 96 × n    │ AncestryEntry array           │  │
+│  │   1    │ version          │ 1 byte    │ 0x01 (v1)                     │  │
+│  │   2    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
+│  │  10    │ timestamp        │ 8 bytes   │ u64 LE, Unix seconds          │  │
+│  │  18    │ parent           │ 16 bytes  │ NodeAddr of selected parent   │  │
+│  │  34    │ ancestry_count   │ 2 bytes   │ u16 LE, number of entries     │  │
+│  │  36    │ ancestry[0..n]   │ 32 × n    │ AncestryEntry array           │  │
 │  │  ...   │ signature        │ 64 bytes  │ Schnorr sig over all above    │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                    ANCESTRY ENTRY (96 bytes each)                     │  │
+│  │                    ANCESTRY ENTRY v1 (32 bytes each)                 │  │
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
-│  │   0    │ node_addr          │ 16 bytes  │ Truncated SHA-256(pubkey)       │  │
+│  │   0    │ node_addr        │ 16 bytes  │ Truncated SHA-256(pubkey)     │  │
 │  │  16    │ sequence         │ 8 bytes   │ u64 LE, node's seq number     │  │
 │  │  24    │ timestamp        │ 8 bytes   │ u64 LE, node's timestamp      │  │
-│  │  32    │ signature        │ 64 bytes  │ Node's sig over its decl      │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Note: v1 entries omit per-entry signatures. Only the sender's outer        │
+│  signature is verified (transitive trust model, see §2.7).                  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Size calculation**: `1 + 8 + 8 + 16 + 2 + (depth × 96) + 64` bytes
+**Size calculation**: `1 + 1 + 8 + 8 + 16 + 2 + (depth × 32) + 64 = 100 + (depth × 32)` bytes
 
 | Tree Depth | Payload Size | With Link Overhead |
-|------------|--------------|-------------------|
-| 1 (root)   | 195 bytes    | 224 bytes         |
-| 3          | 387 bytes    | 416 bytes         |
-| 5          | 579 bytes    | 608 bytes         |
-| 10         | 1059 bytes   | 1088 bytes        |
+|------------|--------------|--------------------|
+| 0 (root)   | 132 bytes    | 161 bytes          |
+| 3          | 228 bytes    | 257 bytes          |
+| 5          | 292 bytes    | 321 bytes          |
+| 10         | 452 bytes    | 481 bytes          |
 
 **Concrete example** (node D at depth 3, ancestry = [D, P1, P2, Root]):
 
 ```text
 PLAINTEXT BYTES (hex layout):
 10                               ← msg_type = TreeAnnounce
+01                               ← version = 1
 05 00 00 00 00 00 00 00          ← sequence = 5
 C3 B2 A1 67 00 00 00 00          ← timestamp (Unix seconds)
-[16 bytes P1's node_addr]          ← parent
+[16 bytes P1's node_addr]        ← parent
 04 00                            ← ancestry_count = 4
 
 ANCESTRY[0] - Self (D):
   [16 bytes D's node_addr]
   05 00 00 00 00 00 00 00        ← D's sequence
   C3 B2 A1 67 00 00 00 00        ← D's timestamp
-  [64 bytes D's signature]
 
 ANCESTRY[1] - Parent (P1):
   [16 bytes P1's node_addr]
   0A 00 00 00 00 00 00 00        ← P1's sequence
   00 B0 A1 67 00 00 00 00        ← P1's timestamp
-  [64 bytes P1's signature]
 
 ANCESTRY[2] - Grandparent (P2):
   [16 bytes P2's node_addr]
   03 00 00 00 00 00 00 00        ← P2's sequence
   00 A0 A1 67 00 00 00 00        ← P2's timestamp
-  [64 bytes P2's signature]
 
 ANCESTRY[3] - Root:
   [16 bytes Root's node_addr]
   01 00 00 00 00 00 00 00        ← Root's sequence
   00 90 A1 67 00 00 00 00        ← Root's timestamp
-  [64 bytes Root's signature]
 
 [64 bytes D's outer signature]   ← signs entire message
 
-Total payload: 1 + 8 + 8 + 16 + 2 + (4 × 96) + 64 = 483 bytes
+Total payload: 1 + 1 + 8 + 8 + 16 + 2 + (4 × 32) + 64 = 228 bytes
 ```
 
 ### A.2 FilterAnnounce (0x11)

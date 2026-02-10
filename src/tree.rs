@@ -207,46 +207,115 @@ impl PartialEq for ParentDeclaration {
 
 impl Eq for ParentDeclaration {}
 
+/// Metadata for a single node in a tree coordinate path.
+///
+/// Carries the node address and its declaration metadata (sequence number
+/// and timestamp). Used in TreeCoordinate entries and TreeAnnounce wire
+/// format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoordEntry {
+    /// The node's routing address.
+    pub node_addr: NodeAddr,
+    /// The node's declaration sequence number.
+    pub sequence: u64,
+    /// The node's declaration timestamp (Unix seconds).
+    pub timestamp: u64,
+}
+
+impl CoordEntry {
+    /// Wire size of a serialized entry: node_addr(16) + sequence(8) + timestamp(8).
+    pub const WIRE_SIZE: usize = 32;
+
+    /// Create a new coordinate entry.
+    pub fn new(node_addr: NodeAddr, sequence: u64, timestamp: u64) -> Self {
+        Self {
+            node_addr,
+            sequence,
+            timestamp,
+        }
+    }
+
+    /// Create an entry with default metadata (sequence=0, timestamp=0).
+    ///
+    /// Useful for constructing coordinates when only routing (not wire format)
+    /// is needed, e.g., in tests or distance calculations.
+    pub fn addr_only(node_addr: NodeAddr) -> Self {
+        Self {
+            node_addr,
+            sequence: 0,
+            timestamp: 0,
+        }
+    }
+}
+
 /// A node's coordinates in the spanning tree.
 ///
 /// Coordinates are the path from the node to the root:
 /// `[self, parent, grandparent, ..., root]`
 ///
+/// Each entry carries the node address plus declaration metadata (sequence
+/// and timestamp) for the wire protocol. Routing operations (distance,
+/// LCA) use only the node addresses.
+///
 /// The coordinate enables greedy routing via tree distance calculation.
 /// Two nodes can compute the hops between them by finding their lowest
 /// common ancestor (LCA) in the tree.
 #[derive(Clone, PartialEq, Eq)]
-pub struct TreeCoordinate(Vec<NodeAddr>);
+pub struct TreeCoordinate(Vec<CoordEntry>);
 
 impl TreeCoordinate {
-    /// Create a coordinate from a path (self to root).
+    /// Create a coordinate from a path of entries (self to root).
     ///
     /// The path must be non-empty and ordered from the node to the root.
-    pub fn new(path: Vec<NodeAddr>) -> Result<Self, TreeError> {
+    pub fn new(path: Vec<CoordEntry>) -> Result<Self, TreeError> {
         if path.is_empty() {
             return Err(TreeError::EmptyCoordinate);
         }
         Ok(Self(path))
     }
 
+    /// Create a coordinate from node addresses only (no metadata).
+    ///
+    /// Convenience constructor for cases where only routing is needed.
+    /// Each entry gets sequence=0, timestamp=0.
+    pub fn from_addrs(addrs: Vec<NodeAddr>) -> Result<Self, TreeError> {
+        if addrs.is_empty() {
+            return Err(TreeError::EmptyCoordinate);
+        }
+        Ok(Self(
+            addrs
+                .into_iter()
+                .map(CoordEntry::addr_only)
+                .collect(),
+        ))
+    }
+
     /// Create a coordinate for a root node.
     pub fn root(node_addr: NodeAddr) -> Self {
-        Self(vec![node_addr])
+        Self(vec![CoordEntry::addr_only(node_addr)])
+    }
+
+    /// Create a root coordinate with metadata.
+    pub fn root_with_meta(node_addr: NodeAddr, sequence: u64, timestamp: u64) -> Self {
+        Self(vec![CoordEntry::new(node_addr, sequence, timestamp)])
     }
 
     /// The node this coordinate belongs to (first element).
     pub fn node_addr(&self) -> &NodeAddr {
-        &self.0[0]
+        &self.0[0].node_addr
     }
 
     /// The root of the tree (last element).
     pub fn root_id(&self) -> &NodeAddr {
-        self.0.last().expect("coordinate never empty")
+        &self.0.last().expect("coordinate never empty").node_addr
     }
 
     /// The immediate parent (second element, or self if root).
     pub fn parent_id(&self) -> &NodeAddr {
-        self.0.get(1).unwrap_or(&self.0[0])
+        self.0
+            .get(1)
+            .map(|e| &e.node_addr)
+            .unwrap_or(&self.0[0].node_addr)
     }
 
     /// Depth in the tree (0 = root).
@@ -254,9 +323,17 @@ impl TreeCoordinate {
         self.0.len() - 1
     }
 
-    /// The full ancestry path.
-    pub fn path(&self) -> &[NodeAddr] {
+    /// The full path of entries with metadata.
+    pub fn entries(&self) -> &[CoordEntry] {
         &self.0
+    }
+
+    /// Iterator over node addresses in the path (self to root).
+    ///
+    /// Use this for routing operations (distance, LCA, ancestor checks)
+    /// that only need the address path.
+    pub fn node_addrs(&self) -> impl Iterator<Item = &NodeAddr> + DoubleEndedIterator {
+        self.0.iter().map(|e| &e.node_addr)
     }
 
     /// Check if this coordinate is a root (length 1).
@@ -286,8 +363,8 @@ impl TreeCoordinate {
     /// Returns the depth (from root) of the LCA.
     pub fn lca_depth(&self, other: &TreeCoordinate) -> usize {
         let mut common: usize = 0;
-        let self_rev = self.0.iter().rev();
-        let other_rev = other.0.iter().rev();
+        let self_rev = self.node_addrs().rev();
+        let other_rev = other.node_addrs().rev();
 
         for (a, b) in self_rev.zip(other_rev) {
             if a == b {
@@ -303,8 +380,8 @@ impl TreeCoordinate {
 
     /// Get the lowest common ancestor node ID.
     pub fn lca(&self, other: &TreeCoordinate) -> Option<&NodeAddr> {
-        let self_rev: Vec<_> = self.0.iter().rev().collect();
-        let other_rev: Vec<_> = other.0.iter().rev().collect();
+        let self_rev: Vec<_> = self.node_addrs().rev().collect();
+        let other_rev: Vec<_> = other.node_addrs().rev().collect();
 
         let mut lca = None;
         for (a, b) in self_rev.iter().zip(other_rev.iter()) {
@@ -319,39 +396,38 @@ impl TreeCoordinate {
 
     /// Check if `other` is an ancestor (appears in our path after self).
     pub fn has_ancestor(&self, other: &NodeAddr) -> bool {
-        self.0.iter().skip(1).any(|id| id == other)
+        self.node_addrs().skip(1).any(|id| id == other)
     }
 
     /// Check if `other` is in our ancestry (including self).
     pub fn contains(&self, other: &NodeAddr) -> bool {
-        self.0.iter().any(|id| id == other)
+        self.node_addrs().any(|id| id == other)
     }
 
     /// Get the ancestor at a specific depth from self.
     ///
     /// `ancestor_at(0)` returns self, `ancestor_at(1)` returns parent, etc.
     pub fn ancestor_at(&self, depth: usize) -> Option<&NodeAddr> {
-        self.0.get(depth)
+        self.0.get(depth).map(|e| &e.node_addr)
     }
 }
 
 impl fmt::Debug for TreeCoordinate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TreeCoordinate(depth={}, path=[", self.depth())?;
-        for (i, id) in self.0.iter().enumerate() {
+        for (i, entry) in self.0.iter().enumerate() {
             if i > 0 {
                 write!(f, " → ")?;
             }
             // Show first 4 bytes of each node ID
-            write!(f, "{:02x}{:02x}", id.as_bytes()[0], id.as_bytes()[1])?;
+            write!(
+                f,
+                "{:02x}{:02x}",
+                entry.node_addr.as_bytes()[0],
+                entry.node_addr.as_bytes()[1]
+            )?;
         }
         write!(f, "])")
-    }
-}
-
-impl AsRef<[NodeAddr]> for TreeCoordinate {
-    fn as_ref(&self) -> &[NodeAddr] {
-        &self.0
     }
 }
 
@@ -386,7 +462,7 @@ impl TreeState {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let my_declaration = ParentDeclaration::self_root(my_node_addr, 1, timestamp);
-        let my_coords = TreeCoordinate::root(my_node_addr);
+        let my_coords = TreeCoordinate::root_with_meta(my_node_addr, 1, timestamp);
 
         Self {
             my_node_addr,
@@ -482,17 +558,26 @@ impl TreeState {
     /// Update this node's coordinates based on current parent's ancestry.
     pub fn recompute_coords(&mut self) {
         if self.my_declaration.is_root() {
-            self.my_coords = TreeCoordinate::root(self.my_node_addr);
+            self.my_coords = TreeCoordinate::root_with_meta(
+                self.my_node_addr,
+                self.my_declaration.sequence(),
+                self.my_declaration.timestamp(),
+            );
             self.root = self.my_node_addr;
             return;
         }
 
         let parent_id = self.my_declaration.parent_id();
         if let Some(parent_coords) = self.peer_ancestry.get(parent_id) {
-            // Our coords = [self] ++ parent_coords
-            let mut path = vec![self.my_node_addr];
-            path.extend_from_slice(parent_coords.path());
-            self.my_coords = TreeCoordinate::new(path).expect("non-empty path");
+            // Our coords = [self_entry] ++ parent_coords entries
+            let self_entry = CoordEntry::new(
+                self.my_node_addr,
+                self.my_declaration.sequence(),
+                self.my_declaration.timestamp(),
+            );
+            let mut entries = vec![self_entry];
+            entries.extend_from_slice(parent_coords.entries());
+            self.my_coords = TreeCoordinate::new(entries).expect("non-empty path");
             self.root = *self.my_coords.root_id();
         }
     }
@@ -513,12 +598,131 @@ impl TreeState {
         None
     }
 
-    /// Check if a parent switch to `candidate` would be beneficial.
+    /// Minimum depth improvement required to switch parents (same root).
+    /// Prevents thrashing on equivalent-depth paths.
+    const PARENT_SWITCH_THRESHOLD: usize = 1;
+
+    /// Evaluate whether to switch parents based on current peer tree state.
     ///
-    /// This is a stub - full implementation requires policy decisions.
-    pub fn should_switch_parent(&self, _candidate: &NodeAddr) -> bool {
-        // Stub: would evaluate parent switch criteria
-        false
+    /// v1 algorithm: depth-based, no latency/loss metrics.
+    ///
+    /// Returns `Some(peer_node_addr)` if a parent switch is recommended,
+    /// or `None` if the current parent is adequate.
+    pub fn evaluate_parent(&self) -> Option<NodeAddr> {
+        if self.peer_ancestry.is_empty() {
+            return None;
+        }
+
+        // Find the smallest root visible across all peers
+        let mut smallest_root: Option<NodeAddr> = None;
+        for coords in self.peer_ancestry.values() {
+            let peer_root = coords.root_id();
+            smallest_root = Some(match smallest_root {
+                None => *peer_root,
+                Some(current) => {
+                    if *peer_root < current {
+                        *peer_root
+                    } else {
+                        current
+                    }
+                }
+            });
+        }
+
+        let smallest_root = match smallest_root {
+            Some(r) => r,
+            None => return None,
+        };
+
+        // If we are the smallest node in the network, stay root
+        if self.my_node_addr <= smallest_root && self.is_root() {
+            return None;
+        }
+
+        // Among peers that reach the smallest root, find the shallowest
+        let mut best_peer: Option<(NodeAddr, usize)> = None; // (peer_addr, depth)
+        for (peer_id, coords) in &self.peer_ancestry {
+            if *coords.root_id() != smallest_root {
+                continue;
+            }
+            let depth = coords.depth();
+            match &best_peer {
+                None => best_peer = Some((*peer_id, depth)),
+                Some((_, best_depth)) => {
+                    if depth < *best_depth {
+                        best_peer = Some((*peer_id, depth));
+                    }
+                }
+            }
+        }
+
+        let (best_peer_id, best_depth) = match best_peer {
+            Some(bp) => bp,
+            None => return None,
+        };
+
+        // If already using this peer as parent, no switch needed
+        if *self.my_declaration.parent_id() == best_peer_id && !self.is_root() {
+            return None;
+        }
+
+        // If our current parent is gone from peer_ancestry, our path is broken — always switch
+        if !self.is_root() && !self.peer_ancestry.contains_key(self.my_declaration.parent_id()) {
+            return Some(best_peer_id);
+        }
+
+        // Switching roots (smaller root found) → always switch
+        if smallest_root < self.root || (self.is_root() && smallest_root < self.my_node_addr) {
+            return Some(best_peer_id);
+        }
+
+        // Same root: require depth improvement ≥ threshold
+        if self.is_root() {
+            // We're root but shouldn't be (peers have a smaller root) — always switch
+            return Some(best_peer_id);
+        }
+
+        // Compare depth: our current depth vs what we'd get through best_peer
+        // Our new depth would be best_depth + 1
+        let current_depth = self.my_coords.depth();
+        let proposed_depth = best_depth + 1;
+
+        if current_depth >= proposed_depth + Self::PARENT_SWITCH_THRESHOLD {
+            return Some(best_peer_id);
+        }
+
+        None
+    }
+
+    /// Handle loss of current parent.
+    ///
+    /// Tries to find an alternative parent among remaining peers.
+    /// If none available, becomes its own root (increments sequence).
+    ///
+    /// Returns `true` if the tree state changed (caller should re-announce).
+    pub fn handle_parent_lost(&mut self) -> bool {
+        // Try to find an alternative parent
+        if let Some(new_parent) = self.evaluate_parent() {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let new_seq = self.my_declaration.sequence() + 1;
+            self.set_parent(new_parent, new_seq, timestamp);
+            self.recompute_coords();
+            return true;
+        }
+
+        // No alternative: become own root
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let new_seq = self.my_declaration.sequence() + 1;
+        self.my_declaration =
+            ParentDeclaration::self_root(self.my_node_addr, new_seq, timestamp);
+        self.recompute_coords();
+        true
     }
 
     /// Sign this node's declaration with the given identity.
@@ -556,6 +760,10 @@ mod tests {
         NodeAddr::from_bytes(bytes)
     }
 
+    fn make_coords(ids: &[u8]) -> TreeCoordinate {
+        TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
+    }
+
     // ===== TreeCoordinate Tests =====
 
     #[test]
@@ -576,7 +784,7 @@ mod tests {
         let parent = make_node_addr(2);
         let root = make_node_addr(3);
 
-        let coord = TreeCoordinate::new(vec![node, parent, root]).unwrap();
+        let coord = make_coords(&[1, 2, 3]);
 
         assert!(!coord.is_root());
         assert_eq!(coord.depth(), 2);
@@ -587,8 +795,25 @@ mod tests {
 
     #[test]
     fn test_tree_coordinate_empty_fails() {
-        let result = TreeCoordinate::new(vec![]);
+        let result = TreeCoordinate::from_addrs(vec![]);
         assert!(matches!(result, Err(TreeError::EmptyCoordinate)));
+    }
+
+    #[test]
+    fn test_tree_coordinate_entries_metadata() {
+        let node = make_node_addr(1);
+        let root = make_node_addr(0);
+
+        let coord = TreeCoordinate::new(vec![
+            CoordEntry::new(node, 5, 1000),
+            CoordEntry::new(root, 1, 500),
+        ])
+        .unwrap();
+
+        assert_eq!(coord.entries()[0].sequence, 5);
+        assert_eq!(coord.entries()[0].timestamp, 1000);
+        assert_eq!(coord.entries()[1].sequence, 1);
+        assert_eq!(coord.entries()[1].timestamp, 500);
     }
 
     #[test]
@@ -601,12 +826,8 @@ mod tests {
 
     #[test]
     fn test_tree_distance_siblings() {
-        let root = make_node_addr(0);
-        let a = make_node_addr(1);
-        let b = make_node_addr(2);
-
-        let coord_a = TreeCoordinate::new(vec![a, root]).unwrap();
-        let coord_b = TreeCoordinate::new(vec![b, root]).unwrap();
+        let coord_a = make_coords(&[1, 0]);
+        let coord_b = make_coords(&[2, 0]);
 
         // a -> root -> b = 2 hops
         assert_eq!(coord_a.distance_to(&coord_b), 2);
@@ -614,12 +835,8 @@ mod tests {
 
     #[test]
     fn test_tree_distance_ancestor() {
-        let root = make_node_addr(0);
-        let parent = make_node_addr(1);
-        let child = make_node_addr(2);
-
-        let coord_parent = TreeCoordinate::new(vec![parent, root]).unwrap();
-        let coord_child = TreeCoordinate::new(vec![child, parent, root]).unwrap();
+        let coord_parent = make_coords(&[1, 0]);
+        let coord_child = make_coords(&[2, 1, 0]);
 
         // child -> parent = 1 hop
         assert_eq!(coord_child.distance_to(&coord_parent), 1);
@@ -628,19 +845,13 @@ mod tests {
     #[test]
     fn test_tree_distance_cousins() {
         // Tree structure:
-        //       root
+        //       root(0)
         //      /    \
-        //     a      b
+        //     a(1)   b(2)
         //    /        \
-        //   c          d
-        let root = make_node_addr(0);
-        let a = make_node_addr(1);
-        let b = make_node_addr(2);
-        let c = make_node_addr(3);
-        let d = make_node_addr(4);
-
-        let coord_c = TreeCoordinate::new(vec![c, a, root]).unwrap();
-        let coord_d = TreeCoordinate::new(vec![d, b, root]).unwrap();
+        //   c(3)       d(4)
+        let coord_c = make_coords(&[3, 1, 0]);
+        let coord_d = make_coords(&[4, 2, 0]);
 
         // c -> a -> root -> b -> d = 4 hops
         assert_eq!(coord_c.distance_to(&coord_d), 4);
@@ -648,11 +859,8 @@ mod tests {
 
     #[test]
     fn test_tree_distance_different_roots() {
-        let root1 = make_node_addr(1);
-        let root2 = make_node_addr(2);
-
-        let coord1 = TreeCoordinate::root(root1);
-        let coord2 = TreeCoordinate::root(root2);
+        let coord1 = TreeCoordinate::root(make_node_addr(1));
+        let coord2 = TreeCoordinate::root(make_node_addr(2));
 
         assert_eq!(coord1.distance_to(&coord2), usize::MAX);
     }
@@ -663,7 +871,7 @@ mod tests {
         let parent = make_node_addr(1);
         let child = make_node_addr(2);
 
-        let coord = TreeCoordinate::new(vec![child, parent, root]).unwrap();
+        let coord = make_coords(&[2, 1, 0]);
 
         assert!(coord.has_ancestor(&parent));
         assert!(coord.has_ancestor(&root));
@@ -677,7 +885,7 @@ mod tests {
         let child = make_node_addr(2);
         let other = make_node_addr(99);
 
-        let coord = TreeCoordinate::new(vec![child, parent, root]).unwrap();
+        let coord = make_coords(&[2, 1, 0]);
 
         assert!(coord.contains(&child));
         assert!(coord.contains(&parent));
@@ -691,7 +899,7 @@ mod tests {
         let parent = make_node_addr(1);
         let child = make_node_addr(2);
 
-        let coord = TreeCoordinate::new(vec![child, parent, root]).unwrap();
+        let coord = make_coords(&[2, 1, 0]);
 
         assert_eq!(coord.ancestor_at(0), Some(&child));
         assert_eq!(coord.ancestor_at(1), Some(&parent));
@@ -703,18 +911,15 @@ mod tests {
     fn test_lca() {
         let root = make_node_addr(0);
         let a = make_node_addr(1);
-        let b = make_node_addr(2);
-        let c = make_node_addr(3);
-        let d = make_node_addr(4);
 
         // c under a, d under b, both under root
-        let coord_c = TreeCoordinate::new(vec![c, a, root]).unwrap();
-        let coord_d = TreeCoordinate::new(vec![d, b, root]).unwrap();
+        let coord_c = make_coords(&[3, 1, 0]);
+        let coord_d = make_coords(&[4, 2, 0]);
 
         assert_eq!(coord_c.lca(&coord_d), Some(&root));
 
         // c and a share ancestry through a and root
-        let coord_a = TreeCoordinate::new(vec![a, root]).unwrap();
+        let coord_a = make_coords(&[1, 0]);
         assert_eq!(coord_c.lca(&coord_a), Some(&a));
     }
 
@@ -812,7 +1017,7 @@ mod tests {
         let root = make_node_addr(2);
 
         let decl = ParentDeclaration::new(peer, root, 1, 1000);
-        let coords = TreeCoordinate::new(vec![peer, root]).unwrap();
+        let coords = make_coords(&[1, 2]);
 
         assert!(state.update_peer(decl.clone(), coords.clone()));
         assert_eq!(state.peer_count(), 1);
@@ -837,7 +1042,7 @@ mod tests {
         let root = make_node_addr(2);
 
         let decl = ParentDeclaration::new(peer, root, 1, 1000);
-        let coords = TreeCoordinate::new(vec![peer, root]).unwrap();
+        let coords = make_coords(&[1, 2]);
 
         state.update_peer(decl, coords);
         assert_eq!(state.peer_count(), 1);
@@ -867,13 +1072,13 @@ mod tests {
 
         // Update my state to have shared root
         state.set_parent(shared_root, 1, 1000);
-        let my_new_coords = TreeCoordinate::new(vec![my_node, shared_root]).unwrap();
+        let my_new_coords = make_coords(&[0, 99]);
         // Manually set coords for test (normally done by recompute_coords)
         state.my_coords = my_new_coords;
         state.root = shared_root;
 
         // Update peer to have same root
-        let peer_coords = TreeCoordinate::new(vec![peer, shared_root]).unwrap();
+        let peer_coords = make_coords(&[1, 99]);
         let decl = ParentDeclaration::new(peer, shared_root, 2, 2000);
         state.update_peer(decl, peer_coords);
 
@@ -902,5 +1107,198 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&&peer1));
         assert!(ids.contains(&&peer2));
+    }
+
+    // ===== Parent Selection Tests =====
+
+    #[test]
+    fn test_evaluate_parent_picks_smallest_root() {
+        // Node 5 starts as root. Peers 3 and 7 each claim different roots.
+        // Peer 3's path: [3, 1] (root=1)
+        // Peer 7's path: [7, 2] (root=2)
+        // Should pick peer 3 because root 1 < root 2.
+        let my_node = make_node_addr(5);
+        let mut state = TreeState::new(my_node);
+
+        let peer3 = make_node_addr(3);
+        let peer7 = make_node_addr(7);
+
+        state.update_peer(
+            ParentDeclaration::new(peer3, make_node_addr(1), 1, 1000),
+            make_coords(&[3, 1]),
+        );
+        state.update_peer(
+            ParentDeclaration::new(peer7, make_node_addr(2), 1, 1000),
+            make_coords(&[7, 2]),
+        );
+
+        let result = state.evaluate_parent();
+        assert_eq!(result, Some(peer3));
+    }
+
+    #[test]
+    fn test_evaluate_parent_prefers_shallowest_depth() {
+        // Node 5, root=0 (shared). Peer 1 at depth 1, peer 2 at depth 3.
+        // Both reach root 0. Should pick peer 1 (shallowest).
+        let my_node = make_node_addr(5);
+        let mut state = TreeState::new(my_node);
+
+        let peer1 = make_node_addr(1);
+        let peer2 = make_node_addr(2);
+        let root = make_node_addr(0);
+
+        // Peer 1: depth 1 (path = [1, 0])
+        state.update_peer(
+            ParentDeclaration::new(peer1, root, 1, 1000),
+            make_coords(&[1, 0]),
+        );
+        // Peer 2: depth 3 (path = [2, 3, 4, 0])
+        state.update_peer(
+            ParentDeclaration::new(peer2, make_node_addr(3), 1, 1000),
+            make_coords(&[2, 3, 4, 0]),
+        );
+
+        let result = state.evaluate_parent();
+        assert_eq!(result, Some(peer1));
+    }
+
+    #[test]
+    fn test_evaluate_parent_stays_root_when_smallest() {
+        // Node 0 (smallest possible) should stay root even if peers exist.
+        let my_node = make_node_addr(0);
+        let mut state = TreeState::new(my_node);
+
+        let peer1 = make_node_addr(1);
+        // Peer 1 has root 0 (us) — shouldn't trigger switch
+        state.update_peer(
+            ParentDeclaration::new(peer1, my_node, 1, 1000),
+            make_coords(&[1, 0]),
+        );
+
+        assert_eq!(state.evaluate_parent(), None);
+    }
+
+    #[test]
+    fn test_evaluate_parent_no_switch_when_already_best() {
+        // Node 5, already using peer 1 as parent. No better option.
+        let my_node = make_node_addr(5);
+        let mut state = TreeState::new(my_node);
+
+        let peer1 = make_node_addr(1);
+        let root = make_node_addr(0);
+
+        state.update_peer(
+            ParentDeclaration::new(peer1, root, 1, 1000),
+            make_coords(&[1, 0]),
+        );
+
+        // Switch to peer1 as parent first
+        state.set_parent(peer1, 1, 1000);
+        state.recompute_coords();
+
+        // Now evaluate — should return None since peer1 is already our parent
+        assert_eq!(state.evaluate_parent(), None);
+    }
+
+    #[test]
+    fn test_evaluate_parent_no_peers() {
+        let my_node = make_node_addr(5);
+        let state = TreeState::new(my_node);
+
+        assert_eq!(state.evaluate_parent(), None);
+    }
+
+    #[test]
+    fn test_evaluate_parent_depth_threshold() {
+        // Node 5, currently at depth 4 through peer 2.
+        // Peer 1 offers depth 3 (improvement of 1, which equals threshold).
+        // Peer 3 offers depth 1 (improvement of 3, exceeds threshold).
+        // Should switch to peer 3.
+        let my_node = make_node_addr(5);
+        let mut state = TreeState::new(my_node);
+
+        let peer2 = make_node_addr(2);
+        let peer3 = make_node_addr(3);
+        let root = make_node_addr(0);
+
+        // Peer 2: depth 3 (we'd be depth 4 through them)
+        state.update_peer(
+            ParentDeclaration::new(peer2, make_node_addr(6), 1, 1000),
+            make_coords(&[2, 6, 7, 0]),
+        );
+
+        // Set peer2 as our parent, making us depth 4
+        state.set_parent(peer2, 1, 1000);
+        state.recompute_coords();
+        assert_eq!(state.my_coords().depth(), 4);
+
+        // Peer 3: depth 1 (we'd be depth 2 through them) — improvement of 2
+        state.update_peer(
+            ParentDeclaration::new(peer3, root, 1, 1000),
+            make_coords(&[3, 0]),
+        );
+
+        let result = state.evaluate_parent();
+        assert_eq!(result, Some(peer3));
+    }
+
+    #[test]
+    fn test_handle_parent_lost_finds_alternative() {
+        let my_node = make_node_addr(5);
+        let mut state = TreeState::new(my_node);
+
+        let peer1 = make_node_addr(1);
+        let peer2 = make_node_addr(2);
+        let root = make_node_addr(0);
+
+        state.update_peer(
+            ParentDeclaration::new(peer1, root, 1, 1000),
+            make_coords(&[1, 0]),
+        );
+        state.update_peer(
+            ParentDeclaration::new(peer2, root, 1, 1000),
+            make_coords(&[2, 0]),
+        );
+
+        // Set peer1 as parent
+        state.set_parent(peer1, 1, 1000);
+        state.recompute_coords();
+
+        // Remove peer1 (parent lost)
+        state.remove_peer(&peer1);
+        let changed = state.handle_parent_lost();
+
+        assert!(changed);
+        // Should have switched to peer2
+        assert_eq!(state.my_declaration().parent_id(), &peer2);
+        assert!(!state.is_root());
+    }
+
+    #[test]
+    fn test_handle_parent_lost_becomes_root() {
+        let my_node = make_node_addr(5);
+        let mut state = TreeState::new(my_node);
+
+        let peer1 = make_node_addr(1);
+        let root = make_node_addr(0);
+
+        state.update_peer(
+            ParentDeclaration::new(peer1, root, 1, 1000),
+            make_coords(&[1, 0]),
+        );
+
+        // Set peer1 as parent
+        state.set_parent(peer1, 1, 1000);
+        state.recompute_coords();
+        let seq_before = state.my_declaration().sequence();
+
+        // Remove peer1 (only parent)
+        state.remove_peer(&peer1);
+        let changed = state.handle_parent_lost();
+
+        assert!(changed);
+        assert!(state.is_root());
+        assert!(state.my_declaration().sequence() > seq_before);
+        assert_eq!(state.root(), &my_node);
     }
 }
