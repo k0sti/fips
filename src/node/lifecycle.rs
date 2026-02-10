@@ -34,7 +34,7 @@ impl Node {
     /// Initiate a connection to a single peer.
     ///
     /// Creates a link, starts the Noise handshake, and sends the first message.
-    async fn initiate_peer_connection(&mut self, peer_config: &crate::config::PeerConfig) -> Result<(), NodeError> {
+    pub(super) async fn initiate_peer_connection(&mut self, peer_config: &crate::config::PeerConfig) -> Result<(), NodeError> {
         // Parse the peer's npub to get their identity
         let peer_identity = PeerIdentity::from_npub(&peer_config.npub).map_err(|e| {
             NodeError::InvalidPeerNpub {

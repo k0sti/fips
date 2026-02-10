@@ -1162,3 +1162,307 @@ async fn test_failed_connection_cleanup() {
     assert_eq!(node.link_count(), 0, "Failed link should be removed");
     assert_eq!(node.index_allocator.count(), 0, "Session index should be freed");
 }
+
+/// Test that promoting a connection cleans up a pending outbound to the same peer.
+///
+/// Simulates the scenario where node A has a pending outbound handshake to B
+/// (unanswered because B wasn't running), then B starts and initiates to A.
+/// When A promotes B's inbound connection, it should immediately clean up the
+/// stale pending outbound rather than waiting for the 30s timeout.
+#[test]
+fn test_promote_cleans_up_pending_outbound_to_same_peer() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    // Generate peer B's identity (shared between the two connections)
+    let peer_b_full = Identity::generate();
+    let peer_b_identity = PeerIdentity::from_pubkey_full(peer_b_full.pubkey_full());
+    let peer_b_node_addr = *peer_b_identity.node_addr();
+
+    // --- Set up the pending outbound to B (link_id 1) ---
+    // This simulates A having sent msg1 to B before B was running.
+    let pending_link_id = LinkId::new(1);
+    let pending_time_ms = 1000;
+    let mut pending_conn =
+        PeerConnection::outbound(pending_link_id, peer_b_identity.clone(), pending_time_ms);
+
+    let our_keypair = node.identity.keypair();
+    let _msg1 = pending_conn.start_handshake(our_keypair, pending_time_ms).unwrap();
+
+    let pending_index = node.index_allocator.allocate().unwrap();
+    pending_conn.set_our_index(pending_index);
+    pending_conn.set_transport_id(transport_id);
+    let pending_addr = TransportAddr::from_string("10.0.0.2:4000");
+    pending_conn.set_source_addr(pending_addr.clone());
+
+    let pending_link = Link::connectionless(
+        pending_link_id,
+        transport_id,
+        pending_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    node.links.insert(pending_link_id, pending_link);
+    node.addr_to_link
+        .insert((transport_id, pending_addr.clone()), pending_link_id);
+    node.connections.insert(pending_link_id, pending_conn);
+    node.pending_outbound
+        .insert((transport_id, pending_index.as_u32()), pending_link_id);
+
+    // Verify pending state
+    assert_eq!(node.connection_count(), 1);
+    assert_eq!(node.link_count(), 1);
+    assert_eq!(node.index_allocator.count(), 1);
+
+    // --- Set up the completing inbound from B (link_id 2) ---
+    // Simulate B's outbound arriving at A and completing the handshake.
+    // We use make_completed_connection's pattern but with B's known identity.
+    let completing_link_id = LinkId::new(2);
+    let completing_time_ms = 2000;
+
+    let mut completing_conn = PeerConnection::outbound(
+        completing_link_id,
+        peer_b_identity.clone(),
+        completing_time_ms,
+    );
+
+    let our_keypair = node.identity.keypair();
+    let msg1 = completing_conn
+        .start_handshake(our_keypair, completing_time_ms)
+        .unwrap();
+
+    // B responds
+    let mut resp_conn = PeerConnection::inbound(LinkId::new(999), completing_time_ms);
+    let peer_keypair = peer_b_full.keypair();
+    let msg2 = resp_conn
+        .receive_handshake_init(peer_keypair, &msg1, completing_time_ms)
+        .unwrap();
+
+    completing_conn
+        .complete_handshake(&msg2, completing_time_ms)
+        .unwrap();
+
+    let completing_index = node.index_allocator.allocate().unwrap();
+    completing_conn.set_our_index(completing_index);
+    completing_conn.set_their_index(SessionIndex::new(99));
+    completing_conn.set_transport_id(transport_id);
+    completing_conn.set_source_addr(TransportAddr::from_string("10.0.0.2:4001"));
+
+    node.add_connection(completing_conn).unwrap();
+
+    // Now 2 connections, 1 link (pending has link, completing doesn't yet need one for this test)
+    assert_eq!(node.connection_count(), 2);
+    assert_eq!(node.index_allocator.count(), 2);
+
+    // --- Promote the completing connection ---
+    let result = node
+        .promote_connection(completing_link_id, peer_b_identity.clone(), completing_time_ms)
+        .unwrap();
+
+    assert!(matches!(result, PromotionResult::Promoted(_)));
+
+    // The pending outbound should have been cleaned up
+    assert_eq!(
+        node.connection_count(),
+        0,
+        "Pending outbound should be cleaned up during promotion"
+    );
+    assert_eq!(node.peer_count(), 1, "Promoted peer should exist");
+    assert!(
+        !node
+            .pending_outbound
+            .contains_key(&(transport_id, pending_index.as_u32())),
+        "pending_outbound entry for stale connection should be freed"
+    );
+    assert_eq!(
+        node.index_allocator.count(),
+        1,
+        "Only the promoted peer's index should remain"
+    );
+    assert!(
+        node.addr_to_link
+            .get(&(transport_id, pending_addr))
+            .is_none(),
+        "addr_to_link for stale connection should be cleaned up"
+    );
+
+    // Verify the promoted peer is correct
+    let peer = node.get_peer(&peer_b_node_addr).unwrap();
+    assert_eq!(peer.link_id(), completing_link_id);
+}
+
+/// Test that schedule_retry creates a retry entry for auto-connect peers.
+#[test]
+fn test_schedule_retry_creates_entry() {
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:4000",
+    ));
+
+    let mut node = Node::new(config).unwrap();
+
+    assert!(node.retry_pending.is_empty());
+
+    node.schedule_retry(peer_node_addr, 1000);
+
+    assert_eq!(node.retry_pending.len(), 1);
+    let state = node.retry_pending.get(&peer_node_addr).unwrap();
+    assert_eq!(state.retry_count, 1);
+    // Default base = 5s, 2^1 = 10s, but first retry is 2^0... let me check:
+    // retry_count is set to 1, backoff_ms(5000) = 5000 * 2^1 = 10000
+    assert_eq!(state.retry_after_ms, 1000 + 10_000);
+}
+
+/// Test that schedule_retry increments on subsequent calls.
+#[test]
+fn test_schedule_retry_increments() {
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:4000",
+    ));
+
+    let mut node = Node::new(config).unwrap();
+
+    // First failure
+    node.schedule_retry(peer_node_addr, 1000);
+    assert_eq!(node.retry_pending.get(&peer_node_addr).unwrap().retry_count, 1);
+
+    // Second failure
+    node.schedule_retry(peer_node_addr, 11_000);
+    let state = node.retry_pending.get(&peer_node_addr).unwrap();
+    assert_eq!(state.retry_count, 2);
+    // backoff_ms(5000) with retry_count=2 = 5000 * 4 = 20000
+    assert_eq!(state.retry_after_ms, 11_000 + 20_000);
+}
+
+/// Test that schedule_retry gives up after max_retries.
+#[test]
+fn test_schedule_retry_max_retries_exhausted() {
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    config.node.max_retries = 2;
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:4000",
+    ));
+
+    let mut node = Node::new(config).unwrap();
+
+    // Attempts 1 and 2 should schedule retries
+    node.schedule_retry(peer_node_addr, 1000);
+    assert!(node.retry_pending.contains_key(&peer_node_addr));
+
+    node.schedule_retry(peer_node_addr, 2000);
+    assert!(node.retry_pending.contains_key(&peer_node_addr));
+
+    // Attempt 3 exceeds max_retries=2, should remove entry
+    node.schedule_retry(peer_node_addr, 3000);
+    assert!(
+        !node.retry_pending.contains_key(&peer_node_addr),
+        "Should be removed after max retries exhausted"
+    );
+}
+
+/// Test that schedule_retry does nothing when max_retries is 0.
+#[test]
+fn test_schedule_retry_disabled() {
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    config.node.max_retries = 0;
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:4000",
+    ));
+
+    let mut node = Node::new(config).unwrap();
+
+    node.schedule_retry(peer_node_addr, 1000);
+    assert!(
+        node.retry_pending.is_empty(),
+        "No retry should be scheduled when max_retries=0"
+    );
+}
+
+/// Test that schedule_retry does nothing for non-auto-connect peers.
+#[test]
+fn test_schedule_retry_ignores_non_autoconnect() {
+    let peer_identity = Identity::generate();
+    let peer_node_addr = *peer_identity.node_addr();
+
+    // No peers configured at all
+    let mut node = make_node();
+
+    node.schedule_retry(peer_node_addr, 1000);
+    assert!(
+        node.retry_pending.is_empty(),
+        "No retry for unconfigured peer"
+    );
+}
+
+/// Test that schedule_retry does nothing if peer is already connected.
+#[test]
+fn test_schedule_retry_skips_connected_peer() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    // Promote a peer so it's in the peers map
+    let link_id = LinkId::new(1);
+    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let node_addr = *identity.node_addr();
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, identity, 2000).unwrap();
+    assert_eq!(node.peer_count(), 1);
+
+    // Scheduling a retry for an already-connected peer should be a no-op
+    node.schedule_retry(node_addr, 3000);
+    assert!(
+        node.retry_pending.is_empty(),
+        "No retry for already-connected peer"
+    );
+}
+
+/// Test that promote_connection clears retry_pending.
+#[test]
+fn test_promote_clears_retry_pending() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    let link_id = LinkId::new(1);
+    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let node_addr = *identity.node_addr();
+
+    // Simulate a retry entry existing for this peer
+    node.retry_pending.insert(
+        node_addr,
+        super::retry::RetryState::new(crate::config::PeerConfig::default()),
+    );
+    assert_eq!(node.retry_pending.len(), 1);
+
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, identity, 2000).unwrap();
+
+    assert!(
+        !node.retry_pending.contains_key(&node_addr),
+        "retry_pending should be cleared on successful promotion"
+    );
+}

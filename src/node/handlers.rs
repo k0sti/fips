@@ -38,6 +38,11 @@ impl Node {
                 }
                 _ = tick.tick() => {
                     self.check_timeouts();
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    self.process_pending_retries(now_ms).await;
                 }
             }
         }
@@ -563,6 +568,7 @@ impl Node {
                 self.peers.insert(peer_node_addr, new_peer);
                 self.peers_by_index
                     .insert((transport_id, our_index.as_u32()), peer_node_addr);
+                self.retry_pending.remove(&peer_node_addr);
 
                 info!(
                     node_addr = %peer_node_addr,
@@ -592,7 +598,32 @@ impl Node {
                 })
             }
         } else {
-            // No cross-connection, normal promotion
+            // No existing promoted peer, but check for pending outbound
+            // connection to the same peer. A completed handshake always wins
+            // over a pending one — just clean it up immediately rather than
+            // waiting for the 30s handshake timeout.
+            let pending_to_same_peer: Vec<LinkId> = self
+                .connections
+                .iter()
+                .filter(|(_, conn)| {
+                    conn.expected_identity()
+                        .map(|id| *id.node_addr() == peer_node_addr)
+                        .unwrap_or(false)
+                })
+                .map(|(lid, _)| *lid)
+                .collect();
+
+            for pending_link_id in pending_to_same_peer {
+                info!(
+                    node_addr = %peer_node_addr,
+                    pending_link_id = %pending_link_id,
+                    promoted_link_id = %link_id,
+                    "Cleaning up pending connection superseded by completed handshake"
+                );
+                self.cleanup_stale_connection(pending_link_id, current_time_ms);
+            }
+
+            // Normal promotion
             if self.max_peers > 0 && self.peers.len() >= self.max_peers {
                 let _ = self.index_allocator.free(our_index);
                 return Err(NodeError::MaxPeersExceeded { max: self.max_peers });
@@ -613,6 +644,7 @@ impl Node {
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index
                 .insert((transport_id, our_index.as_u32()), peer_node_addr);
+            self.retry_pending.remove(&peer_node_addr);
 
             info!(
                 node_addr = %peer_node_addr,
@@ -745,23 +777,46 @@ impl Node {
             .collect();
 
         for link_id in stale {
+            // Log and schedule retry before cleanup (need connection state)
+            if let Some(conn) = self.connections.get(&link_id) {
+                let direction = conn.direction();
+                let idle_ms = conn.idle_time(now_ms);
+                if conn.is_failed() {
+                    info!(
+                        link_id = %link_id,
+                        direction = %direction,
+                        "Failed handshake connection cleaned up"
+                    );
+                } else {
+                    info!(
+                        link_id = %link_id,
+                        direction = %direction,
+                        idle_secs = idle_ms / 1000,
+                        "Stale handshake connection timed out"
+                    );
+                }
+
+                // Schedule retry for failed outbound auto-connect peers
+                if conn.is_outbound() {
+                    if let Some(identity) = conn.expected_identity() {
+                        self.schedule_retry(*identity.node_addr(), now_ms);
+                    }
+                }
+            }
             self.cleanup_stale_connection(link_id, now_ms);
         }
     }
 
-    /// Remove a stale or failed handshake connection and all associated state.
+    /// Remove a handshake connection and all associated state.
     ///
     /// Frees the session index, removes pending_outbound entry, and cleans up
-    /// the link and address mapping.
-    fn cleanup_stale_connection(&mut self, link_id: LinkId, now_ms: u64) {
+    /// the link and address mapping. Does not log — callers provide context-appropriate
+    /// log messages.
+    fn cleanup_stale_connection(&mut self, link_id: LinkId, _now_ms: u64) {
         let conn = match self.connections.remove(&link_id) {
             Some(c) => c,
             None => return,
         };
-
-        let direction = conn.direction();
-        let idle_ms = conn.idle_time(now_ms);
-        let is_failed = conn.is_failed();
 
         // Free session index and pending_outbound if allocated
         if let Some(idx) = conn.our_index() {
@@ -773,20 +828,5 @@ impl Node {
 
         // Remove link and addr_to_link
         self.remove_link(&link_id);
-
-        if is_failed {
-            info!(
-                link_id = %link_id,
-                direction = %direction,
-                "Failed handshake connection cleaned up"
-            );
-        } else {
-            info!(
-                link_id = %link_id,
-                direction = %direction,
-                idle_secs = idle_ms / 1000,
-                "Stale handshake connection timed out"
-            );
-        }
     }
 }

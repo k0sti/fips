@@ -96,9 +96,6 @@ pub struct PeerConnection {
     /// When the last handshake message was sent/received.
     last_activity: u64,
 
-    /// Number of retries attempted.
-    retry_count: u32,
-
     // === Statistics ===
     /// Link statistics during handshake.
     link_stats: LinkStats,
@@ -140,7 +137,7 @@ impl PeerConnection {
             noise_session: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
-            retry_count: 0,
+
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -163,7 +160,7 @@ impl PeerConnection {
             noise_session: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
-            retry_count: 0,
+
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -190,7 +187,7 @@ impl PeerConnection {
             noise_session: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
-            retry_count: 0,
+
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -264,11 +261,6 @@ impl PeerConnection {
     /// Time since last activity.
     pub fn idle_time(&self, current_time_ms: u64) -> u64 {
         current_time_ms.saturating_sub(self.last_activity)
-    }
-
-    /// Number of retries.
-    pub fn retry_count(&self) -> u32 {
-        self.retry_count
     }
 
     /// Get link statistics.
@@ -465,11 +457,6 @@ impl PeerConnection {
         self.noise_handshake = None;
     }
 
-    /// Increment retry counter.
-    pub fn increment_retry(&mut self) {
-        self.retry_count += 1;
-    }
-
     /// Update last activity timestamp.
     pub fn touch(&mut self, current_time_ms: u64) {
         self.last_activity = current_time_ms;
@@ -482,10 +469,6 @@ impl PeerConnection {
         self.idle_time(current_time_ms) > timeout_ms
     }
 
-    /// Check if max retries exceeded.
-    pub fn max_retries_exceeded(&self, max_retries: u32) -> bool {
-        self.retry_count >= max_retries
-    }
 }
 
 impl fmt::Debug for PeerConnection {
@@ -502,7 +485,6 @@ impl fmt::Debug for PeerConnection {
             .field("transport_id", &self.transport_id)
             .field("started_at", &self.started_at)
             .field("last_activity", &self.last_activity)
-            .field("retry_count", &self.retry_count)
             .finish()
     }
 }
@@ -544,7 +526,6 @@ mod tests {
         assert_eq!(conn.handshake_state(), HandshakeState::Initial);
         assert!(conn.expected_identity().is_some());
         assert_eq!(conn.started_at(), 1000);
-        assert_eq!(conn.retry_count(), 0);
     }
 
     #[test]
@@ -617,22 +598,6 @@ mod tests {
         assert_eq!(conn.idle_time(1500), 500);
         assert!(!conn.is_timed_out(1500, 1000));
         assert!(conn.is_timed_out(2500, 1000));
-    }
-
-    #[test]
-    fn test_retry_tracking() {
-        let identity = make_peer_identity();
-        let mut conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
-
-        assert_eq!(conn.retry_count(), 0);
-        assert!(!conn.max_retries_exceeded(3));
-
-        conn.increment_retry();
-        conn.increment_retry();
-        conn.increment_retry();
-
-        assert_eq!(conn.retry_count(), 3);
-        assert!(conn.max_retries_exceeded(3));
     }
 
     #[test]

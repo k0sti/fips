@@ -54,8 +54,22 @@ pub struct IdentityConfig {
     pub nsec: Option<String>,
 }
 
+/// Default maximum connection retry attempts.
+const DEFAULT_MAX_RETRIES: u32 = 5;
+
+/// Default base retry interval in seconds (backoff: 5s, 10s, 20s, 40s, 80s).
+const DEFAULT_BASE_RETRY_INTERVAL_SECS: u64 = 5;
+
+fn default_max_retries() -> u32 {
+    DEFAULT_MAX_RETRIES
+}
+
+fn default_base_retry_interval_secs() -> u64 {
+    DEFAULT_BASE_RETRY_INTERVAL_SECS
+}
+
 /// Node configuration (`node.*`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Identity configuration (`node.identity.*`).
     #[serde(default)]
@@ -64,6 +78,27 @@ pub struct NodeConfig {
     /// Leaf-only mode (`node.leaf_only`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leaf_only: bool,
+
+    /// Maximum connection retry attempts for auto-connect peers.
+    /// 0 disables retries. Default: 5.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    /// Base retry interval in seconds for exponential backoff.
+    /// Actual delay is base * 2^attempt. Default: 5.
+    #[serde(default = "default_base_retry_interval_secs")]
+    pub base_retry_interval_secs: u64,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            identity: IdentityConfig::default(),
+            leaf_only: false,
+            max_retries: DEFAULT_MAX_RETRIES,
+            base_retry_interval_secs: DEFAULT_BASE_RETRY_INTERVAL_SECS,
+        }
+    }
 }
 
 /// Default TUN device name.
@@ -324,7 +359,7 @@ impl PeerAddress {
 ///
 /// Peers are identified by their Nostr public key (npub) and can have
 /// multiple transport addresses for reaching them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerConfig {
     /// The peer's Nostr public key in npub (bech32) or hex format.
