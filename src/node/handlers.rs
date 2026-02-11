@@ -424,15 +424,120 @@ impl Node {
             }
         };
 
+        let peer_node_addr = *peer_identity.node_addr();
+
         info!(
-            node_addr = %peer_identity.node_addr(),
+            node_addr = %peer_node_addr,
             link_id = %link_id,
             their_index = %header.sender_idx,
             "Outbound handshake completed"
         );
 
-        // Promote to active peer (TODO: implement with session transfer)
-        // For now, just use the existing promote_connection
+        // Cross-connection resolution: if the peer was already promoted via
+        // our inbound handshake (we processed their msg1), both nodes initially
+        // use mismatched sessions. The tie-breaker determines which handshake
+        // wins: smaller node_addr's outbound.
+        //
+        // - Winner (smaller node): swap to outbound session + outbound indices
+        // - Loser (larger node): keep inbound session + original their_index
+        //
+        // This ensures both nodes use the same Noise handshake (the winner's
+        // outbound = the loser's inbound).
+        if self.peers.contains_key(&peer_node_addr) {
+            let our_outbound_wins = cross_connection_winner(
+                self.identity.node_addr(),
+                &peer_node_addr,
+                true, // this IS our outbound
+            );
+
+            // Extract the outbound connection
+            let mut conn = match self.connections.remove(&link_id) {
+                Some(c) => c,
+                None => {
+                    self.pending_outbound.remove(&key);
+                    return;
+                }
+            };
+
+            if our_outbound_wins {
+                // We're the smaller node. Swap to outbound session + indices.
+                // The peer will keep their inbound session (complement of ours).
+                let outbound_our_index = conn.our_index();
+                let outbound_session = conn.take_session();
+
+                let (outbound_session, outbound_our_index) =
+                    match (outbound_session, outbound_our_index) {
+                        (Some(s), Some(idx)) => (s, idx),
+                        _ => {
+                            warn!(node_addr = %peer_node_addr, "Incomplete outbound connection");
+                            self.pending_outbound.remove(&key);
+                            return;
+                        }
+                    };
+
+                if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                    let old_our_index = peer.replace_session(
+                        outbound_session,
+                        outbound_our_index,
+                        header.sender_idx,
+                    );
+
+                    // Update peers_by_index: remove old inbound index, add outbound
+                    let transport_id = peer.transport_id().unwrap();
+                    if let Some(old_idx) = old_our_index {
+                        self.peers_by_index.remove(&(transport_id, old_idx.as_u32()));
+                        let _ = self.index_allocator.free(old_idx);
+                    }
+                    self.peers_by_index.insert(
+                        (transport_id, outbound_our_index.as_u32()),
+                        peer_node_addr,
+                    );
+
+                    info!(
+                        node_addr = %peer_node_addr,
+                        new_our_index = %outbound_our_index,
+                        new_their_index = %header.sender_idx,
+                        "Cross-connection: swapped to outbound session (our outbound wins)"
+                    );
+                }
+            } else {
+                // We're the larger node. Keep our inbound session (it pairs
+                // with the peer's outbound, which is the winning handshake).
+                //
+                // Do NOT update their_index here. Our their_index was set during
+                // promote_connection() from the peer's msg1 sender_idx, which is
+                // the peer's outbound our_index. After the peer (winner) swaps to
+                // their outbound session, that index is exactly what they'll use.
+                // The msg2 sender_idx we see here is the peer's INBOUND our_index,
+                // which becomes stale after the peer swaps.
+                let outbound_our_index = conn.our_index();
+
+                if let Some(peer) = self.peers.get(&peer_node_addr) {
+                    info!(
+                        node_addr = %peer_node_addr,
+                        kept_their_index = ?peer.their_index(),
+                        "Cross-connection: keeping inbound session and original their_index (peer outbound wins)"
+                    );
+                }
+
+                // Free the outbound's session index since we're not using it
+                if let Some(idx) = outbound_our_index {
+                    let _ = self.index_allocator.free(idx);
+                }
+            }
+
+            // Clean up outbound connection state
+            self.pending_outbound.remove(&key);
+            self.remove_link(&link_id);
+
+            // Send TreeAnnounce now that sessions are aligned
+            if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
+                debug!(peer = %peer_node_addr, error = %e, "Failed to send TreeAnnounce after cross-connection resolution");
+            }
+            return;
+        }
+
+        // Normal path: promote to active peer
         match self.promote_connection(link_id, peer_identity.clone(), packet.timestamp_ms) {
             Ok(result) => {
                 // Clean up pending_outbound
@@ -615,10 +720,13 @@ impl Node {
                 })
             }
         } else {
-            // No existing promoted peer, but check for pending outbound
-            // connection to the same peer. A completed handshake always wins
-            // over a pending one — just clean it up immediately rather than
-            // waiting for the 30s handshake timeout.
+            // No existing promoted peer. There may be a pending outbound
+            // connection to the same peer (cross-connection in progress).
+            // Do NOT clean it up yet — we need the outbound to stay alive
+            // so that when the peer's msg2 arrives, we can learn the peer's
+            // inbound session index and update their_index on the promoted
+            // peer. The outbound will be cleaned up in handle_msg2 or by
+            // the 30s handshake timeout.
             let pending_to_same_peer: Vec<LinkId> = self
                 .connections
                 .iter()
@@ -630,14 +738,13 @@ impl Node {
                 .map(|(lid, _)| *lid)
                 .collect();
 
-            for pending_link_id in pending_to_same_peer {
-                info!(
+            for pending_link_id in &pending_to_same_peer {
+                debug!(
                     node_addr = %peer_node_addr,
                     pending_link_id = %pending_link_id,
                     promoted_link_id = %link_id,
-                    "Cleaning up pending connection superseded by completed handshake"
+                    "Deferring cleanup of pending outbound (awaiting msg2 for index update)"
                 );
-                self.cleanup_stale_connection(pending_link_id, current_time_ms);
             }
 
             // Normal promotion

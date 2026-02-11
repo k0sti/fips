@@ -1261,29 +1261,23 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
 
     assert!(matches!(result, PromotionResult::Promoted(_)));
 
-    // The pending outbound should have been cleaned up
+    // The pending outbound should NOT be cleaned up during promotion —
+    // it's deferred so handle_msg2 can learn the peer's inbound index.
     assert_eq!(
         node.connection_count(),
-        0,
-        "Pending outbound should be cleaned up during promotion"
+        1,
+        "Pending outbound should be preserved (deferred cleanup)"
     );
     assert_eq!(node.peer_count(), 1, "Promoted peer should exist");
     assert!(
-        !node
-            .pending_outbound
+        node.pending_outbound
             .contains_key(&(transport_id, pending_index.as_u32())),
-        "pending_outbound entry for stale connection should be freed"
+        "pending_outbound entry should still exist (awaiting msg2)"
     );
     assert_eq!(
         node.index_allocator.count(),
-        1,
-        "Only the promoted peer's index should remain"
-    );
-    assert!(
-        node.addr_to_link
-            .get(&(transport_id, pending_addr))
-            .is_none(),
-        "addr_to_link for stale connection should be cleaned up"
+        2,
+        "Both indices should remain until msg2 cleanup"
     );
 
     // Verify the promoted peer is correct

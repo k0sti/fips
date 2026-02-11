@@ -287,6 +287,34 @@ impl ActivePeer {
         self.their_index
     }
 
+    /// Update their session index (used during cross-connection resolution
+    /// when the losing node keeps its inbound session but needs the peer's
+    /// outbound index).
+    pub fn set_their_index(&mut self, index: SessionIndex) {
+        self.their_index = Some(index);
+    }
+
+    /// Replace the Noise session and indices during cross-connection resolution.
+    ///
+    /// When both nodes simultaneously initiate, each promotes its inbound
+    /// handshake first. When the peer's msg2 arrives, we learn the correct
+    /// session — the outbound handshake that pairs with the peer's inbound.
+    /// This replaces the entire session so both nodes use matching keys.
+    ///
+    /// Returns the old our_index so the caller can update peers_by_index.
+    pub fn replace_session(
+        &mut self,
+        new_session: NoiseSession,
+        new_our_index: SessionIndex,
+        new_their_index: SessionIndex,
+    ) -> Option<SessionIndex> {
+        let old_our_index = self.our_index;
+        self.noise_session = Some(new_session);
+        self.our_index = Some(new_our_index);
+        self.their_index = Some(new_their_index);
+        old_our_index
+    }
+
     /// Get the transport ID for this peer.
     pub fn transport_id(&self) -> Option<TransportId> {
         self.transport_id
