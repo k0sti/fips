@@ -18,20 +18,17 @@ use crate::index::IndexAllocator;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::rate_limit::HandshakeRateLimiter;
 use crate::transport::{
-    packet_channel, Link, LinkDirection, LinkId, PacketRx, PacketTx,
-    TransportAddr, TransportHandle, TransportId,
+    Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
-use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
-use crate::wire::{build_encrypted, build_msg1};
-use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
+use crate::tun::{TunError, TunState, TunTx};
+use crate::wire::build_encrypted;
+use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
 use std::collections::HashMap;
 use std::fmt;
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread::JoinHandle;
 use thiserror::Error;
-use tracing::{debug, info, warn};
 
 /// Errors related to node operations.
 #[derive(Debug, Error)]

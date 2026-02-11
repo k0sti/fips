@@ -1,7 +1,15 @@
 //! Node lifecycle management: start, stop, and peer connection initiation.
 
-use super::*;
+use super::{Node, NodeError, NodeState};
+use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
+use crate::transport::{packet_channel, Link, LinkDirection, TransportAddr};
+use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
+use crate::wire::build_msg1;
+use crate::{NodeAddr, PeerIdentity};
+use std::thread;
+use std::time::Duration;
+use tracing::{debug, info, warn};
 
 impl Node {
     /// Initiate connections to configured static peers.

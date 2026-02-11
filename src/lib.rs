@@ -61,24 +61,3 @@ pub use peer::{
 // Re-export node types
 pub use node::{Node, NodeError, NodeState};
 
-// Re-export TUN types
-pub use tun::{log_ipv6_packet, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx, TunWriter};
-
-// Re-export ICMPv6 types
-pub use icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode, Icmpv6Type};
-
-// Re-export Noise types (HandshakeState not re-exported to avoid conflict with peer::HandshakeState)
-pub use noise::{CipherState, HandshakeRole, NoiseError, NoiseSession};
-
-// Re-export index types
-pub use index::{IndexAllocator, IndexError, SessionIndex};
-
-// Re-export rate limiting types
-pub use rate_limit::{HandshakeRateLimiter, TokenBucket};
-
-// Re-export wire format types
-pub use wire::{
-    build_encrypted, build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
-    DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2, ENCRYPTED_MIN_SIZE,
-    ENCRYPTED_OVERHEAD, MSG1_WIRE_SIZE, MSG2_WIRE_SIZE,
-};
