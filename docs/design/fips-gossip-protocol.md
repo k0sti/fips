@@ -187,7 +187,6 @@ node's filter indicates which destinations are reachable through it.
 ```text
 FilterAnnounce {
     sequence: u64,              // For freshness/deduplication
-    ttl: u8,                    // Remaining propagation hops
     filter: BloomFilter,        // Variable size based on size_class
 }
 
@@ -220,9 +219,6 @@ Receivers can fold larger filters down to their preferred size.
 **sequence**: Monotonic counter for this node's filter. Allows receivers to
 detect stale or duplicate announcements.
 
-**ttl**: Remaining propagation depth. Starts at K (typically 2), decremented
-each hop. At TTL=0, entries are not propagated further.
-
 **hash_count**: Number of hash functions used. v1 uses k=5, which is optimal
 for 800-1,600 entries in a 1 KB filter.
 
@@ -244,10 +240,12 @@ A node's outgoing filter to peer Q contains:
 
 1. This node's own node_addr
 2. Node_ids of leaf-only dependents (nodes using this node as sole peer)
-3. Entries from filters received from other peers (not Q) with TTL > 0
+3. Entries merged from filters received from all other peers (not Q)
 
-This creates K-hop reachability scope. With K=2, entries propagate ~4 hops
-before TTL exhaustion.
+This split-horizon merge (excluding the destination peer's own filter from
+the computation) prevents a node's entries from being echoed back to it,
+providing loop prevention. Filters propagate transitively through the
+network without any hop limit.
 
 ### 3.4 Exchange Rules
 
@@ -273,10 +271,10 @@ Rate limiting:
 
 ```text
 1. Store: peer_filters[P] = received.filter
-2. If received.ttl > 0:
-   - Include entries in next announcement to other peers
-   - Decrement TTL for propagated entries
-3. Recompute own outgoing filters if changed
+2. Recompute outgoing filters for all other peers:
+   - For each peer Q (Q != P):
+     outgoing[Q] = merge(self_filter, peer_filters[all peers except Q])
+   - If outgoing[Q] changed, send FilterAnnounce to Q
 ```
 
 ### 3.5 Filter Expiration
@@ -435,7 +433,6 @@ handshake completion.
 | ROOT_REFRESH_INTERVAL | 30 min | Root regenerates timestamp |
 | ROOT_TIMEOUT | 60 min | Root declaration considered stale |
 | TREE_ENTRY_TTL | 5-10 min | Individual entry expiration |
-| FILTER_TTL_HOPS | 2 | Bloom filter propagation depth |
 | ANNOUNCE_MIN_INTERVAL | 500 ms | Rate limit for announcements |
 | LOOKUP_TTL | 8 | Discovery request propagation limit |
 | LOOKUP_TIMEOUT | 5 sec | Time to wait for response |
@@ -575,10 +572,9 @@ Propagates Bloom filter reachability information.
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
 │  │   0    │ msg_type         │ 1 byte    │ 0x11                          │  │
 │  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
-│  │   9    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
-│  │  10    │ hash_count       │ 1 byte    │ Number of hash functions (5)  │  │
-│  │  11    │ size_class       │ 1 byte    │ Filter size: 512 << class     │  │
-│  │  12    │ filter_bits      │ variable  │ 512 << size_class bytes       │  │
+│  │   9    │ hash_count       │ 1 byte    │ Number of hash functions (5)  │  │
+│  │  10    │ size_class       │ 1 byte    │ Filter size: 512 << class     │  │
+│  │  11    │ filter_bits      │ variable  │ 512 << size_class bytes       │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
 │  Size classes (powers of 2 for foldability):                                │
@@ -587,8 +583,8 @@ Propagates Bloom filter reachability information.
 │    2 = 2,048 bytes (16,384 bits) - Reserved for future                      │
 │    3 = 4,096 bytes (32,768 bits) - Reserved for future                      │
 │                                                                             │
-│  v1 total payload: 1 + 8 + 1 + 1 + 1 + 1024 = 1036 bytes                    │
-│  With link overhead: 1065 bytes                                             │
+│  v1 total payload: 1 + 8 + 1 + 1 + 1024 = 1035 bytes                        │
+│  With link overhead: 1064 bytes                                             │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                         BLOOM FILTER STRUCTURE                              │
@@ -621,12 +617,11 @@ Propagates Bloom filter reachability information.
 PLAINTEXT BYTES:
 11                               ← msg_type = FilterAnnounce
 2A 00 00 00 00 00 00 00          ← sequence = 42
-02                               ← ttl = 2 (will propagate 2 more hops)
 05                               ← hash_count = 5
 01                               ← size_class = 1 (1 KB filter)
 [1024 bytes of filter bits]      ← Bloom filter
 
-Total: 1036 bytes
+Total: 1035 bytes
 ```
 
 ### A.3 LookupRequest (0x12)

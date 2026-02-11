@@ -4,6 +4,7 @@
 //! holds all state required for mesh routing: identity, tree state,
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
+mod bloom;
 mod handlers;
 mod lifecycle;
 mod retry;

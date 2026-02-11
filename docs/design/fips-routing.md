@@ -11,8 +11,8 @@ For spanning tree dynamics and convergence, see [spanning-tree-dynamics.md](span
 
 FIPS routing combines three mechanisms:
 
-1. **Bloom filters**: Fast reachability lookup for nearby destinations (within
-   K-hop scope)
+1. **Bloom filters**: Fast reachability lookup for destinations reachable
+   through peers
 2. **Discovery protocol**: Query-based lookup for distant destinations
 3. **Greedy tree routing**: Coordinate-based forwarding using spanning tree
    position
@@ -34,7 +34,7 @@ coordinates handle the latter.
 | Scale | Nodes | Bloom Filter Role |
 |-------|-------|-------------------|
 | Small private network | 100-1,000 | Covers entire network |
-| Modest public network | ~1,000,000 | Covers K-hop neighborhood |
+| Modest public network | ~1,000,000 | Covers transitive peer neighborhood |
 | Internet-scale | Billions | Out of scope (requires different architecture) |
 
 The primary design target is networks up to ~1M nodes.
@@ -64,11 +64,10 @@ traffic tunnels through that peer.
 
 ### Parameters
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Filter size | 1 KB (8,192 bits) | Sized for expected occupancy with margin |
-| Hash functions | 5 | Optimal for 800-1,600 entries at this size |
-| Scope (K) | 2 | Effective ~4-hop reach with TTL propagation |
+| Parameter      | Value             | Rationale                                  |
+|----------------|-------------------|--------------------------------------------|
+| Filter size    | 1 KB (8,192 bits) | Sized for expected occupancy with margin   |
+| Hash functions | 5                 | Optimal for 800-1,600 entries at this size |
 
 ### Mathematical Foundation
 
@@ -99,21 +98,15 @@ For 1% FPR: m ≈ 9.6n bits. For 5% FPR: m ≈ 6.2n bits.
 
 ### Expected Filter Occupancy
 
-Filter occupancy depends on K-hop scope and node degree, **not** total network
-size. The TTL mechanism bounds entries regardless of network scale.
-
-**Nodes within h hops in a tree (branching factor b = d-1):**
-
-```text
-nodes_within_h_hops = (b^(h+1) - 1) / (b - 1)
-```
-
-For d=8 (b=7), K=2: each peer's 2-hop neighborhood ≈ 57 nodes.
+Filter occupancy depends on network topology and node degree. In practice,
+filters reach a natural equilibrium determined by the network's structure —
+merging peer filters transitively means each filter converges to represent
+the node's reachable neighborhood.
 
 **Outgoing filter to peer Q contains:**
 
 - Self (1 entry)
-- Entries from (d-1) other peers' filters, with overlap
+- Entries from (d-1) other peers' filters (excluding Q), with overlap
 
 **Expected occupancy by node degree:**
 
@@ -203,17 +196,14 @@ A node's outgoing filter to peer Q contains:
 
 1. This node's own Node ID
 2. Node IDs of leaf-only dependents
-3. Entries from filters received from other peers (not Q) with TTL > 0
+3. Entries merged from filters received from all other peers (not Q)
 
-This creates K-hop reachability scope through TTL-based propagation.
-
-### K-Hop Scope Emergence
-
-With TTL starting at K=2:
-
-- Entries propagate ~2K hops before stopping
-- Each node's filter contains destinations within ~4-hop effective range
-- Bounded by O(d^2K) entries regardless of total network size
+Filters propagate transitively through the network. Each node merges all
+inbound peer filters (excluding the destination peer) into its outgoing
+filter — this split-horizon approach prevents a node's own entries from
+being echoed back to it, providing loop prevention. Propagation is
+unbounded; filters naturally converge as the Bloom filter's fixed size
+limits information density.
 
 ### Expiration
 
@@ -611,7 +601,7 @@ enum RouteState {
 
 When nodes join/leave:
 
-- Bloom filter updates propagate (bounded by K-hop scope)
+- Bloom filter updates propagate through affected peers
 - Affected sessions may need re-establishment
 - Discovery queries for newly-joined nodes
 

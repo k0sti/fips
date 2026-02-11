@@ -44,6 +44,7 @@ impl Node {
                         .unwrap_or(0);
                     self.process_pending_retries(now_ms).await;
                     self.check_tree_state().await;
+                    self.check_bloom_state().await;
                 }
             }
         }
@@ -320,6 +321,8 @@ impl Node {
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                             debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
                         }
+                        // Schedule filter announce (sent on next tick via debounce)
+                        self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
                         // Clean up the losing connection's link
@@ -333,6 +336,8 @@ impl Node {
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                             debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
                         }
+                        // Schedule filter announce (sent on next tick via debounce)
+                        self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
                         // This connection lost — clean up its link
@@ -534,6 +539,8 @@ impl Node {
             if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
                 debug!(peer = %peer_node_addr, error = %e, "Failed to send TreeAnnounce after cross-connection resolution");
             }
+            // Schedule filter announce (sent on next tick via debounce)
+            self.bloom_state.mark_update_needed(peer_node_addr);
             return;
         }
 
@@ -553,6 +560,8 @@ impl Node {
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                             debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
                         }
+                        // Schedule filter announce (sent on next tick via debounce)
+                        self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
                         // Clean up the losing connection's link
@@ -571,6 +580,8 @@ impl Node {
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                             debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
                         }
+                        // Schedule filter announce (sent on next tick via debounce)
+                        self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
                         // This connection lost — clean up its link
@@ -801,7 +812,7 @@ impl Node {
             }
             0x20 => {
                 // FilterAnnounce
-                debug!("Received FilterAnnounce (not yet implemented)");
+                self.handle_filter_announce(from, payload).await;
             }
             0x30 => {
                 // LookupRequest
@@ -884,6 +895,10 @@ impl Node {
                 peer.mark_tree_announce_pending();
             }
         }
+
+        // Bloom filter cleanup: our outgoing filter changed (lost a peer's filter)
+        let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+        self.bloom_state.mark_all_updates_needed(remaining_peers);
 
         info!(
             node_addr = %node_addr,

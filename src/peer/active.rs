@@ -105,8 +105,6 @@ pub struct ActivePeer {
     inbound_filter: Option<BloomFilter>,
     /// Their filter's sequence number.
     filter_sequence: u64,
-    /// Remaining propagation hops on their filter.
-    filter_ttl: u8,
     /// When we received their last filter (Unix milliseconds).
     filter_received_at: u64,
     /// Whether we owe them a filter update.
@@ -142,7 +140,6 @@ impl ActivePeer {
             pending_tree_announce: false,
             inbound_filter: None,
             filter_sequence: 0,
-            filter_ttl: 0,
             filter_received_at: 0,
             pending_filter_update: true, // Send filter on new connection
             link_stats: LinkStats::new(),
@@ -197,7 +194,6 @@ impl ActivePeer {
             pending_tree_announce: false,
             inbound_filter: None,
             filter_sequence: 0,
-            filter_ttl: 0,
             filter_received_at: 0,
             pending_filter_update: true,
             link_stats,
@@ -362,11 +358,6 @@ impl ActivePeer {
         self.filter_sequence
     }
 
-    /// Get the filter TTL.
-    pub fn filter_ttl(&self) -> u8 {
-        self.filter_ttl
-    }
-
     /// Check if this peer's filter is stale.
     pub fn filter_is_stale(&self, current_time_ms: u64, stale_threshold_ms: u64) -> bool {
         if self.filter_received_at == 0 {
@@ -512,12 +503,10 @@ impl ActivePeer {
         &mut self,
         filter: BloomFilter,
         sequence: u64,
-        ttl: u8,
         current_time_ms: u64,
     ) {
         self.inbound_filter = Some(filter);
         self.filter_sequence = sequence;
-        self.filter_ttl = ttl;
         self.filter_received_at = current_time_ms;
         self.last_seen = current_time_ms;
     }
@@ -526,7 +515,6 @@ impl ActivePeer {
     pub fn clear_filter(&mut self) {
         self.inbound_filter = None;
         self.filter_sequence = 0;
-        self.filter_ttl = 0;
         self.filter_received_at = 0;
     }
 
@@ -645,7 +633,7 @@ mod tests {
 
         let mut filter = BloomFilter::new();
         filter.insert(&target);
-        peer.update_filter(filter, 1, 2, 1500);
+        peer.update_filter(filter, 1, 1500);
 
         assert!(peer.may_reach(&target));
         assert!(!peer.filter_is_stale(1800, 500));

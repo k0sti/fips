@@ -1,0 +1,184 @@
+//! Bloom filter announce send/receive logic.
+//!
+//! Handles building, sending, and receiving FilterAnnounce messages,
+//! including debounced propagation to peers.
+
+use crate::bloom::BloomFilter;
+use crate::protocol::FilterAnnounce;
+use crate::NodeAddr;
+
+use super::{Node, NodeError};
+use std::collections::HashMap;
+use tracing::{debug, info};
+
+impl Node {
+    /// Collect inbound filters from all peers for outgoing filter computation.
+    ///
+    /// Returns a map of (peer_node_addr -> filter) for peers that
+    /// have sent us a FilterAnnounce.
+    fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
+        let mut filters = HashMap::new();
+        for (addr, peer) in &self.peers {
+            if let Some(filter) = peer.inbound_filter() {
+                filters.insert(*addr, filter.clone());
+            }
+        }
+        filters
+    }
+
+    /// Build a FilterAnnounce for a specific peer.
+    ///
+    /// The outgoing filter excludes the destination peer's own filter
+    /// to prevent routing loops (don't tell a peer about destinations
+    /// reachable only through them).
+    fn build_filter_announce(&mut self, exclude_peer: &NodeAddr) -> FilterAnnounce {
+        let peer_filters = self.peer_inbound_filters();
+        let filter = self
+            .bloom_state
+            .compute_outgoing_filter(exclude_peer, &peer_filters);
+        let sequence = self.bloom_state.next_sequence();
+        FilterAnnounce::new(filter, sequence)
+    }
+
+    /// Send a FilterAnnounce to a specific peer, respecting debounce.
+    ///
+    /// If the peer is rate-limited, the update stays pending for
+    /// delivery on the next tick cycle.
+    pub(super) async fn send_filter_announce_to_peer(
+        &mut self,
+        peer_addr: &NodeAddr,
+    ) -> Result<(), NodeError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Check debounce
+        if !self.bloom_state.should_send_update(peer_addr, now_ms) {
+            // Either not pending or rate-limited; will retry on tick
+            return Ok(());
+        }
+
+        // Build and encode
+        let announce = self.build_filter_announce(peer_addr);
+        let encoded = announce.encode().map_err(|e| NodeError::SendFailed {
+            node_addr: *peer_addr,
+            reason: format!("FilterAnnounce encode failed: {}", e),
+        })?;
+
+        // Send
+        self.send_encrypted_link_message(peer_addr, &encoded).await?;
+
+        // Record send
+        self.bloom_state.record_update_sent(*peer_addr, now_ms);
+        if let Some(peer) = self.peers.get_mut(peer_addr) {
+            peer.clear_filter_update_needed();
+        }
+
+        debug!(peer = %peer_addr, seq = announce.sequence, "Sent FilterAnnounce");
+        Ok(())
+    }
+
+    /// Send pending rate-limited filter announces whose debounce has expired.
+    pub(super) async fn send_pending_filter_announces(&mut self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let ready: Vec<NodeAddr> = self
+            .peers
+            .keys()
+            .filter(|addr| self.bloom_state.should_send_update(addr, now_ms))
+            .copied()
+            .collect();
+
+        for peer_addr in ready {
+            if let Err(e) = self.send_filter_announce_to_peer(&peer_addr).await {
+                debug!(
+                    peer = %peer_addr,
+                    error = %e,
+                    "Failed to send pending FilterAnnounce"
+                );
+            }
+        }
+    }
+
+    /// Handle an inbound FilterAnnounce from an authenticated peer.
+    ///
+    /// 1. Decode and validate the message
+    /// 2. Check sequence freshness (reject stale/replay)
+    /// 3. Store the filter on the peer
+    /// 4. Mark other peers for outgoing filter update
+    pub(super) async fn handle_filter_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
+        let announce = match FilterAnnounce::decode(payload) {
+            Ok(a) => a,
+            Err(e) => {
+                debug!(from = %from, error = %e, "Malformed FilterAnnounce");
+                return;
+            }
+        };
+
+        // Validate
+        if !announce.is_valid() {
+            debug!(from = %from, "FilterAnnounce filter/size_class mismatch");
+            return;
+        }
+        if !announce.is_v1_compliant() {
+            debug!(from = %from, size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
+            return;
+        }
+
+        // Check peer exists
+        let current_seq = match self.peers.get(from) {
+            Some(peer) => peer.filter_sequence(),
+            None => {
+                debug!(from = %from, "FilterAnnounce from unknown peer");
+                return;
+            }
+        };
+
+        // Reject stale/replay
+        if announce.sequence <= current_seq {
+            debug!(
+                from = %from,
+                received_seq = announce.sequence,
+                current_seq = current_seq,
+                "Stale FilterAnnounce rejected"
+            );
+            return;
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Store on peer
+        if let Some(peer) = self.peers.get_mut(from) {
+            peer.update_filter(announce.filter, announce.sequence, now_ms);
+        }
+
+        info!(
+            from = %from,
+            seq = announce.sequence,
+            "Received FilterAnnounce"
+        );
+
+        // Our outgoing filter changed — mark all other peers for update
+        let other_peers: Vec<NodeAddr> = self
+            .peers
+            .keys()
+            .filter(|addr| *addr != from)
+            .copied()
+            .collect();
+        self.bloom_state.mark_all_updates_needed(other_peers);
+    }
+
+    /// Check bloom filter state on tick (called from event loop).
+    ///
+    /// Sends any pending debounced filter announces.
+    pub(super) async fn check_bloom_state(&mut self) {
+        self.send_pending_filter_announces().await;
+    }
+}

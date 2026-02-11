@@ -1,6 +1,6 @@
 //! Bloom Filter Implementation
 //!
-//! 1KB Bloom filters for K-hop reachability in FIPS routing. Each node
+//! 1KB Bloom filters for reachability in FIPS routing. Each node
 //! maintains filters that summarize which destinations are reachable
 //! through each peer, enabling efficient routing decisions without
 //! global network knowledge.
@@ -11,9 +11,8 @@
 //! - Hash functions: k=5 - optimal for 800-1,600 entries at 1KB
 //! - Bandwidth: 1 KB/announce (75% reduction from original 4KB design)
 //!
-//! The original 4KB/k=7 parameters were oversized because the d^(2K) estimate
-//! overcounted by assuming mesh connectivity vs tree structure with TTL-bounded
-//! propagation. Actual filter occupancy is ~250-800 entries for typical nodes.
+//! These parameters are right-sized for typical network occupancy of
+//! ~250-800 entries per node.
 
 use crate::NodeAddr;
 use std::collections::{HashMap, HashSet};
@@ -431,7 +430,7 @@ impl BloomState {
     pub fn compute_outgoing_filter(
         &self,
         exclude_peer: &NodeAddr,
-        peer_filters: &HashMap<NodeAddr, (BloomFilter, u8)>, // (filter, ttl)
+        peer_filters: &HashMap<NodeAddr, BloomFilter>,
     ) -> BloomFilter {
         let mut filter = BloomFilter::new();
 
@@ -443,9 +442,9 @@ impl BloomState {
             filter.insert(dep);
         }
 
-        // Merge filters from other peers (with TTL > 0)
-        for (peer_id, (peer_filter, ttl)) in peer_filters {
-            if peer_id != exclude_peer && *ttl > 0 {
+        // Merge filters from other peers
+        for (peer_id, peer_filter) in peer_filters {
+            if peer_id != exclude_peer {
                 // Ignore merge errors (size mismatches) - just skip that filter
                 let _ = filter.merge(peer_filter);
             }
@@ -788,8 +787,8 @@ mod tests {
         filter2.insert(&make_node_addr(200));
 
         let mut peer_filters = HashMap::new();
-        peer_filters.insert(peer1, (filter1, 2)); // TTL 2
-        peer_filters.insert(peer2, (filter2, 1)); // TTL 1
+        peer_filters.insert(peer1, filter1);
+        peer_filters.insert(peer2, filter2);
 
         // Filter for peer1 should exclude peer1's contributions
         let outgoing1 = state.compute_outgoing_filter(&peer1, &peer_filters);
@@ -806,27 +805,4 @@ mod tests {
         assert!(outgoing2.contains(&make_node_addr(101))); // from peer1
     }
 
-    #[test]
-    fn test_bloom_state_ttl_filtering() {
-        let my_node = make_node_addr(0);
-        let state = BloomState::new(my_node);
-
-        let peer1 = make_node_addr(10);
-        let peer2 = make_node_addr(20);
-
-        let mut filter1 = BloomFilter::new();
-        filter1.insert(&make_node_addr(100));
-
-        let mut filter2 = BloomFilter::new();
-        filter2.insert(&make_node_addr(200));
-
-        let mut peer_filters = HashMap::new();
-        peer_filters.insert(peer1, (filter1, 1)); // TTL 1 - included
-        peer_filters.insert(peer2, (filter2, 0)); // TTL 0 - excluded
-
-        let outgoing = state.compute_outgoing_filter(&make_node_addr(99), &peer_filters);
-
-        assert!(outgoing.contains(&make_node_addr(100))); // TTL 1
-        assert!(!outgoing.contains(&make_node_addr(200))); // TTL 0 excluded
-    }
 }

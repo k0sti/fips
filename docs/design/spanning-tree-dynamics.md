@@ -21,6 +21,7 @@ The protocol is based on Yggdrasil v0.5's CRDT gossip design.
 8. [Cost Metrics and Parent Selection](#8-cost-metrics-and-parent-selection)
 9. [Steady State Behavior](#9-steady-state-behavior)
 10. [Worked Examples](#10-worked-examples)
+11. [Known Limitations (v1 Implementation)](#known-limitations-v1-implementation)
 
 ---
 
@@ -1056,6 +1057,102 @@ T9: Merged network:
 
 **Convergence time**: 4 gossip rounds (depth of Site 2's subtree is 3, plus
 initial exchange).
+
+---
+
+## Known Limitations (v1 Implementation)
+
+The following limitations exist in the current implementation relative to the
+design described in this document. They are documented here to guide future
+work.
+
+### Known Limitation: Root Timeout Not Enforced
+
+The design specifies a 60-minute root timeout (§1 timing parameters, §6
+partition detection) after which nodes should treat the root as departed and
+re-elect. The current implementation does not track root entry timestamps or
+perform staleness checks.
+
+**Impact**: If the root node disappears permanently without a graceful
+disconnect, remaining nodes retain stale root state indefinitely. Nodes that
+lose their direct parent will re-elect locally (via `handle_parent_lost()`),
+but nodes with an intact path to a now-departed root will not detect the
+failure.
+
+**Required fix**: Track the timestamp of the most recent root declaration in
+`TreeState`. In `check_tree_state()` (called every 1s from the RX loop),
+compare against `root_timeout` (default 60 min). On expiration, treat it as
+root loss — increment sequence number, become own root, and re-announce.
+
+### Known Limitation: No TTL on Tree Entries
+
+The design specifies a 5-10 minute TTL on tree entries (§8 timing
+parameters). Peer entries in `TreeState` are never expired; they persist until
+explicitly removed by peer disconnection.
+
+**Impact**: Stale ancestry information from departed nodes remains in
+`TreeState`, potentially affecting coordinate computation. In practice, this
+is partially mitigated by parent loss handling, but entries for non-parent
+peers that depart without a graceful disconnect will linger.
+
+**Required fix**: Add a `last_seen` timestamp to peer entries in `TreeState`.
+In `check_tree_state()`, expire entries older than `tree_entry_ttl`. When
+entries expire, re-evaluate parent selection if the expired entry was the
+current parent.
+
+### Known Limitation: No Partition Detection
+
+The design describes partition detection via gossip staleness (§6) where
+nodes detect isolation when root announcements stop arriving and the root
+entry eventually expires, triggering independent partition operation.
+
+**Impact**: Without root timeout enforcement (see above), partitioned nodes
+cannot detect that they've lost connectivity to the root. They continue with
+stale coordinates rather than forming an independent partition with a local
+root. This affects only the case where the path to root is broken at some
+intermediate point — direct parent loss is handled correctly.
+
+**Required fix**: Depends on root timeout implementation. Once root timeout
+is enforced, partition detection follows naturally: a node whose root entry
+expires and has no peer with a fresher root declaration is partitioned. It
+becomes its own root and announces, allowing the partition to converge
+independently.
+
+### Known Limitation: Limited Stability Mechanisms
+
+The implementation includes basic hysteresis (`PARENT_SWITCH_THRESHOLD = 1`
+depth difference required to switch parents), but the temporal stability
+mechanisms described in the design are not implemented:
+
+- No hold timer on parent changes (minimum time before next switch)
+- No sequence number advancement rate limiting
+- No announcement suppression during transient topology changes
+- No minimum stable state duration before re-announcing
+
+**Impact**: Rapid topology changes (e.g., a flapping link) could cause
+excessive announcement traffic and repeated coordinate recomputation.
+Currently mitigated by per-peer rate limiting on TreeAnnounce sends, but
+the source node is not throttled.
+
+**Proposed fix**: Add a hold-down timer (e.g., 5-10s) after each parent
+change during which further parent switches are suppressed unless the current
+parent is lost entirely. Track announcement rate and suppress if exceeding a
+threshold.
+
+### Known Limitation: Integration Test Gaps
+
+Unit tests for `TreeState` and `TreeCoordinate` are comprehensive, and basic
+integration tests verify TreeAnnounce exchange and parent ancestry
+propagation. However, the following failure scenarios lack test coverage:
+
+- Root node failure and network-wide re-election
+- Network partition formation and independent operation
+- Partition healing and root convergence
+- Stale entry cleanup (depends on TTL implementation)
+- Parent flapping under rapid topology changes
+
+These tests are blocked on or related to the limitations above and should be
+added as each limitation is resolved.
 
 ---
 

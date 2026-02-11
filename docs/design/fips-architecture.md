@@ -156,7 +156,6 @@ Peer
 │  // Bloom filter (inbound—what's reachable through them)
 ├── inbound_filter: BloomFilter
 ├── filter_sequence: u64
-├── filter_ttl: u8
 ├── filter_received_at: Timestamp
 ├── pending_filter_update: bool     // we owe them an update
 │
@@ -246,9 +245,8 @@ BloomState
 
 Stored on Peer:
 
-- `inbound_filter`: what they advertise to us (4KB Bloom filter)
+- `inbound_filter`: what they advertise to us (1KB Bloom filter)
 - `filter_sequence`: freshness/dedup
-- `filter_ttl`: remaining propagation hops
 - `filter_received_at`: for staleness detection
 
 ### Computed (On-Demand)
@@ -259,11 +257,11 @@ Outgoing filter to peer Q is computed, not stored:
 outbound_filter(Q) =
     own_node_addr
     ∪ leaf_dependents
-    ∪ { entries from peer[P].inbound_filter for all P ≠ Q where filter_ttl > 0 }
+    ∪ { entries from peer[P].inbound_filter for all P ≠ Q }
 ```
 
-TTL is decremented on contributed entries. Recomputation is cheap (4KB filter,
-7 hashes) so on-demand is preferred over cache invalidation complexity.
+Recomputation is cheap (1KB filter, 5 hashes) so on-demand is preferred over
+cache invalidation complexity.
 
 ---
 
