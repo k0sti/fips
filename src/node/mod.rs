@@ -15,21 +15,16 @@ mod tests;
 use crate::bloom::BloomState;
 use crate::cache::CoordCache;
 use crate::index::IndexAllocator;
-use crate::peer::{
-    cross_connection_winner, ActivePeer, PeerConnection, PromotionResult,
-};
+use crate::peer::{ActivePeer, PeerConnection};
 use crate::rate_limit::HandshakeRateLimiter;
 use crate::transport::{
-    packet_channel, Link, LinkDirection, LinkId, PacketRx, PacketTx, ReceivedPacket,
+    packet_channel, Link, LinkDirection, LinkId, PacketRx, PacketTx,
     TransportAddr, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
-use crate::wire::{
-    build_encrypted, build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
-    DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2,
-};
+use crate::wire::{build_encrypted, build_msg1};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use std::collections::HashMap;
 use std::fmt;

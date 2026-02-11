@@ -1,168 +1,21 @@
-//! RX event loop and message handlers.
+//! Handshake handlers and connection promotion.
 
-use super::*;
-use crate::rate_limit::HANDSHAKE_TIMEOUT_SECS;
+use crate::node::{Node, NodeError};
+use crate::peer::{
+    cross_connection_winner, ActivePeer, PeerConnection, PromotionResult,
+};
+use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
+use crate::wire::{build_msg2, Msg1Header, Msg2Header};
+use crate::PeerIdentity;
+use std::time::Duration;
+use tracing::{debug, info, warn};
 
 impl Node {
-    // === RX Event Loop ===
-
-    /// Run the receive event loop.
-    ///
-    /// Processes packets from all transports, dispatching based on
-    /// the discriminator byte in the wire protocol:
-    /// - 0x00: Encrypted frame (session data)
-    /// - 0x01: Handshake message 1 (initiator -> responder)
-    /// - 0x02: Handshake message 2 (responder -> initiator)
-    ///
-    /// Also runs a periodic tick (1s) to clean up stale handshake connections
-    /// that never received a response. This prevents resource leaks when peers
-    /// are unreachable.
-    ///
-    /// This method takes ownership of the packet_rx channel and runs
-    /// until the channel is closed (typically when stop() is called).
-    pub async fn run_rx_loop(&mut self) -> Result<(), NodeError> {
-        let mut packet_rx = self.packet_rx.take()
-            .ok_or(NodeError::NotStarted)?;
-
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-
-        info!("RX event loop started");
-
-        loop {
-            tokio::select! {
-                packet = packet_rx.recv() => {
-                    match packet {
-                        Some(p) => self.process_packet(p).await,
-                        None => break, // channel closed
-                    }
-                }
-                _ = tick.tick() => {
-                    self.check_timeouts();
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    self.process_pending_retries(now_ms).await;
-                    self.check_tree_state().await;
-                    self.check_bloom_state().await;
-                }
-            }
-        }
-
-        info!("RX event loop stopped (channel closed)");
-        Ok(())
-    }
-
-    /// Process a single received packet.
-    ///
-    /// Dispatches based on the discriminator byte.
-    async fn process_packet(&mut self, packet: ReceivedPacket) {
-        if packet.data.is_empty() {
-            return; // Drop empty packets
-        }
-
-        let discriminator = packet.data[0];
-        match discriminator {
-            DISCRIMINATOR_ENCRYPTED => {
-                self.handle_encrypted_frame(packet).await;
-            }
-            DISCRIMINATOR_MSG1 => {
-                self.handle_msg1(packet).await;
-            }
-            DISCRIMINATOR_MSG2 => {
-                self.handle_msg2(packet).await;
-            }
-            _ => {
-                // Unknown discriminator, drop silently
-                debug!(
-                    discriminator = discriminator,
-                    transport_id = %packet.transport_id,
-                    "Unknown packet discriminator, dropping"
-                );
-            }
-        }
-    }
-
-    /// Handle an encrypted frame (discriminator 0x00).
-    ///
-    /// This is the hot path for established sessions. We use O(1)
-    /// index-based lookup to find the session, then decrypt.
-    pub(super) async fn handle_encrypted_frame(&mut self, packet: ReceivedPacket) {
-        // Parse header (fail fast)
-        let header = match EncryptedHeader::parse(&packet.data) {
-            Some(h) => h,
-            None => return, // Malformed, drop silently
-        };
-
-        // O(1) session lookup by our receiver index
-        let key = (packet.transport_id, header.receiver_idx.as_u32());
-        let node_addr = match self.peers_by_index.get(&key) {
-            Some(id) => *id,
-            None => {
-                // Unknown index - could be stale session or attack
-                debug!(
-                    receiver_idx = %header.receiver_idx,
-                    transport_id = %packet.transport_id,
-                    "Unknown session index, dropping"
-                );
-                return;
-            }
-        };
-
-        let peer = match self.peers.get_mut(&node_addr) {
-            Some(p) => p,
-            None => {
-                // Peer removed but index not cleaned up - fix it
-                self.peers_by_index.remove(&key);
-                return;
-            }
-        };
-
-        // Get the session (peer must have one for index-based lookup)
-        let session = match peer.noise_session_mut() {
-            Some(s) => s,
-            None => {
-                warn!(
-                    node_addr = %node_addr,
-                    "Peer in index map has no session"
-                );
-                return;
-            }
-        };
-
-        // Decrypt with replay check (this is the expensive part)
-        let ciphertext = &packet.data[header.ciphertext_offset..];
-        let plaintext = match session.decrypt_with_replay_check(ciphertext, header.counter) {
-            Ok(p) => p,
-            Err(e) => {
-                debug!(
-                    node_addr = %node_addr,
-                    counter = header.counter,
-                    error = %e,
-                    "Decryption failed"
-                );
-                return;
-            }
-        };
-
-        // === PACKET IS AUTHENTIC ===
-
-        // Update address for roaming support
-        peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
-
-        // Update statistics
-        peer.link_stats_mut().record_recv(packet.data.len(), packet.timestamp_ms);
-        peer.touch(packet.timestamp_ms);
-
-        // Dispatch to link message handler
-        self.dispatch_link_message(&node_addr, &plaintext).await;
-    }
-
     /// Handle handshake message 1 (discriminator 0x01).
     ///
     /// This creates a new inbound connection. Rate limiting is applied
     /// before any expensive crypto operations.
-    pub(super) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
+    pub(in crate::node) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
         // === RATE LIMITING (before any processing) ===
         if !self.msg1_rate_limiter.start_handshake() {
             debug!(
@@ -372,7 +225,7 @@ impl Node {
     /// Handle handshake message 2 (discriminator 0x02).
     ///
     /// This completes an outbound handshake we initiated.
-    pub(super) async fn handle_msg2(&mut self, packet: ReceivedPacket) {
+    pub(in crate::node) async fn handle_msg2(&mut self, packet: ReceivedPacket) {
         // Parse header
         let header = match Msg2Header::parse(&packet.data) {
             Some(h) => h,
@@ -611,7 +464,7 @@ impl Node {
     /// Promote a connection to active peer after successful authentication.
     ///
     /// Handles cross-connection detection and resolution using tie-breaker rules.
-    pub(super) fn promote_connection(
+    pub(in crate::node) fn promote_connection(
         &mut self,
         link_id: LinkId,
         verified_identity: PeerIdentity,
@@ -791,196 +644,5 @@ impl Node {
 
             Ok(PromotionResult::Promoted(peer_node_addr))
         }
-    }
-
-    /// Dispatch a decrypted link message to the appropriate handler.
-    ///
-    /// Link messages are protocol messages exchanged between authenticated peers.
-    async fn dispatch_link_message(&mut self, from: &NodeAddr, plaintext: &[u8]) {
-        if plaintext.is_empty() {
-            return;
-        }
-
-        let msg_type = plaintext[0];
-        let payload = &plaintext[1..];
-
-        // TODO: Implement remaining link message handlers
-        match msg_type {
-            0x10 => {
-                // TreeAnnounce
-                self.handle_tree_announce(from, payload).await;
-            }
-            0x20 => {
-                // FilterAnnounce
-                self.handle_filter_announce(from, payload).await;
-            }
-            0x30 => {
-                // LookupRequest
-                debug!("Received LookupRequest (not yet implemented)");
-            }
-            0x31 => {
-                // LookupResponse
-                debug!("Received LookupResponse (not yet implemented)");
-            }
-            0x40 => {
-                // SessionDatagram
-                debug!("Received SessionDatagram (not yet implemented)");
-            }
-            0x50 => {
-                // Disconnect
-                self.handle_disconnect(from, payload);
-            }
-            _ => {
-                debug!(msg_type = msg_type, "Unknown link message type");
-            }
-        }
-    }
-
-    /// Handle a Disconnect notification from a peer.
-    ///
-    /// The peer is signaling an orderly departure. We immediately remove
-    /// them from all state rather than waiting for timeout detection.
-    fn handle_disconnect(&mut self, from: &NodeAddr, payload: &[u8]) {
-        let disconnect = match crate::protocol::Disconnect::decode(payload) {
-            Ok(msg) => msg,
-            Err(e) => {
-                debug!(from = %from, error = %e, "Malformed disconnect message");
-                return;
-            }
-        };
-
-        info!(
-            node_addr = %from,
-            reason = %disconnect.reason,
-            "Peer sent disconnect notification"
-        );
-
-        self.remove_active_peer(from);
-    }
-
-    /// Remove an active peer and clean up all associated state.
-    ///
-    /// Frees session index, removes link and address mappings. Used for
-    /// both graceful disconnect and timeout-based eviction.
-    ///
-    /// Also handles tree state cleanup: if the removed peer was our parent,
-    /// selects an alternative or becomes root, and marks remaining peers
-    /// for pending tree announce (delivered on next tick).
-    pub(super) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
-        let peer = match self.peers.remove(node_addr) {
-            Some(p) => p,
-            None => {
-                debug!(node_addr = %node_addr, "Peer already removed");
-                return;
-            }
-        };
-
-        let link_id = peer.link_id();
-
-        // Free session index
-        if let (Some(tid), Some(idx)) = (peer.transport_id(), peer.our_index()) {
-            self.peers_by_index.remove(&(tid, idx.as_u32()));
-            let _ = self.index_allocator.free(idx);
-        }
-
-        // Remove link and address mapping
-        self.remove_link(&link_id);
-
-        // Tree state cleanup
-        let tree_changed = self.handle_peer_removal_tree_cleanup(node_addr);
-        if tree_changed {
-            // Mark all remaining peers for pending tree announce.
-            // These will be sent on the next tick via check_tree_state().
-            for peer in self.peers.values_mut() {
-                peer.mark_tree_announce_pending();
-            }
-        }
-
-        // Bloom filter cleanup: our outgoing filter changed (lost a peer's filter)
-        let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-        self.bloom_state.mark_all_updates_needed(remaining_peers);
-
-        info!(
-            node_addr = %node_addr,
-            link_id = %link_id,
-            tree_changed = tree_changed,
-            "Peer removed and state cleaned up"
-        );
-    }
-
-    // === Timeout Management ===
-
-    /// Check for timed-out handshake connections and clean them up.
-    ///
-    /// Called periodically by the RX event loop. Removes connections that have
-    /// been idle longer than HANDSHAKE_TIMEOUT_SECS or are in Failed state.
-    pub(super) fn check_timeouts(&mut self) {
-        if self.connections.is_empty() {
-            return;
-        }
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let timeout_ms = HANDSHAKE_TIMEOUT_SECS * 1000;
-
-        let stale: Vec<LinkId> = self.connections.iter()
-            .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())
-            .map(|(link_id, _)| *link_id)
-            .collect();
-
-        for link_id in stale {
-            // Log and schedule retry before cleanup (need connection state)
-            if let Some(conn) = self.connections.get(&link_id) {
-                let direction = conn.direction();
-                let idle_ms = conn.idle_time(now_ms);
-                if conn.is_failed() {
-                    info!(
-                        link_id = %link_id,
-                        direction = %direction,
-                        "Failed handshake connection cleaned up"
-                    );
-                } else {
-                    info!(
-                        link_id = %link_id,
-                        direction = %direction,
-                        idle_secs = idle_ms / 1000,
-                        "Stale handshake connection timed out"
-                    );
-                }
-
-                // Schedule retry for failed outbound auto-connect peers
-                if conn.is_outbound() {
-                    if let Some(identity) = conn.expected_identity() {
-                        self.schedule_retry(*identity.node_addr(), now_ms);
-                    }
-                }
-            }
-            self.cleanup_stale_connection(link_id, now_ms);
-        }
-    }
-
-    /// Remove a handshake connection and all associated state.
-    ///
-    /// Frees the session index, removes pending_outbound entry, and cleans up
-    /// the link and address mapping. Does not log — callers provide context-appropriate
-    /// log messages.
-    fn cleanup_stale_connection(&mut self, link_id: LinkId, _now_ms: u64) {
-        let conn = match self.connections.remove(&link_id) {
-            Some(c) => c,
-            None => return,
-        };
-
-        // Free session index and pending_outbound if allocated
-        if let Some(idx) = conn.our_index() {
-            if let Some(tid) = conn.transport_id() {
-                self.pending_outbound.remove(&(tid, idx.as_u32()));
-            }
-            let _ = self.index_allocator.free(idx);
-        }
-
-        // Remove link and addr_to_link
-        self.remove_link(&link_id);
     }
 }
