@@ -892,10 +892,15 @@ Post-handshake data packets between authenticated peers.
 │  │   1    │ payload          │ variable  │ Message-specific payload      │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
-│  Link message types:                                                        │
+│  Link message types (inside encrypted frame):                                │
 │    0x10 = TreeAnnounce       0x30 = LookupRequest                          │
 │    0x20 = FilterAnnounce     0x31 = LookupResponse                         │
 │    0x40 = SessionDatagram    0x50 = Disconnect                             │
+│                                                                             │
+│  SessionDatagram (0x40) carries session-layer payloads:                     │
+│    0x00 = SessionSetup       0x10 = DataPacket                             │
+│    0x01 = SessionAck         0x20 = CoordsRequired                         │
+│                               0x21 = PathBroken                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

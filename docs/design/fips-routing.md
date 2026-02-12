@@ -418,16 +418,20 @@ No global routing tables. Each node makes purely local decisions.
 
 ### Privacy Considerations
 
-Intermediate routers can observe `src_addr` and `dest_addr` in transiting packets.
-This enables traffic analysis (who is communicating with whom) but not content
-inspection (the payload is end-to-end encrypted with session keys).
+Intermediate routers can observe `src_addr` and `dest_addr` in the
+SessionDatagram envelope of transiting packets. This enables traffic analysis
+(who is communicating with whom) but not content inspection (the payload is
+end-to-end encrypted with session keys).
 
-**Why source address is visible**: The source address is required for routers to
-send error messages (CoordsRequired, PathBroken) back to the sender. This is a
-deliberate design choice: rather than silently dropping unroutable packets and
-relying on application-layer timeouts to detect failures, FIPS provides explicit
-feedback that allows rapid route recovery. The tradeoff favors responsiveness
-over metadata privacy.
+**Why source address is visible**: The `src_addr` field in the SessionDatagram
+is required for transit routers to send error signals (CoordsRequired,
+PathBroken) back to the sender. When a transit router R cannot forward a
+SessionDatagram `{src: S, dest: D}`, it creates a new SessionDatagram
+`{src: R, dest: S}` carrying the error signal, and routes it toward S using
+`find_next_hop(S)`. This is a deliberate design choice: rather than silently
+dropping unroutable packets and relying on application-layer timeouts to detect
+failures, FIPS provides explicit feedback that allows rapid route recovery.
+The tradeoff favors responsiveness over metadata privacy.
 
 **Partial mitigation**: FIPS addresses are derived from `SHA-256(pubkey)`, not the
 npub itself. An observer learns that `fd12:3456:...` is communicating with
@@ -455,8 +459,9 @@ The coordinate cache serves two functions:
 1. **Greedy routing fallback** — when bloom filters haven't converged,
    cached coordinates enable tree-distance-based forwarding.
 2. **Reduced packet overhead** — once coordinates are cached at intermediate
-   routers, data packets can carry addresses only (38 bytes) rather than
-   full coordinates (~300 bytes).
+   routers, data packets can use minimal DataPacket headers (4 bytes inside
+   a 34-byte SessionDatagram = 38 bytes total) rather than including full
+   coordinates (~170 bytes total).
 
 ### Cache Lifecycle
 
@@ -472,83 +477,100 @@ The coordinate cache serves two functions:
 
 ### Session Setup Flow
 
+All messages are carried inside SessionDatagram envelopes that provide
+`src_addr`, `dest_addr`, and `hop_limit` at the link layer.
+
 ```text
 S                       R1                      R2                      D
 │                        │                       │                       │
-│──SessionSetup─────────>│                       │                       │
-│  (src_coords,          │──SessionSetup────────>│                       │
-│   dest_coords)         │                       │──SessionSetup────────>│
-│                        │                       │                       │
-│                        │  cache:               │  cache:               │
+│──SessionDatagram──────>│                       │                       │
+│  {src:S, dest:D,       │──SessionDatagram─────>│                       │
+│   payload:SessionSetup │                       │──SessionDatagram─────>│
+│   (src_coords,         │                       │                       │
+│    dest_coords)}       │  cache:               │  cache:               │
 │                        │  dest_addr→dest_coords│  dest_addr→dest_coords│
 │                        │  src_addr→src_coords  │  src_addr→src_coords  │
 │                        │                       │                       │
-│<─────────────────────────────────────────────────────────SessionAck───│
+│<──────────────────────────────────────────SessionDatagram{SessionAck}──│
 │                        │                       │                       │
-│══DataPacket═══════════>│══════════════════════>│══════════════════════>│
-│  (addresses only)      │  (use cached coords)  │  (use cached coords)  │
+│══SessionDatagram══════>│══════════════════════>│══════════════════════>│
+│  {src:S, dest:D,       │  (use cached coords)  │  (use cached coords)  │
+│   payload:DataPacket}  │                       │                       │
 ```
 
 ### Router Behavior
 
+Transit routers process SessionDatagram envelopes. The envelope provides
+`src_addr` and `dest_addr` for routing decisions and error signaling.
+
 ```rust
 impl Router {
-    fn handle_session_setup(&mut self, setup: SessionSetup, from: PeerId) {
+    /// Handle a SessionDatagram carrying a SessionSetup payload.
+    /// Cache coordinates from the setup message for both directions.
+    fn handle_session_setup(&mut self, dg: &SessionDatagram, setup: SessionSetup) {
         // Cache coordinates for both directions
-        self.coord_cache.insert(setup.dest_addr, CacheEntry {
+        self.coord_cache.insert(dg.dest_addr, CacheEntry {
             coords: setup.dest_coords.clone(),
             expires: now() + CACHE_TTL,
         });
-        self.coord_cache.insert(setup.src_addr, CacheEntry {
+        self.coord_cache.insert(dg.src_addr, CacheEntry {
             coords: setup.src_coords.clone(),
             expires: now() + CACHE_TTL,
         });
 
-        // Forward toward destination
-        let next = self.greedy_next_hop(&setup.dest_coords);
-        self.forward(next, setup);
+        // Forward toward destination using find_next_hop
+        if let Some(next) = self.find_next_hop(&dg.dest_addr) {
+            self.forward(next, dg);
+        }
     }
 
-    fn handle_data_packet(&mut self, packet: DataPacket, from: PeerId) {
+    /// Handle a SessionDatagram carrying a DataPacket payload.
+    /// Addresses come from the SessionDatagram envelope (dg.src_addr, dg.dest_addr).
+    fn handle_data_packet(&mut self, dg: &SessionDatagram, packet: DataPacket) {
         // If packet carries coordinates, cache them
         if packet.flags & COORDS_PRESENT != 0 {
             if let (Some(src_coords), Some(dest_coords)) =
                 (&packet.src_coords, &packet.dest_coords)
             {
-                self.coord_cache.insert(packet.dest_addr, CacheEntry {
+                self.coord_cache.insert(dg.dest_addr, CacheEntry {
                     coords: dest_coords.clone(),
                     expires: now() + CACHE_TTL,
                 });
-                self.coord_cache.insert(packet.src_addr, CacheEntry {
+                self.coord_cache.insert(dg.src_addr, CacheEntry {
                     coords: src_coords.clone(),
                     expires: now() + CACHE_TTL,
                 });
             }
         }
 
-        // Primary: bloom filter routing
-        let candidates = self.destination_in_filters(&packet.dest_addr);
-        if !candidates.is_empty() {
-            let next = self.select_best_candidate(&candidates);
-            self.forward(next, packet);
-            return;
-        }
-
-        // Fallback: greedy tree routing via cached coordinates
-        match self.coord_cache.get(&packet.dest_addr) {
-            Some(entry) => {
-                entry.last_used = now();
-                let next = self.greedy_next_hop(&entry.coords);
-                self.forward(next, packet);
-            }
+        // Route using find_next_hop (bloom filter → greedy tree → None)
+        match self.find_next_hop(&dg.dest_addr) {
+            Some(next) => self.forward(next, dg),
             None => {
-                // No bloom filter hit and no cached coordinates
-                self.send_error(from, CoordsRequired {
-                    dest_addr: packet.dest_addr,
+                // Cannot route — send error back to source via src_addr
+                self.send_error_to_source(dg, CoordsRequired {
+                    dest_addr: dg.dest_addr,
                     reporter: self.node_addr,
                 });
             }
         }
+    }
+
+    /// Send an error signal back to the source of a SessionDatagram.
+    /// Creates a new SessionDatagram addressed to dg.src_addr.
+    fn send_error_to_source(&self, dg: &SessionDatagram, error: impl LinkError) {
+        let error_dg = SessionDatagram {
+            src_addr: self.node_addr,  // We are the reporter
+            dest_addr: dg.src_addr,     // Route back to original source
+            hop_limit: 64,
+            payload: error.encode(),    // CoordsRequired or PathBroken
+        };
+        // Route the error — if we can't reach source either, drop silently
+        if let Some(next) = self.find_next_hop(&dg.src_addr) {
+            self.forward(next, &error_dg);
+        }
+        // If find_next_hop returns None for source: drop silently.
+        // No cascading errors.
     }
 }
 ```
@@ -557,7 +579,7 @@ impl Router {
 
 ```rust
 struct CoordCache {
-    entries: HashMap<Ipv6Addr, CacheEntry>,
+    entries: HashMap<NodeAddr, CacheEntry>,
     max_entries: usize,
 }
 
@@ -583,22 +605,28 @@ by:
 When a router's cache entry is evicted mid-session:
 
 ```text
-1. Data packet arrives (minimal header), cache miss
-2. Router sends CoordsRequired to packet source
-3. Source marks route as cold
-4. Source resends with COORDS_PRESENT flag set
-5. Router caches coordinates from packet, forwards
-6. After N successful packets, source clears flag
+1. SessionDatagram{src:S, dest:D, payload:DataPacket} arrives, router can't route
+2. Router R creates SessionDatagram{src:R, dest:S, payload:CoordsRequired{dest:D}}
+3. Router routes the error back to S using find_next_hop(S)
+4. S receives CoordsRequired, marks route to D as "cold"
+5. S resends with COORDS_PRESENT flag set in DataPacket
+6. Routers cache coordinates from DataPacket, forward normally
+7. After N successful packets, S clears the flag
 ```
 
 The crypto session remains active throughout—only routing state is refreshed.
 From application perspective: one packet delayed, transparent recovery.
 
+If the router also cannot route to S (no bloom filter hit, no cached
+coordinates for S), the error is dropped silently. No cascading errors are
+generated. The source will eventually detect the loss via application-layer
+timeout.
+
 ### Sender State Machine
 
 ```rust
 impl Sender {
-    fn send(&mut self, dest: Ipv6Addr, data: &[u8]) {
+    fn send(&mut self, dest: NodeAddr, data: &[u8]) {
         if !self.session_established(dest) {
             // Need to establish crypto session first
             let dest_coords = self.discover_or_cached(dest)?;
@@ -608,9 +636,20 @@ impl Sender {
 
         // Check route state
         let include_coords = self.route_state(dest) == RouteCold;
-        self.send_data_packet(dest, data, include_coords);
+        let data_packet = DataPacket::new(data, include_coords);
+
+        // Wrap in SessionDatagram for forwarding
+        let dg = SessionDatagram {
+            src_addr: self.node_addr,
+            dest_addr: dest,
+            hop_limit: 64,
+            payload: data_packet.encode(),
+        };
+        self.forward_datagram(dg);
     }
 
+    /// Handle CoordsRequired received inside a SessionDatagram addressed to us.
+    /// The SessionDatagram.src_addr identifies the reporting router (informational).
     fn handle_coords_required(&mut self, err: CoordsRequired) {
         // Route cache expired at intermediate router
         // Crypto session still valid - just need to re-warm route
@@ -629,16 +668,21 @@ enum RouteState {
 
 ## Part 5: Packet Type Summary
 
+All session-layer messages and error signals are carried inside a
+SessionDatagram envelope (34 bytes: msg_type + src_addr + dest_addr +
+hop_limit). Sizes below include the SessionDatagram header.
+
 | Type | Purpose | Size | When Used |
 |------|---------|------|-----------|
 | FilterAnnounce | Bloom filter propagation | ~1 KB | Topology changes |
 | LookupRequest | Discover coordinates | ~300 bytes | First contact with distant node |
 | LookupResponse | Return coordinates | ~400 bytes | Reply to discovery |
-| SessionSetup | Warm router caches + crypto init | ~400-700 bytes | Before data transfer |
-| SessionAck | Confirm session + crypto response | ~300-500 bytes | Session confirmation |
-| DataPacket | Application data | 36 bytes + payload (minimal) | Bulk of traffic |
-| DataPacket | With coordinates | ~300-500 bytes + payload | After CoordsRequired |
-| CoordsRequired | Request coords in next packet | ~50 bytes | Cache miss recovery |
+| SessionDatagram+SessionSetup | Warm caches + crypto init | ~230-400 bytes | Before data transfer |
+| SessionDatagram+SessionAck | Confirm session + crypto | ~100-200 bytes | Session confirmation |
+| SessionDatagram+DataPacket | Application data | 38 bytes + payload (minimal) | Bulk of traffic |
+| SessionDatagram+DataPacket | With coordinates | ~170 bytes + payload | After CoordsRequired |
+| SessionDatagram+CoordsRequired | Coords needed signal | 68 bytes | Cache miss recovery |
+| SessionDatagram+PathBroken | Routing failed signal | 68+ bytes | Greedy routing local minimum |
 
 > **Note**: SessionSetup/SessionAck sizes vary based on coordinate depth and
 > whether they carry crypto handshake payloads (combined establishment per

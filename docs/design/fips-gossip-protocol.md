@@ -417,12 +417,13 @@ Within the link-layer message framing:
 | Type Code | Message |
 |-----------|---------|
 | 0x10 | TreeAnnounce |
-| 0x11 | FilterAnnounce |
-| 0x12 | LookupRequest |
-| 0x13 | LookupResponse |
+| 0x20 | FilterAnnounce |
+| 0x30 | LookupRequest |
+| 0x31 | LookupResponse |
 
 These are carried inside the encrypted link-layer payload after Noise IK
-handshake completion.
+handshake completion. See [fips-wire-protocol.md](fips-wire-protocol.md) §2.6
+for the full link message type table.
 
 ---
 
@@ -556,13 +557,13 @@ ANCESTRY[3] - Root:
 Total payload: 1 + 1 + 8 + 8 + 16 + 2 + (4 × 32) + 64 = 228 bytes
 ```
 
-### A.2 FilterAnnounce (0x11)
+### A.2 FilterAnnounce (0x20)
 
 Propagates Bloom filter reachability information.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         FILTER ANNOUNCE (0x11)                              │
+│                         FILTER ANNOUNCE (0x20)                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -570,7 +571,7 @@ Propagates Bloom filter reachability information.
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
-│  │   0    │ msg_type         │ 1 byte    │ 0x11                          │  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x20                          │  │
 │  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
 │  │   9    │ hash_count       │ 1 byte    │ Number of hash functions (5)  │  │
 │  │  10    │ size_class       │ 1 byte    │ Filter size: 512 << class     │  │
@@ -615,7 +616,7 @@ Propagates Bloom filter reachability information.
 
 ```text
 PLAINTEXT BYTES:
-11                               ← msg_type = FilterAnnounce
+20                               ← msg_type = FilterAnnounce
 2A 00 00 00 00 00 00 00          ← sequence = 42
 05                               ← hash_count = 5
 01                               ← size_class = 1 (1 KB filter)
@@ -624,13 +625,13 @@ PLAINTEXT BYTES:
 Total: 1035 bytes
 ```
 
-### A.3 LookupRequest (0x12)
+### A.3 LookupRequest (0x30)
 
 Discovers tree coordinates for distant destinations.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         LOOKUP REQUEST (0x12)                               │
+│                         LOOKUP REQUEST (0x30)                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -638,7 +639,7 @@ Discovers tree coordinates for distant destinations.
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
-│  │   0    │ msg_type         │ 1 byte    │ 0x12                          │  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x30                          │  │
 │  │   1    │ request_id       │ 8 bytes   │ u64 LE, unique identifier     │  │
 │  │   9    │ target           │ 16 bytes  │ NodeAddr being searched for     │  │
 │  │  25    │ origin           │ 16 bytes  │ NodeAddr of requester           │  │
@@ -664,7 +665,7 @@ Discovers tree coordinates for distant destinations.
 
 ```text
 PLAINTEXT BYTES:
-12                               ← msg_type = LookupRequest
+30                               ← msg_type = LookupRequest
 [8 bytes request_id]             ← random unique ID
 [16 bytes target node_addr]        ← who we're looking for
 [16 bytes origin node_addr]        ← who's asking
@@ -677,13 +678,13 @@ PLAINTEXT BYTES:
 Total: 1 + 8 + 16 + 16 + 1 + 2 + 64 + 1 + 256 = 365 bytes
 ```
 
-### A.4 LookupResponse (0x13)
+### A.4 LookupResponse (0x31)
 
 Returns target's coordinates to the requester.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         LOOKUP RESPONSE (0x13)                              │
+│                         LOOKUP RESPONSE (0x31)                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -691,7 +692,7 @@ Returns target's coordinates to the requester.
 │  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
 │  │ Offset │ Field            │ Size      │ Description                   │  │
 │  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
-│  │   0    │ msg_type         │ 1 byte    │ 0x13                          │  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x31                          │  │
 │  │   1    │ request_id       │ 8 bytes   │ u64 LE, echoes request        │  │
 │  │   9    │ target           │ 16 bytes  │ NodeAddr that was found         │  │
 │  │  25    │ target_coords_cnt│ 2 bytes   │ u16 LE                        │  │
@@ -717,7 +718,7 @@ Returns target's coordinates to the requester.
 
 ```text
 PLAINTEXT BYTES:
-13                               ← msg_type = LookupResponse
+31                               ← msg_type = LookupResponse
 [8 bytes request_id]             ← echoed from request
 [16 bytes target node_addr]        ← confirms who was found
 05 00                            ← target_coords_count = 5
@@ -746,7 +747,7 @@ Source S wants to reach distant destination D (not in local filters)
    │                    ┌───────────┘                             │
    │                    ▼                                         │
    │              ┌──────┬───────────────────────────────────┐    │
-   │              │ 0x12 │ LookupRequest payload             │    │
+   │              │ 0x30 │ LookupRequest payload             │    │
    │              │      │ (target=D, origin=S, ttl=8, ...)  │    │
    │              └──────┴───────────────────────────────────┘    │
    └──────────────────────────────────────────────────────────────┘
@@ -765,7 +766,7 @@ Source S wants to reach distant destination D (not in local filters)
    │                    ┌───────────┘                             │
    │                    ▼                                         │
    │              ┌──────┬───────────────────────────────────┐    │
-   │              │ 0x13 │ LookupResponse payload            │    │
+   │              │ 0x31 │ LookupResponse payload            │    │
    │              │      │ (target=D, coords=[D,P1,P2,Root]) │    │
    │              └──────┴───────────────────────────────────┘    │
    └──────────────────────────────────────────────────────────────┘

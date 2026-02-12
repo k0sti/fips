@@ -713,16 +713,19 @@ impl Node {
     /// Routing priority:
     /// 1. Destination is self → `None` (local delivery)
     /// 2. Destination is a direct peer → that peer
-    /// 3. Bloom filter candidates + greedy tree routing → among peers whose
+    /// 3. Bloom filter candidates with cached dest coords → among peers whose
     ///    bloom filter contains the destination, pick the one that minimizes
-    ///    tree distance to the destination (if dest coords are cached), with
+    ///    tree distance to the destination, with
     ///    `(link_cost, tree_distance_to_dest, node_addr)` tie-breaking.
-    ///    Falls back to greedy tree routing if no bloom filter hits.
-    /// 4. No route → `None`
+    ///    The self-distance check ensures only peers strictly closer to the
+    ///    destination than us are considered (prevents routing loops).
+    /// 4. Greedy tree routing fallback (requires cached dest coords)
+    /// 5. No route → `None`
     ///
-    /// The self-distance check from greedy routing also applies to bloom
-    /// filter candidates: a peer is only selected if it is strictly closer
-    /// to the destination than we are (prevents routing loops).
+    /// Both the bloom filter and tree routing paths require cached destination
+    /// coordinates. Without coordinates, the node cannot make loop-free
+    /// forwarding decisions. The caller should signal `CoordsRequired` back
+    /// to the source when `None` is returned for a non-local destination.
     pub fn find_next_hop(&self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
         // 1. Local delivery
         if dest_node_addr == self.node_addr() {
@@ -736,21 +739,20 @@ impl Node {
             }
         }
 
-        // Look up destination coords (used by both bloom and tree paths)
+        // Look up destination coords (required by both bloom and tree paths)
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_coords = self.coord_cache.get(dest_node_addr, now_ms);
+        let dest_coords = self.coord_cache.get(dest_node_addr, now_ms)?;
 
-        // 3. Bloom filter candidates, scored by tree distance to dest
+        // 3. Bloom filter candidates — requires dest_coords for loop-free selection
         let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);
         if !candidates.is_empty() {
             return self.select_best_candidate(&candidates, dest_coords);
         }
 
         // 4. Greedy tree routing fallback
-        let dest_coords = dest_coords?;
         let next_hop_id = self.tree_state.find_next_hop(dest_coords)?;
 
         self.peers.get(&next_hop_id).filter(|p| p.can_send())
@@ -758,22 +760,18 @@ impl Node {
 
     /// Select the best peer from a set of bloom filter candidates.
     ///
-    /// When dest_coords are available, uses distance from each candidate's
-    /// coordinates to the destination as the primary metric (after link_cost).
-    /// Only selects peers that are strictly closer to the destination than
-    /// we are (self-distance check prevents loops).
-    ///
-    /// When dest_coords are not available, falls back to distance from us
-    /// to the candidate peer (a weaker heuristic — prefers closer peers on
-    /// the theory that shorter paths are better).
+    /// Uses distance from each candidate's tree coordinates to the destination
+    /// as the primary metric (after link_cost). Only selects peers that are
+    /// strictly closer to the destination than we are (self-distance check
+    /// prevents routing loops).
     ///
     /// Ordering: `(link_cost, distance_to_dest, node_addr)`.
     fn select_best_candidate<'a>(
         &'a self,
         candidates: &[&'a ActivePeer],
-        dest_coords: Option<&crate::tree::TreeCoordinate>,
+        dest_coords: &crate::tree::TreeCoordinate,
     ) -> Option<&'a ActivePeer> {
-        let my_distance = dest_coords.map(|dc| self.tree_state.my_coords().distance_to(dc));
+        let my_distance = self.tree_state.my_coords().distance_to(dest_coords);
 
         let mut best: Option<(&ActivePeer, f64, usize)> = None;
 
@@ -784,25 +782,16 @@ impl Node {
 
             let cost = candidate.link_cost();
 
-            // Compute distance: peer→dest if coords available, else us→peer
-            let dist = match dest_coords {
-                Some(dc) => self
-                    .tree_state
-                    .peer_coords(candidate.node_addr())
-                    .map(|pc| pc.distance_to(dc))
-                    .unwrap_or(usize::MAX),
-                None => self
-                    .tree_state
-                    .distance_to_peer(candidate.node_addr())
-                    .unwrap_or(usize::MAX),
-            };
+            let dist = self
+                .tree_state
+                .peer_coords(candidate.node_addr())
+                .map(|pc| pc.distance_to(dest_coords))
+                .unwrap_or(usize::MAX);
 
-            // Self-distance check: when dest coords are available,
-            // only consider peers that are strictly closer than us
-            if let Some(my_dist) = my_distance {
-                if dist >= my_dist {
-                    continue;
-                }
+            // Self-distance check: only consider peers strictly closer
+            // to the destination than we are (prevents routing loops)
+            if dist >= my_distance {
+                continue;
             }
 
             let dominated = match &best {

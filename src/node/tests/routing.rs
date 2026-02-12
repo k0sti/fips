@@ -54,6 +54,7 @@ fn test_routing_unknown_destination() {
 fn test_routing_bloom_filter_hit() {
     let mut node = make_node();
     let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
 
     // Create two peers
     let link_id1 = LinkId::new(1);
@@ -68,8 +69,27 @@ fn test_routing_bloom_filter_hit() {
     node.add_connection(conn2).unwrap();
     node.promote_connection(link_id2, id2, 2000).unwrap();
 
-    // Destination not directly connected
+    // Set up tree: we are root, both peers are our children
+    let peer1_coords = TreeCoordinate::from_addrs(vec![peer1_addr, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(peer1_addr, my_addr, 1, 1000),
+        peer1_coords,
+    );
+    let peer2_coords = TreeCoordinate::from_addrs(vec![peer2_addr, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(peer2_addr, my_addr, 1, 1000),
+        peer2_coords,
+    );
+
+    // Destination not directly connected — placed under peer1 in the tree
     let dest = make_node_addr(99);
+    let dest_coords =
+        TreeCoordinate::from_addrs(vec![dest, peer1_addr, my_addr]).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // Add dest to peer1's bloom filter only
     let peer1 = node.get_peer_mut(&peer1_addr).unwrap();
@@ -77,7 +97,7 @@ fn test_routing_bloom_filter_hit() {
     filter.insert(&dest);
     peer1.update_filter(filter, 1, 3000);
 
-    // Should route through peer1 (bloom filter hit)
+    // Should route through peer1 (bloom filter hit, closer to dest)
     let result = node.find_next_hop(&dest);
     assert!(result.is_some());
     assert_eq!(result.unwrap().node_addr(), &peer1_addr);
@@ -90,6 +110,7 @@ fn test_routing_bloom_filter_hit() {
 fn test_routing_bloom_filter_multiple_hits_tiebreak() {
     let mut node = make_node();
     let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
 
     // Create three peers
     let mut peer_addrs = Vec::new();
@@ -102,7 +123,25 @@ fn test_routing_bloom_filter_multiple_hits_tiebreak() {
         node.promote_connection(link_id, id, 2000).unwrap();
     }
 
+    // Set up tree: we are root, all peers are our children (equidistant)
+    for &addr in &peer_addrs {
+        let coords = TreeCoordinate::from_addrs(vec![addr, my_addr]).unwrap();
+        node.tree_state_mut().update_peer(
+            ParentDeclaration::new(addr, my_addr, 1, 1000),
+            coords,
+        );
+    }
+
+    // Destination placed under the first peer (arbitrary — all peers are
+    // equidistant from dest since dest is 2 hops from root via any child)
     let dest = make_node_addr(99);
+    let dest_coords =
+        TreeCoordinate::from_addrs(vec![dest, peer_addrs[0], my_addr]).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // Add dest to ALL peers' bloom filters
     for &addr in &peer_addrs {
@@ -112,13 +151,13 @@ fn test_routing_bloom_filter_multiple_hits_tiebreak() {
         peer.update_filter(filter, 1, 3000);
     }
 
-    // All peers have equal link_cost (1.0) and no tree coords set,
-    // so tree distance is usize::MAX for all. Tie-break by smallest node_addr.
+    // All peers have equal link_cost (1.0). peer_addrs[0] is closest to dest
+    // (distance 1 vs distance 3 for the others). Self-distance check filters
+    // peers that aren't strictly closer than us (our distance = 2).
+    // peer_addrs[0] has distance 1 (passes), others have distance 3 (filtered).
     let result = node.find_next_hop(&dest);
     assert!(result.is_some());
-
-    let smallest_addr = peer_addrs.iter().min().unwrap();
-    assert_eq!(result.unwrap().node_addr(), smallest_addr);
+    assert_eq!(result.unwrap().node_addr(), &peer_addrs[0]);
 }
 
 // === Greedy tree routing ===
@@ -180,6 +219,42 @@ fn test_routing_tree_no_coords_in_cache() {
 
     // Destination not in bloom filters and not in coord cache
     let dest = make_node_addr(99);
+    assert!(node.find_next_hop(&dest).is_none());
+}
+
+// === Bloom filter without coords → no route (loop prevention) ===
+
+#[test]
+fn test_routing_bloom_hit_without_coords_returns_none() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    // Create two peers
+    let link_id1 = LinkId::new(1);
+    let (conn1, id1) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let peer1_addr = *id1.node_addr();
+    node.add_connection(conn1).unwrap();
+    node.promote_connection(link_id1, id1, 2000).unwrap();
+
+    let link_id2 = LinkId::new(2);
+    let (conn2, id2) = make_completed_connection(&mut node, link_id2, transport_id, 1000);
+    let peer2_addr = *id2.node_addr();
+    node.add_connection(conn2).unwrap();
+    node.promote_connection(link_id2, id2, 2000).unwrap();
+
+    let dest = make_node_addr(99);
+
+    // Add dest to BOTH peers' bloom filters
+    for &addr in &[peer1_addr, peer2_addr] {
+        let peer = node.get_peer_mut(&addr).unwrap();
+        let mut filter = BloomFilter::new();
+        filter.insert(&dest);
+        peer.update_filter(filter, 1, 3000);
+    }
+
+    // Bloom filter candidates exist, but dest coords are NOT cached.
+    // find_next_hop must return None to prevent routing loops.
+    // The caller should signal CoordsRequired back to the source.
     assert!(node.find_next_hop(&dest).is_none());
 }
 
@@ -270,18 +345,31 @@ async fn test_routing_bloom_preferred_over_tree() {
 
     drain_all_packets(&mut nodes, false).await;
 
-    // Create a destination beyond the network
+    // Create a destination beyond the network and cache its coords.
+    // Place dest as a child of peer2 in the converged tree so bloom
+    // filter routing selects peer2 (strictly closer to dest than us).
     let dest = make_node_addr(99);
+    let peer2_addr = *nodes[2].node.node_addr();
+    let mut dest_path: Vec<NodeAddr> =
+        nodes[2].node.tree_state().my_coords().node_addrs().copied().collect();
+    dest_path.insert(0, dest);
+    let dest_coords = TreeCoordinate::from_addrs(dest_path).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    nodes[0]
+        .node
+        .coord_cache_mut()
+        .insert(dest, dest_coords, now_ms);
 
     // Add dest to peer 2's bloom filter (from node 0's perspective)
-    let peer2_addr = *nodes[2].node.node_addr();
     let peer2 = nodes[0].node.get_peer_mut(&peer2_addr).unwrap();
     let mut filter = BloomFilter::new();
     filter.insert(&dest);
     peer2.update_filter(filter, 100, 50000);
 
-    // Even though we could use tree routing (if coords were cached),
-    // the bloom filter hit should be preferred.
+    // Bloom filter hit with cached coords should route via peer 2.
     let hop = nodes[0].node.find_next_hop(&dest);
     assert!(hop.is_some(), "Should route via bloom filter");
     assert_eq!(
@@ -401,7 +489,8 @@ async fn test_routing_reachability_100_nodes() {
 
     // Populate coord caches: every node learns every other node's coordinates.
     // In production this happens via SessionSetup/LookupResponse; here we
-    // inject them directly so routing can make progress-based decisions.
+    // inject them directly. Bloom filter routing requires cached dest_coords
+    // for loop-free forwarding — without coords, find_next_hop returns None.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

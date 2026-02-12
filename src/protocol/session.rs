@@ -8,11 +8,13 @@ use std::fmt;
 // Session Layer Message Types
 // ============================================================================
 
-/// Session-layer message type identifiers.
+/// SessionDatagram payload message type identifiers.
 ///
-/// These messages are exchanged end-to-end between FIPS nodes, encrypted
-/// with session keys that intermediate nodes cannot read. They are carried
-/// as payloads inside `LinkMessageType::SessionDatagram`.
+/// These messages are carried as payloads inside `SessionDatagram` (link
+/// message type 0x40). Session-layer messages (SessionSetup, SessionAck,
+/// DataPacket) are end-to-end encrypted with session keys. Error signals
+/// (CoordsRequired, PathBroken) are plaintext link-layer messages generated
+/// by transit routers that cannot establish e2e sessions with the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SessionMessageType {
@@ -26,10 +28,10 @@ pub enum SessionMessageType {
     /// Encrypted IPv6 datagram payload.
     DataPacket = 0x10,
 
-    // Errors (0x20-0x2F)
-    /// Router cache miss - needs coordinates.
+    // Link-layer error signals (0x20-0x2F) — plaintext, from transit routers
+    /// Router cache miss — needs coordinates (link-layer error signal).
     CoordsRequired = 0x20,
-    /// Routing failure (local minimum or unreachable).
+    /// Routing failure — local minimum or unreachable (link-layer error signal).
     PathBroken = 0x21,
 }
 
@@ -123,14 +125,12 @@ impl SessionFlags {
 
 /// Session setup to establish cached coordinate state.
 ///
-/// Sent before data packets to warm router caches with coordinate
-/// information. Routers along the path cache the mappings.
+/// Carried inside a SessionDatagram envelope which provides src_addr and
+/// dest_addr. The SessionSetup payload contains only coordinates and the
+/// Noise handshake data needed for route cache warming and session
+/// establishment.
 #[derive(Clone, Debug)]
 pub struct SessionSetup {
-    /// Source node address.
-    pub src_addr: NodeAddr,
-    /// Destination node address.
-    pub dest_addr: NodeAddr,
     /// Source coordinates (for return path caching).
     pub src_coords: TreeCoordinate,
     /// Destination coordinates (for forward routing).
@@ -141,15 +141,8 @@ pub struct SessionSetup {
 
 impl SessionSetup {
     /// Create a new session setup message.
-    pub fn new(
-        src_addr: NodeAddr,
-        dest_addr: NodeAddr,
-        src_coords: TreeCoordinate,
-        dest_coords: TreeCoordinate,
-    ) -> Self {
+    pub fn new(src_coords: TreeCoordinate, dest_coords: TreeCoordinate) -> Self {
         Self {
-            src_addr,
-            dest_addr,
             src_coords,
             dest_coords,
             flags: SessionFlags::new(),
@@ -169,25 +162,19 @@ impl SessionSetup {
 
 /// Session acknowledgement.
 ///
-/// Sent in response to SessionSetup when request_ack is set.
+/// Carried inside a SessionDatagram envelope which provides src_addr and
+/// dest_addr. The SessionAck payload contains the acknowledger's coordinates
+/// for route cache warming.
 #[derive(Clone, Debug)]
 pub struct SessionAck {
-    /// Source node address (the acknowledger).
-    pub src_addr: NodeAddr,
-    /// Destination node address (original session initiator).
-    pub dest_addr: NodeAddr,
     /// Acknowledger's coordinates.
     pub src_coords: TreeCoordinate,
 }
 
 impl SessionAck {
     /// Create a new session acknowledgement.
-    pub fn new(src_addr: NodeAddr, dest_addr: NodeAddr, src_coords: TreeCoordinate) -> Self {
-        Self {
-            src_addr,
-            dest_addr,
-            src_coords,
-        }
+    pub fn new(src_coords: TreeCoordinate) -> Self {
+        Self { src_coords }
     }
 }
 
@@ -252,71 +239,42 @@ impl DataFlags {
     }
 }
 
-/// Data packet header size in bytes (excluding payload).
-/// flags(1) + hop_limit(1) + payload_length(2) + src_addr(16) + dest_addr(16) = 36
-pub const DATA_HEADER_SIZE: usize = 36;
+/// DataPacket header size in bytes (excluding payload).
+/// msg_type(1) + flags(1) + payload_length(2) = 4
+/// (Addressing and hop_limit are in the SessionDatagram envelope.)
+pub const DATA_HEADER_SIZE: usize = 4;
 
-/// Minimal data packet with addresses only (no coordinates).
+/// Encrypted application data carried inside a SessionDatagram.
 ///
-/// The 36-byte header contains:
-/// - flags (1 byte)
-/// - hop_limit (1 byte)
+/// The 4-byte header contains:
+/// - msg_type (1 byte): 0x10
+/// - flags (1 byte): COORDS_PRESENT, etc.
 /// - payload_length (2 bytes)
-/// - src_addr (16 bytes)
-/// - dest_addr (16 bytes)
 ///
-/// Routers use cached coordinates for routing decisions.
+/// Addressing (src_addr, dest_addr) and hop_limit are provided by the
+/// enclosing SessionDatagram envelope. The total on-wire overhead for a
+/// minimal data packet is 34 (SessionDatagram) + 4 (DataPacket) = 38 bytes.
 #[derive(Clone, Debug)]
 pub struct DataPacket {
     /// Packet flags.
     pub flags: DataFlags,
-    /// Hop limit (TTL).
-    pub hop_limit: u8,
-    /// Source node address.
-    pub src_addr: NodeAddr,
-    /// Destination node address.
-    pub dest_addr: NodeAddr,
-    /// Payload data.
+    /// Payload data (end-to-end encrypted application data).
     pub payload: Vec<u8>,
 }
 
 impl DataPacket {
     /// Create a new data packet.
-    pub fn new(src_addr: NodeAddr, dest_addr: NodeAddr, payload: Vec<u8>) -> Self {
+    pub fn new(payload: Vec<u8>) -> Self {
         Self {
             flags: DataFlags::new(),
-            hop_limit: 64,
-            src_addr,
-            dest_addr,
             payload,
         }
-    }
-
-    /// Set the hop limit.
-    pub fn with_hop_limit(mut self, hop_limit: u8) -> Self {
-        self.hop_limit = hop_limit;
-        self
     }
 
     /// Set the flags.
     pub fn with_flags(mut self, flags: DataFlags) -> Self {
         self.flags = flags;
         self
-    }
-
-    /// Decrement hop limit, returning false if exhausted.
-    pub fn decrement_hop_limit(&mut self) -> bool {
-        if self.hop_limit > 0 {
-            self.hop_limit -= 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if the packet can be forwarded.
-    pub fn can_forward(&self) -> bool {
-        self.hop_limit > 0
     }
 
     /// Get the payload length.
@@ -339,10 +297,14 @@ impl DataPacket {
 // Error Messages
 // ============================================================================
 
-/// Error indicating router cache miss - needs coordinates.
+/// Link-layer error signal indicating router cache miss.
 ///
-/// Sent back to the source when a router doesn't have cached
-/// coordinates for the destination.
+/// Generated by a transit router when it cannot forward a SessionDatagram
+/// due to missing cached coordinates for the destination. Carried inside
+/// a new SessionDatagram addressed back to the original source
+/// (src_addr=reporter, dest_addr=original_source). Plaintext — not
+/// end-to-end encrypted, since the transit router has no session with
+/// the source.
 #[derive(Clone, Debug)]
 pub struct CoordsRequired {
     /// Destination that couldn't be routed.
@@ -360,11 +322,12 @@ impl CoordsRequired {
 
 /// Error indicating routing failure (local minimum or unreachable).
 ///
-/// Sent back to the source when greedy routing fails.
+/// Carried inside a SessionDatagram addressed back to the original source.
+/// The reporting router creates a new SessionDatagram with src_addr=reporter
+/// and dest_addr=original_source, so the `original_src` field from the old
+/// design is no longer needed — it's the SessionDatagram's dest_addr.
 #[derive(Clone, Debug)]
 pub struct PathBroken {
-    /// Original source of the failed packet.
-    pub original_src: NodeAddr,
     /// Destination that couldn't be reached.
     pub dest_addr: NodeAddr,
     /// Node that detected the failure.
@@ -375,9 +338,8 @@ pub struct PathBroken {
 
 impl PathBroken {
     /// Create a new PathBroken error.
-    pub fn new(original_src: NodeAddr, dest_addr: NodeAddr, reporter: NodeAddr) -> Self {
+    pub fn new(dest_addr: NodeAddr, reporter: NodeAddr) -> Self {
         Self {
-            original_src,
             dest_addr,
             reporter,
             last_known_coords: None,
@@ -457,39 +419,19 @@ mod tests {
 
     #[test]
     fn test_data_packet_size() {
-        let packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![0u8; 100]);
+        let packet = DataPacket::new(vec![0u8; 100]);
 
-        // 36 byte header + 100 byte payload
-        assert_eq!(packet.total_size(), 136);
-        assert_eq!(packet.header_size(), 36);
+        // 4 byte header + 100 byte payload
+        assert_eq!(packet.total_size(), 104);
+        assert_eq!(packet.header_size(), 4);
         assert_eq!(packet.payload_len(), 100);
     }
 
     #[test]
-    fn test_data_packet_hop_limit() {
-        let mut packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![]);
-
-        packet.hop_limit = 2;
-        assert!(packet.can_forward());
-
-        assert!(packet.decrement_hop_limit());
-        assert_eq!(packet.hop_limit, 1);
-
-        assert!(packet.decrement_hop_limit());
-        assert_eq!(packet.hop_limit, 0);
-        assert!(!packet.can_forward());
-
-        assert!(!packet.decrement_hop_limit());
-        assert_eq!(packet.hop_limit, 0);
-    }
-
-    #[test]
     fn test_data_packet_builder() {
-        let packet = DataPacket::new(make_node_addr(1), make_node_addr(2), vec![1, 2, 3])
-            .with_hop_limit(32)
+        let packet = DataPacket::new(vec![1, 2, 3])
             .with_flags(DataFlags::from_byte(0x80));
 
-        assert_eq!(packet.hop_limit, 32);
         assert_eq!(packet.flags.to_byte(), 0x80);
     }
 
@@ -525,13 +467,8 @@ mod tests {
 
     #[test]
     fn test_session_setup() {
-        let setup = SessionSetup::new(
-            make_node_addr(1),
-            make_node_addr(2),
-            make_coords(&[1, 0]),
-            make_coords(&[2, 0]),
-        )
-        .with_flags(SessionFlags::new().with_ack());
+        let setup = SessionSetup::new(make_coords(&[1, 0]), make_coords(&[2, 0]))
+            .with_flags(SessionFlags::new().with_ack());
 
         assert!(setup.flags.request_ack);
         assert!(!setup.flags.bidirectional);
@@ -551,9 +488,11 @@ mod tests {
 
     #[test]
     fn test_path_broken() {
-        let err = PathBroken::new(make_node_addr(1), make_node_addr(2), make_node_addr(3))
+        let err = PathBroken::new(make_node_addr(2), make_node_addr(3))
             .with_last_coords(make_coords(&[2, 0]));
 
+        assert_eq!(err.dest_addr, make_node_addr(2));
+        assert_eq!(err.reporter, make_node_addr(3));
         assert!(err.last_known_coords.is_some());
     }
 }
