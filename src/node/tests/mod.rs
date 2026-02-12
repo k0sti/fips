@@ -6,6 +6,7 @@ use std::time::Duration;
 
 mod bloom;
 mod disconnect;
+mod discovery;
 mod forwarding;
 mod handshake;
 mod routing;

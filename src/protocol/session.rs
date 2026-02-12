@@ -76,7 +76,7 @@ impl fmt::Display for SessionMessageType {
 ///
 /// Session-layer messages serialize coordinates as NodeAddr arrays (16 bytes each),
 /// without the sequence/timestamp metadata used by the tree gossip protocol.
-fn encode_coords(coords: &TreeCoordinate, buf: &mut Vec<u8>) {
+pub(crate) fn encode_coords(coords: &TreeCoordinate, buf: &mut Vec<u8>) {
     let addrs: Vec<&NodeAddr> = coords.node_addrs().collect();
     let count = addrs.len() as u16;
     buf.extend_from_slice(&count.to_le_bytes());
@@ -88,7 +88,7 @@ fn encode_coords(coords: &TreeCoordinate, buf: &mut Vec<u8>) {
 /// Decode a TreeCoordinate from address-only wire format.
 ///
 /// Returns the decoded coordinate and the number of bytes consumed.
-fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), ProtocolError> {
+pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), ProtocolError> {
     if data.len() < 2 {
         return Err(ProtocolError::MessageTooShort {
             expected: 2,

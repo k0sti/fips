@@ -16,7 +16,6 @@ impl Node {
         let msg_type = plaintext[0];
         let payload = &plaintext[1..];
 
-        // TODO: Implement remaining link message handlers
         match msg_type {
             0x10 => {
                 // TreeAnnounce
@@ -28,11 +27,11 @@ impl Node {
             }
             0x30 => {
                 // LookupRequest
-                debug!("Received LookupRequest (not yet implemented)");
+                self.handle_lookup_request(from, payload).await;
             }
             0x31 => {
                 // LookupResponse
-                debug!("Received LookupResponse (not yet implemented)");
+                self.handle_lookup_response(from, payload).await;
             }
             0x40 => {
                 // SessionDatagram

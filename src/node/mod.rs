@@ -13,7 +13,7 @@ mod tree;
 mod tests;
 
 use crate::bloom::BloomState;
-use crate::cache::CoordCache;
+use crate::cache::{CoordCache, RouteCache};
 use crate::index::IndexAllocator;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::rate_limit::HandshakeRateLimiter;
@@ -142,6 +142,33 @@ impl fmt::Display for NodeState {
     }
 }
 
+/// Recent request tracking for dedup and reverse-path forwarding.
+///
+/// When a LookupRequest is forwarded through a node, the node stores the
+/// request_id and which peer sent it. When the corresponding LookupResponse
+/// arrives, it's forwarded back to that peer (reverse-path forwarding).
+#[derive(Clone, Debug)]
+pub(crate) struct RecentRequest {
+    /// The peer who sent this request to us.
+    pub(crate) from_peer: NodeAddr,
+    /// When we received this request (Unix milliseconds).
+    pub(crate) timestamp_ms: u64,
+}
+
+impl RecentRequest {
+    pub(crate) fn new(from_peer: NodeAddr, timestamp_ms: u64) -> Self {
+        Self {
+            from_peer,
+            timestamp_ms,
+        }
+    }
+
+    /// Check if this entry has expired (older than 10 seconds).
+    pub(crate) fn is_expired(&self, current_time_ms: u64) -> bool {
+        current_time_ms.saturating_sub(self.timestamp_ms) > 10_000
+    }
+}
+
 /// Key for addr_to_link reverse lookup.
 type AddrKey = (TransportId, TransportAddr);
 
@@ -182,8 +209,13 @@ pub struct Node {
     bloom_state: BloomState,
 
     // === Routing ===
-    /// Address -> coordinates cache.
+    /// Address -> coordinates cache (from session setup).
     coord_cache: CoordCache,
+    /// Discovered routes (from discovery protocol).
+    route_cache: RouteCache,
+    /// Recent discovery requests (dedup + reverse-path forwarding).
+    /// Maps request_id → RecentRequest.
+    recent_requests: HashMap<u64, RecentRequest>,
 
     // === Transports & Links ===
     /// Active transports (owned by Node).
@@ -294,6 +326,8 @@ impl Node {
             tree_state,
             bloom_state,
             coord_cache: CoordCache::with_defaults(),
+            route_cache: RouteCache::with_defaults(),
+            recent_requests: HashMap::new(),
             transports: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
@@ -343,6 +377,8 @@ impl Node {
             tree_state,
             bloom_state: BloomState::new(node_addr),
             coord_cache: CoordCache::with_defaults(),
+            route_cache: RouteCache::with_defaults(),
+            recent_requests: HashMap::new(),
             transports: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
@@ -490,6 +526,18 @@ impl Node {
     /// Get mutable coordinate cache.
     pub fn coord_cache_mut(&mut self) -> &mut CoordCache {
         &mut self.coord_cache
+    }
+
+    // === Route Cache ===
+
+    /// Get the route cache (discovery protocol).
+    pub fn route_cache(&self) -> &RouteCache {
+        &self.route_cache
+    }
+
+    /// Get mutable route cache.
+    pub fn route_cache_mut(&mut self) -> &mut RouteCache {
+        &mut self.route_cache
     }
 
     // === TUN Interface ===

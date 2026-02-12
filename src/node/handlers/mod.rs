@@ -1,5 +1,6 @@
 //! RX event loop and message handlers.
 
+mod discovery;
 mod dispatch;
 mod encrypted;
 mod forwarding;
