@@ -406,6 +406,18 @@ async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(),
     // Bring interface up
     handle.link().set(index).up().execute().await?;
 
+    // Add route for fd00::/8 (FIPS address space) via this interface
+    let fd_prefix: Ipv6Addr = "fd00::".parse().unwrap();
+    handle
+        .route()
+        .add()
+        .v6()
+        .destination_prefix(fd_prefix, 8)
+        .output_interface(index)
+        .execute()
+        .await
+        .map_err(|e| TunError::Configure(format!("failed to add fd00::/8 route: {}", e)))?;
+
     Ok(())
 }
 

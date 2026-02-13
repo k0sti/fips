@@ -3,7 +3,7 @@
 This example demonstrates two FIPS nodes communicating over UDP using Linux
 network namespaces. Both nodes establish an encrypted peer link, build a
 spanning tree, and create end-to-end sessions. With TUN and DNS enabled, you
-can `ping6` between nodes using `.fips` domain names or raw IPv6 addresses.
+can `ping6` between nodes using raw IPv6 addresses.
 
 ## Network Diagram
 
@@ -37,7 +37,7 @@ can `ping6` between nodes using `.fips` domain names or raw IPv6 addresses.
 
 - Linux with network namespace support (requires root for namespace setup)
 - IPv6 enabled (`sysctl net.ipv6.conf.all.disable_ipv6` should be `0`)
-- `iproute2` tools (`ip`, `resolvectl`)
+- `iproute2` tools (`ip`), `dig` (from `dnsutils` or `bind-utils`)
 - Rust toolchain (to build the FIPS binary)
 
 ## Node Identities
@@ -148,48 +148,12 @@ INFO fips::node::handlers::handshake: Peer promoted to active
 The spanning tree will converge within a few seconds (TreeAnnounce exchange),
 followed by bloom filter exchange (FilterAnnounce).
 
-## Step 5: Configure DNS Routing
+## Step 5: Test DNS Resolution
 
-Each namespace needs its own DNS routing configuration so that `.fips` queries
-are sent to the local DNS responder. Open **Terminal 3** for these commands.
+The FIPS daemon includes a DNS responder that resolves `<npub>.fips` queries
+to FIPS IPv6 addresses. Open **Terminal 3** to test it.
 
-For Node A's namespace:
-
-```bash
-# Tell systemd-resolved (inside namespace) to route .fips queries to the
-# DNS responder listening on 127.0.0.1:5354 via the fips0 interface.
-sudo ip netns exec fips-a resolvectl dns fips0 127.0.0.1:5354
-sudo ip netns exec fips-a resolvectl domain fips0 '~fips'
-```
-
-For Node B's namespace:
-
-```bash
-sudo ip netns exec fips-b resolvectl dns fips0 127.0.0.1:5354
-sudo ip netns exec fips-b resolvectl domain fips0 '~fips'
-```
-
-Verify the configuration:
-
-```bash
-sudo ip netns exec fips-a resolvectl status fips0
-sudo ip netns exec fips-b resolvectl status fips0
-```
-
-> **Note:** `resolvectl` inside a network namespace requires that
-> `systemd-resolved` is accessible from within the namespace. If your system
-> does not support this, you can test DNS resolution directly with `dig`
-> instead of relying on the system resolver:
->
-> ```bash
-> sudo ip netns exec fips-a dig @127.0.0.1 -p 5354 AAAA \
->   npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le.fips
-> ```
-
-## Step 6: Test DNS Resolution
-
-Verify that the DNS responder correctly resolves npub names to FIPS addresses.
-From Terminal 3:
+Query the DNS responder directly with `dig`:
 
 ```bash
 # From Node A, resolve Node B's name
@@ -199,7 +163,7 @@ sudo ip netns exec fips-a dig @127.0.0.1 -p 5354 AAAA \
 # Expected answer: fd8e:302c:287e:b48d:6268:122f:da76:b77
 ```
 
-Watch Terminal 1 — you should see a log line:
+Watch Terminal 1 — you should see a log line (requires `RUST_LOG=debug`):
 
 ```text
 DEBUG fips::dns: DNS resolved .fips name, registering identity
@@ -208,7 +172,15 @@ DEBUG fips::dns: DNS resolved .fips name, registering identity
 This confirms the identity cache was populated. The subsequent ping will be
 able to route through the mesh.
 
-## Step 7: Ping Between Nodes
+> **Note:** `resolvectl` and system resolver integration (e.g., `ping6
+> npub1...fips`) do not work inside network namespaces because
+> `systemd-resolved` runs in the host namespace and is not accessible from
+> within isolated namespaces. Use `dig @127.0.0.1 -p 5354` to query the
+> DNS responder directly, and use raw IPv6 addresses for `ping6`. System
+> resolver integration works when FIPS runs in the host namespace or with
+> the future D-Bus auto-registration (Phase 2).
+
+## Step 6: Ping Between Nodes
 
 Now test end-to-end connectivity. The first ping triggers session
 establishment (Noise IK handshake through the mesh), so it may take a moment
@@ -222,34 +194,18 @@ From Terminal 3:
 sudo ip netns exec fips-a ping6 -c 4 fd8e:302c:287e:b48d:6268:122f:da76:b77
 ```
 
-If DNS routing is configured (Step 5), you can use the `.fips` name instead:
-
-```bash
-sudo ip netns exec fips-a ping6 -c 4 \
-  npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le.fips
-```
-
 ### Ping Node A from Node B
 
 ```bash
 sudo ip netns exec fips-b ping6 -c 4 fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b
 ```
 
-Or with DNS:
+Ping replies are handled by the kernel's IPv6 stack — when a ping arrives
+at the destination's TUN device, the kernel sees it addressed to its own
+`fips0` address and replies natively. FIPS handles the encrypted transport
+between nodes; the kernel handles ICMPv6 Echo Reply.
 
-```bash
-sudo ip netns exec fips-b ping6 -c 4 \
-  npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m.fips
-```
-
-> **Note:** FIPS does not yet implement ICMPv6 Echo Reply (type 129). The
-> first ping will trigger session establishment (visible in daemon logs as
-> SessionSetup/SessionAck messages), but ping replies require Echo Reply
-> support which is not yet implemented. You can verify that the session was
-> established and data was delivered by watching the daemon log output for
-> `DataPacket` messages.
-
-## Step 8: Watch the Logs
+## Step 7: Watch the Logs
 
 While pinging, watch the daemon terminals for the protocol flow:
 
@@ -320,5 +276,7 @@ sudo ip netns exec fips-a dig @127.0.0.1 -p 5354 AAAA \
   npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le.fips
 ```
 
-If this works but `resolvectl query` doesn't, the systemd-resolved routing
-may not be configured correctly in the namespace.
+If `dig` works but `resolvectl query` or `ping6 <npub>.fips` doesn't,
+this is expected — `systemd-resolved` runs in the host namespace and is
+not accessible from inside network namespaces. Use raw IPv6 addresses
+for testing within namespaces.
