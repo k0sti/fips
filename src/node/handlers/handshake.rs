@@ -555,6 +555,7 @@ impl Node {
                 self.peers_by_index
                     .insert((transport_id, our_index.as_u32()), peer_node_addr);
                 self.retry_pending.remove(&peer_node_addr);
+                self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
                 info!(
                     node_addr = %peer_node_addr,
@@ -633,6 +634,7 @@ impl Node {
             self.peers_by_index
                 .insert((transport_id, our_index.as_u32()), peer_node_addr);
             self.retry_pending.remove(&peer_node_addr);
+            self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
             info!(
                 node_addr = %peer_node_addr,

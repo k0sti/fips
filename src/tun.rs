@@ -19,6 +19,11 @@ use tun::Layer;
 /// Channel sender for packets to be written to TUN.
 pub type TunTx = mpsc::Sender<Vec<u8>>;
 
+/// Channel sender for outbound packets from TUN reader to Node.
+pub type TunOutboundTx = tokio::sync::mpsc::Sender<Vec<u8>>;
+/// Channel receiver for outbound packets (consumed by Node's RX loop).
+pub type TunOutboundRx = tokio::sync::mpsc::Receiver<Vec<u8>>;
+
 /// Errors that can occur with TUN operations.
 #[derive(Debug, Error)]
 pub enum TunError {
@@ -223,8 +228,10 @@ impl TunWriter {
 
 /// TUN packet reader loop.
 ///
-/// Reads packets from the TUN device, logs them, and sends ICMPv6
-/// Destination Unreachable responses for packets we can't route.
+/// Reads IPv6 packets from the TUN device. Packets destined for FIPS addresses
+/// (fd::/8) are forwarded to the Node via the outbound channel for session
+/// encapsulation and routing. Non-FIPS packets receive ICMPv6 Destination
+/// Unreachable responses.
 ///
 /// This is designed to run in a dedicated thread since TUN reads are blocking.
 /// The loop exits when the TUN interface is deleted (EFAULT) or an unrecoverable
@@ -234,6 +241,7 @@ pub fn run_tun_reader(
     mtu: u16,
     our_addr: FipsAddress,
     tun_tx: TunTx,
+    outbound_tx: TunOutboundTx,
 ) {
     use crate::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
 
@@ -248,18 +256,30 @@ pub fn run_tun_reader(
                 let packet = &buf[..n];
                 log_ipv6_packet(packet);
 
-                // Currently no routing capability - send ICMPv6 Destination Unreachable
-                // for all packets that qualify for an error response
-                if should_send_icmp_error(packet) {
-                    if let Some(response) = build_dest_unreachable(
-                        packet,
-                        DestUnreachableCode::NoRoute,
-                        our_addr.to_ipv6(),
-                    ) {
+                // Must be a valid IPv6 packet
+                if packet.len() < 40 || packet[0] >> 4 != 6 {
+                    continue;
+                }
+
+                // Check if destination is a FIPS address (fd::/8 prefix)
+                if packet[24] == crate::identity::FIPS_ADDRESS_PREFIX {
+                    // Forward to Node for session encapsulation and routing
+                    if outbound_tx.blocking_send(packet.to_vec()).is_err() {
+                        break; // Channel closed, shutdown
+                    }
+                } else {
+                    // Non-FIPS destination: send ICMPv6 Destination Unreachable
+                    if should_send_icmp_error(packet)
+                        && let Some(response) = build_dest_unreachable(
+                            packet,
+                            DestUnreachableCode::NoRoute,
+                            our_addr.to_ipv6(),
+                        )
+                    {
                         debug!(
                             name = %name,
                             len = response.len(),
-                            "Sending ICMPv6 Destination Unreachable"
+                            "Sending ICMPv6 Destination Unreachable (non-FIPS destination)"
                         );
                         if tun_tx.send(response).is_err() {
                             break;

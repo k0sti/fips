@@ -15,6 +15,9 @@ impl Node {
     /// - 0x01: Handshake message 1 (initiator -> responder)
     /// - 0x02: Handshake message 2 (responder -> initiator)
     ///
+    /// Also processes outbound IPv6 packets from the TUN reader for session
+    /// encapsulation and routing through the mesh.
+    ///
     /// Also runs a periodic tick (1s) to clean up stale handshake connections
     /// that never received a response. This prevents resource leaks when peers
     /// are unreachable.
@@ -24,6 +27,17 @@ impl Node {
     pub async fn run_rx_loop(&mut self) -> Result<(), NodeError> {
         let mut packet_rx = self.packet_rx.take()
             .ok_or(NodeError::NotStarted)?;
+
+        // Take the TUN outbound receiver, or create a dummy channel that never
+        // produces messages (when TUN is disabled). Holding the sender prevents
+        // the channel from closing.
+        let (mut tun_outbound_rx, _tun_guard) = match self.tun_outbound_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
 
         let mut tick = tokio::time::interval(Duration::from_secs(1));
 
@@ -36,6 +50,9 @@ impl Node {
                         Some(p) => self.process_packet(p).await,
                         None => break, // channel closed
                     }
+                }
+                Some(ipv6_packet) = tun_outbound_rx.recv() => {
+                    self.handle_tun_outbound(ipv6_packet).await;
                 }
                 _ = tick.tick() => {
                     self.check_timeouts();

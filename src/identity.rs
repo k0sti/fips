@@ -22,7 +22,7 @@ const NSEC_HRP: Hrp = Hrp::parse_unchecked("nsec");
 const AUTH_DOMAIN: &[u8] = b"fips-auth-v1";
 
 /// FIPS address prefix (IPv6 ULA range).
-const FIPS_ADDRESS_PREFIX: u8 = 0xfd;
+pub const FIPS_ADDRESS_PREFIX: u8 = 0xfd;
 
 /// Errors that can occur in identity operations.
 #[derive(Debug, Error)]

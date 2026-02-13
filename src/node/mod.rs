@@ -24,10 +24,10 @@ use crate::transport::{
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
-use crate::tun::{TunError, TunState, TunTx};
+use crate::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use crate::wire::build_encrypted;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::thread::JoinHandle;
 use thiserror::Error;
@@ -248,6 +248,16 @@ pub struct Node {
     /// Keyed by remote NodeAddr.
     sessions: HashMap<NodeAddr, SessionEntry>,
 
+    // === Identity Cache ===
+    /// Maps FipsAddress prefix bytes (bytes 1-15) to (NodeAddr, PublicKey).
+    /// Enables reverse lookup from IPv6 destination to session/routing identity.
+    identity_cache: HashMap<[u8; 15], (NodeAddr, secp256k1::PublicKey)>,
+
+    // === Pending TUN Packets ===
+    /// Packets queued while waiting for session establishment.
+    /// Keyed by destination NodeAddr, bounded per-dest and total.
+    pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
+
     // === Resource Limits ===
     /// Maximum connections (0 = unlimited).
     max_connections: usize,
@@ -269,6 +279,8 @@ pub struct Node {
     tun_name: Option<String>,
     /// TUN packet sender channel.
     tun_tx: Option<TunTx>,
+    /// Receiver for outbound packets from the TUN reader.
+    tun_outbound_rx: Option<TunOutboundRx>,
     /// TUN reader thread handle.
     tun_reader_handle: Option<JoinHandle<()>>,
     /// TUN writer thread handle.
@@ -343,6 +355,8 @@ impl Node {
             connections: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
+            identity_cache: HashMap::new(),
+            pending_tun_packets: HashMap::new(),
             max_connections: 256,
             max_peers: 128,
             max_links: 256,
@@ -351,6 +365,7 @@ impl Node {
             tun_state,
             tun_name: None,
             tun_tx: None,
+            tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
             index_allocator: IndexAllocator::new(),
@@ -395,6 +410,8 @@ impl Node {
             connections: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
+            identity_cache: HashMap::new(),
+            pending_tun_packets: HashMap::new(),
             max_connections: 256,
             max_peers: 128,
             max_links: 256,
@@ -403,6 +420,7 @@ impl Node {
             tun_state,
             tun_name: None,
             tun_tx: None,
+            tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
             index_allocator: IndexAllocator::new(),
@@ -783,6 +801,25 @@ impl Node {
     /// Number of end-to-end sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    // === Identity Cache ===
+
+    /// Register a node in the identity cache for FipsAddress → NodeAddr lookup.
+    pub(crate) fn register_identity(&mut self, node_addr: NodeAddr, pubkey: secp256k1::PublicKey) {
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
+        self.identity_cache.insert(prefix, (node_addr, pubkey));
+    }
+
+    /// Look up a destination by FipsAddress prefix (bytes 1-15 of the IPv6 address).
+    pub(crate) fn lookup_by_fips_prefix(&self, prefix: &[u8; 15]) -> Option<&(NodeAddr, secp256k1::PublicKey)> {
+        self.identity_cache.get(prefix)
+    }
+
+    /// Number of identity cache entries.
+    pub fn identity_cache_len(&self) -> usize {
+        self.identity_cache.len()
     }
 
     // === Routing ===

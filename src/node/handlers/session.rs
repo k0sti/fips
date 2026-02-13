@@ -127,6 +127,9 @@ impl Node {
             }
         };
 
+        // Register the initiator's identity for future TUN → session routing
+        self.register_identity(*src_addr, remote_pubkey);
+
         // Generate msg2
         let msg2 = match handshake.write_message_2() {
             Ok(m) => m,
@@ -213,6 +216,9 @@ impl Node {
         // Cache the responder's coordinates
         let now_ms = Self::now_ms();
         self.coord_cache.insert(*src_addr, ack.src_coords, now_ms);
+
+        // Flush any queued outbound packets for this destination
+        self.flush_pending_packets(src_addr).await;
 
         debug!(src = %src_addr, "Session established (initiator)");
     }
@@ -307,6 +313,10 @@ impl Node {
                 "DataPacket decrypted (no TUN interface, plaintext dropped)"
             );
         }
+
+        // Flush any pending outbound packets (e.g., simultaneous initiation
+        // where responder also had queued outbound packets)
+        self.flush_pending_packets(src_addr).await;
     }
 
     /// Handle a CoordsRequired error signal from a transit router.
@@ -392,6 +402,9 @@ impl Node {
 
         // Route toward destination
         self.send_session_datagram(&datagram).await?;
+
+        // Register destination identity for TUN → session routing
+        self.register_identity(dest_addr, dest_pubkey);
 
         // Store session entry
         let now_ms = Self::now_ms();
@@ -495,5 +508,111 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
+    }
+
+    // === TUN Outbound (Data Plane) ===
+
+    /// Maximum pending packets per destination during session establishment.
+    const MAX_PENDING_PER_DEST: usize = 16;
+    /// Maximum destinations with pending packets.
+    const MAX_PENDING_DESTINATIONS: usize = 256;
+
+    /// Handle an outbound IPv6 packet from the TUN reader.
+    ///
+    /// Extracts the destination FipsAddress, looks up the NodeAddr and PublicKey
+    /// from the identity cache, and either sends through an established session
+    /// or initiates a new one (queuing the packet until established).
+    pub(in crate::node) async fn handle_tun_outbound(&mut self, ipv6_packet: Vec<u8>) {
+        // Validate IPv6 header
+        if ipv6_packet.len() < 40 || ipv6_packet[0] >> 4 != 6 {
+            return;
+        }
+
+        // Extract destination FipsAddress prefix (IPv6 dest bytes 1-15)
+        // IPv6 header: bytes 24-39 are dest addr, so prefix = bytes 25-39
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&ipv6_packet[25..40]);
+
+        // Look up in identity cache
+        let (dest_addr, dest_pubkey) = match self.lookup_by_fips_prefix(&prefix) {
+            Some(&(addr, pk)) => (addr, pk),
+            None => {
+                self.send_icmpv6_dest_unreachable(&ipv6_packet);
+                return;
+            }
+        };
+
+        // Check for established session
+        if let Some(entry) = self.sessions.get(&dest_addr) {
+            if entry.is_established() {
+                if let Err(e) = self.send_session_data(&dest_addr, &ipv6_packet).await {
+                    debug!(dest = %dest_addr, error = %e, "Failed to send TUN packet via session");
+                }
+                return;
+            }
+            // Session exists but not yet established — queue the packet
+            self.queue_pending_packet(dest_addr, ipv6_packet);
+            return;
+        }
+
+        // No session: initiate one and queue the packet
+        if let Err(e) = self.initiate_session(dest_addr, dest_pubkey).await {
+            debug!(dest = %dest_addr, error = %e, "Failed to initiate session for TUN packet");
+            self.send_icmpv6_dest_unreachable(&ipv6_packet);
+            return;
+        }
+        self.queue_pending_packet(dest_addr, ipv6_packet);
+    }
+
+    /// Send ICMPv6 Destination Unreachable back through TUN.
+    fn send_icmpv6_dest_unreachable(&self, original_packet: &[u8]) {
+        use crate::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+        use crate::FipsAddress;
+
+        if !should_send_icmp_error(original_packet) {
+            return;
+        }
+
+        let our_ipv6 = FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
+        if let Some(response) = build_dest_unreachable(
+            original_packet,
+            DestUnreachableCode::NoRoute,
+            our_ipv6,
+        ) && let Some(tun_tx) = &self.tun_tx {
+            let _ = tun_tx.send(response);
+        }
+    }
+
+    /// Queue a packet while waiting for session establishment.
+    fn queue_pending_packet(&mut self, dest_addr: NodeAddr, packet: Vec<u8>) {
+        // Reject if we already have too many pending destinations
+        if !self.pending_tun_packets.contains_key(&dest_addr)
+            && self.pending_tun_packets.len() >= Self::MAX_PENDING_DESTINATIONS
+        {
+            return;
+        }
+
+        let queue = self
+            .pending_tun_packets
+            .entry(dest_addr)
+            .or_default();
+        if queue.len() >= Self::MAX_PENDING_PER_DEST {
+            queue.pop_front(); // Drop oldest
+        }
+        queue.push_back(packet);
+    }
+
+    /// Flush pending packets for a destination whose session just reached Established.
+    async fn flush_pending_packets(&mut self, dest_addr: &NodeAddr) {
+        let packets = match self.pending_tun_packets.remove(dest_addr) {
+            Some(q) => q,
+            None => return,
+        };
+        for packet in packets {
+            if let Err(e) = self.send_session_data(dest_addr, &packet).await {
+                debug!(dest = %dest_addr, error = %e, "Failed to send queued TUN packet");
+                break;
+            }
+        }
     }
 }

@@ -288,14 +288,18 @@ impl Node {
                     // Clone tun_tx for the reader
                     let reader_tun_tx = tun_tx.clone();
 
+                    // Create outbound channel for TUN reader → Node
+                    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
+
                     // Spawn reader thread
                     let reader_handle = thread::spawn(move || {
-                        run_tun_reader(device, mtu, our_addr, reader_tun_tx);
+                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx);
                     });
 
                     self.tun_state = TunState::Active;
                     self.tun_name = Some(name);
                     self.tun_tx = Some(tun_tx);
+                    self.tun_outbound_rx = Some(outbound_rx);
                     self.tun_reader_handle = Some(reader_handle);
                     self.tun_writer_handle = Some(writer_handle);
                 }

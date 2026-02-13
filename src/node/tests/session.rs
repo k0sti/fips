@@ -870,3 +870,278 @@ async fn test_session_100_nodes() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+// ============================================================================
+// Data plane integration tests: TUN → session → link → TUN
+// ============================================================================
+
+/// Build a minimal valid IPv6 packet with given source and destination addresses.
+fn build_ipv6_packet(src: &crate::FipsAddress, dst: &crate::FipsAddress, payload: &[u8]) -> Vec<u8> {
+    let payload_len = payload.len() as u16;
+    let mut packet = vec![0u8; 40 + payload.len()];
+    // Version (6) + traffic class high nibble
+    packet[0] = 0x60;
+    // Payload length (u16 BE)
+    packet[4] = (payload_len >> 8) as u8;
+    packet[5] = (payload_len & 0xff) as u8;
+    // Next header: 59 = No Next Header
+    packet[6] = 59;
+    // Hop limit
+    packet[7] = 64;
+    // Source address (bytes 8-23)
+    packet[8..24].copy_from_slice(src.as_bytes());
+    // Destination address (bytes 24-39)
+    packet[24..40].copy_from_slice(dst.as_bytes());
+    // Payload
+    packet[40..].copy_from_slice(payload);
+    packet
+}
+
+#[test]
+fn test_identity_cache_populated_on_promote() {
+    use crate::peer::PromotionResult;
+
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let link_id = LinkId::new(1);
+
+    let (conn, peer_identity) = make_completed_connection(
+        &mut node,
+        link_id,
+        transport_id,
+        1000,
+    );
+
+    node.add_connection(conn).unwrap();
+
+    // Promote
+    let result = node.promote_connection(link_id, peer_identity, 2000).unwrap();
+    assert!(matches!(result, PromotionResult::Promoted(_)));
+
+    // Identity cache should contain the peer
+    let peer_addr = *peer_identity.node_addr();
+    let mut prefix = [0u8; 15];
+    prefix.copy_from_slice(&peer_addr.as_bytes()[0..15]);
+    let cached = node.lookup_by_fips_prefix(&prefix);
+    assert!(cached.is_some(), "Identity cache should contain promoted peer");
+    let (cached_addr, cached_pk) = cached.unwrap();
+    assert_eq!(*cached_addr, peer_addr);
+    assert_eq!(*cached_pk, peer_identity.pubkey_full());
+}
+
+#[tokio::test]
+async fn test_tun_outbound_established_session() {
+    // Two directly connected nodes, session established.
+    // Inject IPv6 packet via handle_tun_outbound on Node 0,
+    // verify plaintext arrives at Node 1's tun_tx.
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_pubkey = nodes[1].node.identity().pubkey_full();
+
+    let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
+
+    // Establish session
+    nodes[0].node.initiate_session(node1_addr, node1_pubkey).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await; // Setup → Node 1
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await; // Ack → Node 0
+
+    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+
+    // Install TUN receiver on Node 1
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[1].node.tun_tx = Some(tun_tx);
+
+    // Build and inject an IPv6 packet
+    let test_payload = b"data-plane-test-12345";
+    let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, test_payload);
+
+    nodes[0].node.handle_tun_outbound(ipv6_packet.clone()).await;
+
+    // Process packets: encrypted DataPacket → Node 1
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await;
+
+    // Verify plaintext arrived at Node 1's TUN
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(delivered.len(), 1, "Exactly one packet should be delivered");
+    assert_eq!(delivered[0], ipv6_packet, "Delivered packet should match original");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_tun_outbound_triggers_session_initiation() {
+    // Two connected nodes, no session yet.
+    // Inject a TUN packet — should trigger session initiation,
+    // queue the packet, and deliver after handshake completes.
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
+
+    // No session yet
+    assert_eq!(nodes[0].node.session_count(), 0);
+
+    // Install TUN receiver on Node 1
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[1].node.tun_tx = Some(tun_tx);
+
+    // Build and inject an IPv6 packet (identity cache populated at peer promotion)
+    let test_payload = b"trigger-session-test";
+    let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, test_payload);
+
+    nodes[0].node.handle_tun_outbound(ipv6_packet.clone()).await;
+
+    // Session should now be initiating
+    assert_eq!(nodes[0].node.session_count(), 1);
+    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_initiating());
+
+    // Drain packets until session established and queued packet delivered
+    drain_to_quiescence(&mut nodes).await;
+
+    // Session should be established on Node 0
+    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+
+    // Verify the queued packet was delivered to Node 1
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(delivered.len(), 1, "Queued packet should be delivered after handshake");
+    assert_eq!(delivered[0], ipv6_packet);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_tun_outbound_unknown_destination() {
+    // Inject a packet for an unknown destination — should get ICMPv6 back
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+
+    // Install TUN receiver on Node 0 (for ICMPv6 response)
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[0].node.tun_tx = Some(tun_tx);
+
+    let src_fips = crate::FipsAddress::from_node_addr(nodes[0].node.node_addr());
+
+    // Build a packet to an unknown FIPS address (not in identity cache)
+    let unknown_addr = NodeAddr::from_bytes([0xAA; 16]);
+    let unknown_fips = crate::FipsAddress::from_node_addr(&unknown_addr);
+    let ipv6_packet = build_ipv6_packet(&src_fips, &unknown_fips, b"unknown");
+
+    nodes[0].node.handle_tun_outbound(ipv6_packet).await;
+
+    // Should receive ICMPv6 Destination Unreachable back on TUN
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(delivered.len(), 1, "Should receive ICMPv6 Destination Unreachable");
+    // Verify it's an ICMPv6 Destination Unreachable (type 1, code 0)
+    // ICMPv6 header starts at byte 40, type at byte 40, code at byte 41
+    assert!(delivered[0].len() >= 48, "ICMPv6 response too short");
+    assert_eq!(delivered[0][6], 58, "Next header should be ICMPv6 (58)");
+    assert_eq!(delivered[0][40], 1, "ICMPv6 type should be Destination Unreachable (1)");
+    assert_eq!(delivered[0][41], 0, "ICMPv6 code should be No Route (0)");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_tun_outbound_3node_forwarded() {
+    // A—B—C: TUN packet from A destined for C, forwarded through B
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test(3, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node2_addr = *nodes[2].node.node_addr();
+
+    let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst_fips = crate::FipsAddress::from_node_addr(&node2_addr);
+
+    // Register Node 2's identity in Node 0's cache
+    // (In production, this would come from the discovery protocol or DNS priming)
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(node2_addr, node2_pubkey);
+
+    // Install TUN receiver on Node 2
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[2].node.tun_tx = Some(tun_tx);
+
+    // Build and inject an IPv6 packet (triggers session initiation to Node 2)
+    let test_payload = b"forwarded-data-plane";
+    let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, test_payload);
+
+    nodes[0].node.handle_tun_outbound(ipv6_packet.clone()).await;
+
+    // Drain packets: handshake + queued data delivery
+    drain_to_quiescence(&mut nodes).await;
+
+    // Session should be established
+    assert!(nodes[0].node.get_session(&node2_addr).unwrap().state().is_established());
+
+    // Verify packet delivered to Node 2
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(delivered.len(), 1, "Packet should be delivered to Node 2");
+    assert_eq!(delivered[0], ipv6_packet);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_tun_outbound_pending_queue_flush() {
+    // Send multiple packets before session exists — all should be delivered
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
+
+    // Install TUN receiver on Node 1
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[1].node.tun_tx = Some(tun_tx);
+
+    // Send 5 packets before any session exists
+    let mut packets = Vec::new();
+    for i in 0..5u8 {
+        let payload = format!("queued-pkt-{}", i).into_bytes();
+        let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, &payload);
+        packets.push(ipv6_packet.clone());
+        nodes[0].node.handle_tun_outbound(ipv6_packet).await;
+    }
+
+    // First packet triggers session initiation, rest are queued
+    assert_eq!(nodes[0].node.session_count(), 1);
+    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_initiating());
+
+    // Drain until session established and queued packets flushed
+    drain_to_quiescence(&mut nodes).await;
+
+    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+
+    // All 5 packets should have been delivered
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(delivered.len(), 5, "All 5 queued packets should be delivered");
+    for (i, pkt) in delivered.iter().enumerate() {
+        assert_eq!(*pkt, packets[i], "Packet {} should match", i);
+    }
+
+    cleanup_nodes(&mut nodes).await;
+}
