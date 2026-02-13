@@ -6,4 +6,5 @@ mod encrypted;
 mod forwarding;
 mod handshake;
 mod rx_loop;
+mod session;
 mod timeout;

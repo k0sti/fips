@@ -8,6 +8,7 @@ mod bloom;
 mod handlers;
 mod lifecycle;
 mod retry;
+pub(crate) mod session;
 mod tree;
 #[cfg(test)]
 mod tests;
@@ -15,6 +16,7 @@ mod tests;
 use crate::bloom::BloomState;
 use crate::cache::{CoordCache, RouteCache};
 use crate::index::IndexAllocator;
+use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::rate_limit::HandshakeRateLimiter;
 use crate::transport::{
@@ -241,6 +243,11 @@ pub struct Node {
     /// Indexed by NodeAddr (verified identity).
     peers: HashMap<NodeAddr, ActivePeer>,
 
+    // === End-to-End Sessions ===
+    /// Session table for end-to-end encrypted sessions.
+    /// Keyed by remote NodeAddr.
+    sessions: HashMap<NodeAddr, SessionEntry>,
+
     // === Resource Limits ===
     /// Maximum connections (0 = unlimited).
     max_connections: usize,
@@ -335,6 +342,7 @@ impl Node {
             packet_rx: None,
             connections: HashMap::new(),
             peers: HashMap::new(),
+            sessions: HashMap::new(),
             max_connections: 256,
             max_peers: 128,
             max_links: 256,
@@ -386,6 +394,7 @@ impl Node {
             packet_rx: None,
             connections: HashMap::new(),
             peers: HashMap::new(),
+            sessions: HashMap::new(),
             max_connections: 256,
             max_peers: 128,
             max_links: 256,
@@ -752,6 +761,28 @@ impl Node {
     /// Number of peers that can send traffic.
     pub fn sendable_peer_count(&self) -> usize {
         self.peers.values().filter(|p| p.can_send()).count()
+    }
+
+    // === End-to-End Sessions ===
+
+    /// Get a session by remote NodeAddr.
+    pub(crate) fn get_session(&self, remote: &NodeAddr) -> Option<&SessionEntry> {
+        self.sessions.get(remote)
+    }
+
+    /// Get a mutable session by remote NodeAddr.
+    pub(crate) fn get_session_mut(&mut self, remote: &NodeAddr) -> Option<&mut SessionEntry> {
+        self.sessions.get_mut(remote)
+    }
+
+    /// Remove a session.
+    pub(crate) fn remove_session(&mut self, remote: &NodeAddr) -> Option<SessionEntry> {
+        self.sessions.remove(remote)
+    }
+
+    /// Number of end-to-end sessions.
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
     }
 
     // === Routing ===

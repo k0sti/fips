@@ -10,6 +10,7 @@ mod discovery;
 mod forwarding;
 mod handshake;
 mod routing;
+mod session;
 mod spanning_tree;
 mod unit;
 

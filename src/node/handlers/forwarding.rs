@@ -40,14 +40,10 @@ impl Node {
         // Coordinate cache warming from plaintext session-layer headers
         self.try_warm_coord_cache(&datagram);
 
-        // Local delivery check
+        // Local delivery: dispatch to session layer handlers
         if datagram.dest_addr == *self.node_addr() {
-            debug!(
-                src = %datagram.src_addr,
-                payload_len = datagram.payload.len(),
-                "SessionDatagram delivered locally"
-            );
-            // TODO: deliver to session layer
+            self.handle_session_payload(&datagram.src_addr, &datagram.payload)
+                .await;
             return;
         }
 
