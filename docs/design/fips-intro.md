@@ -65,23 +65,12 @@ routing logic works regardless of the underlying transport mix.
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Application Layer                        │
-│         (native FIPS API, or IPv6 via TUN adapter)          │
-├─────────────────────────────────────────────────────────────┤
-│                      FIPS Router                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │  Identity   │  │  Spanning   │  │   Bloom Filter      │  │
-│  │  (npub)     │  │    Tree     │  │   Routing Table     │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                  Transport Abstraction                       │
-│  ┌────────┐ ┌──────────┐ ┌────────┐ ┌────────┐ ┌────────┐  │
-│  │  UDP   │ │ Ethernet │ │  WiFi  │ │ Radio  │ │ Onion  │  │
-│  └────────┘ └──────────┘ └────────┘ └────────┘ └────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+![Architecture Overview](fips-architecture-overview.svg)
+
+Each link uses a different transport, but the end-to-end session encryption
+is independent of the transport mix. Intermediate nodes decrypt the link
+layer to make routing decisions, then re-encrypt for the next hop. They
+cannot read the session-layer payload.
 
 Applications can use the native FIPS datagram service directly, or access the
 mesh through an IPv6 adaptation layer (TUN device) for compatibility with
@@ -255,6 +244,8 @@ See [fips-wire-protocol.md](fips-wire-protocol.md) for link encryption and
 
 ## Spanning Tree Protocol
 
+![Mesh Topology](fips-mesh-topology.svg)
+
 The spanning tree is a subset of the full mesh network that connects all nodes,
 forming a tree structure rooted at a deterministically-elected node. Each node
 selects a single parent, and the resulting tree serves as the routing backbone.
@@ -411,24 +402,7 @@ A **transport** is a physical or logical interface: a UDP socket, an Ethernet
 NIC, a Tor client, a radio modem. A **link** is a connection instance to a
 specific peer over a transport.
 
-```
-┌─────────────────────────────────────────┐
-│              FIPS Node                  │
-│  ┌─────────────────────────────────┐   │
-│  │         Router Core              │   │
-│  └──────────┬──────────┬───────────┘   │
-│             │          │               │
-│      ┌──────┴────┐ ┌───┴─────┐        │
-│      │    UDP    │ │  LoRa   │        │
-│      │ Transport │ │Transport│        │
-│      └────┬──────┘ └────┬────┘        │
-└───────────┼─────────────┼──────────────┘
-            │             │
-       ┌────┴────┐  ┌─────┴────┐
-       │Internet │  │  Radio   │
-       │  Peers  │  │  Peers   │
-       └─────────┘  └──────────┘
-```
+![Transport Abstraction](fips-transport-abstraction.svg)
 
 ### Multi-Transport Bridging
 
