@@ -102,7 +102,7 @@ impl Node {
                 transport_id,
                 remote_addr.clone(),
                 LinkDirection::Outbound,
-                Duration::from_millis(100), // Base RTT estimate for UDP
+                Duration::from_millis(self.config.node.base_rtt_ms),
             );
 
             self.links.insert(link_id, link);
@@ -228,8 +228,8 @@ impl Node {
         self.state = NodeState::Starting;
 
         // Create packet channel for transport -> Node communication
-        const PACKET_BUFFER_SIZE: usize = 1024;
-        let (packet_tx, packet_rx) = packet_channel(PACKET_BUFFER_SIZE);
+        let packet_buffer_size = self.config.node.buffers.packet_channel;
+        let (packet_tx, packet_rx) = packet_channel(packet_buffer_size);
         self.packet_tx = Some(packet_tx.clone());
         self.packet_rx = Some(packet_rx);
 
@@ -289,7 +289,8 @@ impl Node {
                     let reader_tun_tx = tun_tx.clone();
 
                     // Create outbound channel for TUN reader → Node
-                    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
+                    let tun_channel_size = self.config.node.buffers.tun_channel;
+                    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
 
                     // Spawn reader thread
                     let reader_handle = thread::spawn(move || {
@@ -315,8 +316,10 @@ impl Node {
             let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
             match tokio::net::UdpSocket::bind(&bind).await {
                 Ok(socket) => {
-                    let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(64);
-                    let handle = tokio::spawn(crate::dns::run_dns_responder(socket, identity_tx));
+                    let dns_channel_size = self.config.node.buffers.dns_channel;
+                    let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
+                    let dns_ttl = self.config.dns.ttl();
+                    let handle = tokio::spawn(crate::dns::run_dns_responder(socket, identity_tx, dns_ttl));
                     self.dns_identity_rx = Some(identity_rx);
                     self.dns_task = Some(handle);
                     info!(bind = %bind, "DNS responder started for .fips domain");

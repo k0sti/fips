@@ -1,7 +1,6 @@
 //! Timeout management for stale handshake connections.
 
 use crate::node::Node;
-use crate::rate_limit::HANDSHAKE_TIMEOUT_SECS;
 use crate::transport::LinkId;
 use tracing::info;
 
@@ -9,7 +8,7 @@ impl Node {
     /// Check for timed-out handshake connections and clean them up.
     ///
     /// Called periodically by the RX event loop. Removes connections that have
-    /// been idle longer than HANDSHAKE_TIMEOUT_SECS or are in Failed state.
+    /// been idle longer than the configured handshake timeout or are in Failed state.
     pub(in crate::node) fn check_timeouts(&mut self) {
         if self.connections.is_empty() {
             return;
@@ -19,7 +18,7 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let timeout_ms = HANDSHAKE_TIMEOUT_SECS * 1000;
+        let timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
 
         let stale: Vec<LinkId> = self.connections.iter()
             .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())

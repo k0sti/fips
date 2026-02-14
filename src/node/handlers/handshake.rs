@@ -119,7 +119,7 @@ impl Node {
             packet.transport_id,
             packet.remote_addr.clone(),
             LinkDirection::Inbound,
-            Duration::from_millis(100),
+            Duration::from_millis(self.config.node.base_rtt_ms),
         );
 
         self.links.insert(link_id, link);
@@ -539,7 +539,7 @@ impl Node {
                     let _ = self.index_allocator.free(old_idx);
                 }
 
-                let new_peer = ActivePeer::with_session(
+                let mut new_peer = ActivePeer::with_session(
                     verified_identity,
                     link_id,
                     current_time_ms,
@@ -550,6 +550,7 @@ impl Node {
                     current_addr,
                     link_stats,
                 );
+                new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 
                 self.peers.insert(peer_node_addr, new_peer);
                 self.peers_by_index
@@ -618,7 +619,7 @@ impl Node {
                 return Err(NodeError::MaxPeersExceeded { max: self.max_peers });
             }
 
-            let new_peer = ActivePeer::with_session(
+            let mut new_peer = ActivePeer::with_session(
                 verified_identity,
                 link_id,
                 current_time_ms,
@@ -629,6 +630,7 @@ impl Node {
                 current_addr,
                 link_stats,
             );
+            new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index

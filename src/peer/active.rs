@@ -95,6 +95,8 @@ pub struct ActivePeer {
     ancestry: Option<TreeCoordinate>,
 
     // === Tree Announce Rate Limiting ===
+    /// Minimum interval between TreeAnnounce messages (milliseconds).
+    tree_announce_min_interval_ms: u64,
     /// Last time we sent a TreeAnnounce to this peer (Unix milliseconds).
     last_tree_announce_sent_ms: u64,
     /// Whether a tree announce is pending (deferred due to rate limit).
@@ -136,6 +138,7 @@ impl ActivePeer {
             current_addr: None,
             declaration: None,
             ancestry: None,
+            tree_announce_min_interval_ms: 500,
             last_tree_announce_sent_ms: 0,
             pending_tree_announce: false,
             inbound_filter: None,
@@ -190,6 +193,7 @@ impl ActivePeer {
             current_addr: Some(current_addr),
             declaration: None,
             ancestry: None,
+            tree_announce_min_interval_ms: 500,
             last_tree_announce_sent_ms: 0,
             pending_tree_announce: false,
             inbound_filter: None,
@@ -481,12 +485,14 @@ impl ActivePeer {
 
     // === Tree Announce Rate Limiting ===
 
-    /// Minimum interval between TreeAnnounce messages to the same peer (milliseconds).
-    const TREE_ANNOUNCE_MIN_INTERVAL_MS: u64 = 500;
+    /// Set the minimum interval between TreeAnnounce messages (milliseconds).
+    pub fn set_tree_announce_min_interval_ms(&mut self, ms: u64) {
+        self.tree_announce_min_interval_ms = ms;
+    }
 
     /// Check if we can send a TreeAnnounce now (rate limiting).
     pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.last_tree_announce_sent_ms) >= Self::TREE_ANNOUNCE_MIN_INTERVAL_MS
+        now_ms.saturating_sub(self.last_tree_announce_sent_ms) >= self.tree_announce_min_interval_ms
     }
 
     /// Record that we sent a TreeAnnounce to this peer.

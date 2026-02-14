@@ -165,9 +165,9 @@ impl RecentRequest {
         }
     }
 
-    /// Check if this entry has expired (older than 10 seconds).
-    pub(crate) fn is_expired(&self, current_time_ms: u64) -> bool {
-        current_time_ms.saturating_sub(self.timestamp_ms) > 10_000
+    /// Check if this entry has expired (older than expiry_ms).
+    pub(crate) fn is_expired(&self, current_time_ms: u64, expiry_ms: u64) -> bool {
+        current_time_ms.saturating_sub(self.timestamp_ms) > expiry_ms
     }
 }
 
@@ -187,9 +187,7 @@ type AddrKey = (TransportId, TransportAddr);
 /// The `addr_to_link` map enables dispatching incoming packets to the right
 /// connection before authentication completes.
 ///
-/// Discovery lookup constants used across handler modules.
-const LOOKUP_TIMEOUT_MS: u64 = 10_000;
-const DISCOVERY_TTL: u8 = 64;
+// Discovery lookup constants moved to config: node.discovery.timeout_secs, node.discovery.ttl
 
 pub struct Node {
     // === Identity ===
@@ -335,11 +333,12 @@ impl Node {
         let node_addr = *identity.node_addr();
         let is_leaf_only = config.is_leaf_only();
 
-        let bloom_state = if is_leaf_only {
+        let mut bloom_state = if is_leaf_only {
             BloomState::leaf_only(node_addr)
         } else {
             BloomState::new(node_addr)
         };
+        bloom_state.set_update_debounce_ms(config.node.bloom.update_debounce_ms);
 
         let tun_state = if config.tun.enabled {
             TunState::Configured
@@ -349,9 +348,25 @@ impl Node {
 
         // Initialize tree state with signed self-declaration
         let mut tree_state = TreeState::new(node_addr);
+        tree_state.set_parent_switch_threshold(config.node.tree.parent_switch_threshold);
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
+
+        let coord_cache = CoordCache::new(
+            config.node.cache.coord_size,
+            config.node.cache.coord_ttl_secs * 1000,
+        );
+        let route_cache = RouteCache::new(config.node.cache.route_size);
+        let rl = &config.node.rate_limit;
+        let msg1_rate_limiter = HandshakeRateLimiter::with_params(
+            crate::rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
+            config.node.limits.max_pending_inbound,
+        );
+
+        let max_connections = config.node.limits.max_connections;
+        let max_peers = config.node.limits.max_peers;
+        let max_links = config.node.limits.max_links;
 
         Ok(Self {
             identity,
@@ -360,8 +375,8 @@ impl Node {
             is_leaf_only,
             tree_state,
             bloom_state,
-            coord_cache: CoordCache::with_defaults(),
-            route_cache: RouteCache::with_defaults(),
+            coord_cache,
+            route_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
             links: HashMap::new(),
@@ -374,9 +389,9 @@ impl Node {
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
             pending_lookups: HashMap::new(),
-            max_connections: 256,
-            max_peers: 128,
-            max_links: 256,
+            max_connections,
+            max_peers,
+            max_links,
             next_link_id: 1,
             next_transport_id: 1,
             tun_state,
@@ -390,7 +405,7 @@ impl Node {
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
-            msg1_rate_limiter: HandshakeRateLimiter::new(),
+            msg1_rate_limiter,
             last_root_refresh_secs: 0,
             retry_pending: HashMap::new(),
         })
@@ -407,9 +422,28 @@ impl Node {
 
         // Initialize tree state with signed self-declaration
         let mut tree_state = TreeState::new(node_addr);
+        tree_state.set_parent_switch_threshold(config.node.tree.parent_switch_threshold);
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
+
+        let mut bloom_state = BloomState::new(node_addr);
+        bloom_state.set_update_debounce_ms(config.node.bloom.update_debounce_ms);
+
+        let coord_cache = CoordCache::new(
+            config.node.cache.coord_size,
+            config.node.cache.coord_ttl_secs * 1000,
+        );
+        let route_cache = RouteCache::new(config.node.cache.route_size);
+        let rl = &config.node.rate_limit;
+        let msg1_rate_limiter = HandshakeRateLimiter::with_params(
+            crate::rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
+            config.node.limits.max_pending_inbound,
+        );
+
+        let max_connections = config.node.limits.max_connections;
+        let max_peers = config.node.limits.max_peers;
+        let max_links = config.node.limits.max_links;
 
         Self {
             identity,
@@ -417,9 +451,9 @@ impl Node {
             state: NodeState::Created,
             is_leaf_only: false,
             tree_state,
-            bloom_state: BloomState::new(node_addr),
-            coord_cache: CoordCache::with_defaults(),
-            route_cache: RouteCache::with_defaults(),
+            bloom_state,
+            coord_cache,
+            route_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
             links: HashMap::new(),
@@ -432,9 +466,9 @@ impl Node {
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
             pending_lookups: HashMap::new(),
-            max_connections: 256,
-            max_peers: 128,
-            max_links: 256,
+            max_connections,
+            max_peers,
+            max_links,
             next_link_id: 1,
             next_transport_id: 1,
             tun_state,
@@ -448,7 +482,7 @@ impl Node {
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
-            msg1_rate_limiter: HandshakeRateLimiter::new(),
+            msg1_rate_limiter,
             last_root_refresh_secs: 0,
             retry_pending: HashMap::new(),
         }

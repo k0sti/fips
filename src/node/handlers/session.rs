@@ -143,7 +143,8 @@ impl Node {
         let our_coords = self.tree_state.my_coords().clone();
         let ack = SessionAck::new(our_coords).with_handshake(msg2);
         let my_addr = *self.node_addr();
-        let datagram = SessionDatagram::new(my_addr, *src_addr, ack.encode());
+        let datagram = SessionDatagram::new(my_addr, *src_addr, ack.encode())
+            .with_hop_limit(self.config.node.session.default_hop_limit);
 
         // Route the ack back to the initiator
         if let Err(e) = self.send_session_datagram(&datagram).await {
@@ -400,7 +401,8 @@ impl Node {
 
         // Wrap in SessionDatagram
         let my_addr = *self.node_addr();
-        let datagram = SessionDatagram::new(my_addr, dest_addr, setup.encode());
+        let datagram = SessionDatagram::new(my_addr, dest_addr, setup.encode())
+            .with_hop_limit(self.config.node.session.default_hop_limit);
 
         // Route toward destination
         self.send_session_datagram(&datagram).await?;
@@ -450,7 +452,8 @@ impl Node {
         // Build DataPacket and wrap in SessionDatagram
         let data_packet = DataPacket::new(ciphertext);
         let my_addr = *self.node_addr();
-        let datagram = SessionDatagram::new(my_addr, *dest_addr, data_packet.encode());
+        let datagram = SessionDatagram::new(my_addr, *dest_addr, data_packet.encode())
+            .with_hop_limit(self.config.node.session.default_hop_limit);
 
         self.send_session_datagram(&datagram).await?;
 
@@ -513,11 +516,6 @@ impl Node {
     }
 
     // === TUN Outbound (Data Plane) ===
-
-    /// Maximum pending packets per destination during session establishment.
-    const MAX_PENDING_PER_DEST: usize = 16;
-    /// Maximum destinations with pending packets.
-    const MAX_PENDING_DESTINATIONS: usize = 256;
 
     /// Handle an outbound IPv6 packet from the TUN reader.
     ///
@@ -591,8 +589,9 @@ impl Node {
     /// Queue a packet while waiting for session establishment.
     fn queue_pending_packet(&mut self, dest_addr: NodeAddr, packet: Vec<u8>) {
         // Reject if we already have too many pending destinations
+        let max_dests = self.config.node.session.pending_max_destinations;
         if !self.pending_tun_packets.contains_key(&dest_addr)
-            && self.pending_tun_packets.len() >= Self::MAX_PENDING_DESTINATIONS
+            && self.pending_tun_packets.len() >= max_dests
         {
             return;
         }
@@ -601,7 +600,7 @@ impl Node {
             .pending_tun_packets
             .entry(dest_addr)
             .or_default();
-        if queue.len() >= Self::MAX_PENDING_PER_DEST {
+        if queue.len() >= self.config.node.session.pending_packets_per_dest {
             queue.pop_front(); // Drop oldest
         }
         queue.push_back(packet);

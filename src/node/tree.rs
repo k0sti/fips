@@ -9,8 +9,7 @@ use crate::NodeAddr;
 use super::{Node, NodeError};
 use tracing::{debug, info, warn};
 
-/// Root nodes re-announce every 30 minutes to keep the tree alive.
-const ROOT_REFRESH_INTERVAL_SECS: u64 = 30 * 60;
+// Root refresh interval is configurable via `node.tree.root_refresh_secs`.
 
 impl Node {
     /// Build a TreeAnnounce from our current tree state.
@@ -269,7 +268,8 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            if now_secs.saturating_sub(self.last_root_refresh_secs) >= ROOT_REFRESH_INTERVAL_SECS {
+            let root_refresh_secs = self.config.node.tree.root_refresh_secs;
+            if now_secs.saturating_sub(self.last_root_refresh_secs) >= root_refresh_secs {
                 let new_seq = self.tree_state.my_declaration().sequence() + 1;
                 self.tree_state
                     .set_parent(*self.identity.node_addr(), new_seq, now_secs);

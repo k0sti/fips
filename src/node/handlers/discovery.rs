@@ -4,7 +4,7 @@
 //! visited filter for loop prevention, and reverse-path forwarding for
 //! responses.
 
-use crate::node::{Node, RecentRequest, DISCOVERY_TTL, LOOKUP_TIMEOUT_MS};
+use crate::node::{Node, RecentRequest};
 use crate::protocol::{LookupRequest, LookupResponse};
 use crate::NodeAddr;
 use tracing::{debug, trace};
@@ -299,13 +299,15 @@ impl Node {
     /// lookup was recently initiated and hasn't timed out, this is a no-op.
     pub(in crate::node) async fn maybe_initiate_lookup(&mut self, dest: &NodeAddr) {
         let now_ms = Self::now_ms();
+        let lookup_timeout_ms = self.config.node.discovery.timeout_secs * 1000;
         if let Some(&initiated_at) = self.pending_lookups.get(dest) {
-            if now_ms.saturating_sub(initiated_at) < LOOKUP_TIMEOUT_MS {
+            if now_ms.saturating_sub(initiated_at) < lookup_timeout_ms {
                 return;
             }
         }
         self.pending_lookups.insert(*dest, now_ms);
-        self.initiate_lookup(dest, DISCOVERY_TTL).await;
+        let ttl = self.config.node.discovery.ttl;
+        self.initiate_lookup(dest, ttl).await;
     }
 
     /// Remove timed-out pending lookups and drain their queued packets.
@@ -317,7 +319,7 @@ impl Node {
         let timed_out: Vec<NodeAddr> = self
             .pending_lookups
             .iter()
-            .filter(|&(_, &ts)| now_ms.saturating_sub(ts) >= LOOKUP_TIMEOUT_MS)
+            .filter(|&(_, &ts)| now_ms.saturating_sub(ts) >= self.config.node.discovery.timeout_secs * 1000)
             .map(|(addr, _)| *addr)
             .collect();
 
@@ -333,8 +335,9 @@ impl Node {
 
     /// Remove expired entries from the recent_requests cache.
     fn purge_expired_requests(&mut self, current_time_ms: u64) {
+        let expiry_ms = self.config.node.discovery.recent_expiry_secs * 1000;
         self.recent_requests
-            .retain(|_, entry| !entry.is_expired(current_time_ms));
+            .retain(|_, entry| !entry.is_expired(current_time_ms, expiry_ms));
     }
 
 }

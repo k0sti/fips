@@ -53,7 +53,7 @@ pub fn resolve_fips_query(name: &str) -> Option<(Ipv6Addr, NodeAddr, secp256k1::
 ///
 /// Returns the response bytes and an optional resolved identity (for AAAA queries
 /// that successfully resolved a `.fips` name).
-pub fn handle_dns_packet(query_bytes: &[u8]) -> Option<(Vec<u8>, Option<DnsResolvedIdentity>)> {
+pub fn handle_dns_packet(query_bytes: &[u8], ttl: u32) -> Option<(Vec<u8>, Option<DnsResolvedIdentity>)> {
     let query = Packet::parse(query_bytes).ok()?;
     let question = query.questions.first()?;
 
@@ -70,7 +70,7 @@ pub fn handle_dns_packet(query_bytes: &[u8]) -> Option<(Vec<u8>, Option<DnsResol
         let record = ResourceRecord::new(
             name,
             CLASS::IN,
-            300, // 5 minute TTL
+            ttl,
             RData::AAAA(AAAA::from(ipv6)),
         );
         response.answers.push(record);
@@ -93,6 +93,7 @@ pub fn handle_dns_packet(query_bytes: &[u8]) -> Option<(Vec<u8>, Option<DnsResol
 pub async fn run_dns_responder(
     socket: tokio::net::UdpSocket,
     identity_tx: DnsIdentityTx,
+    ttl: u32,
 ) {
     let mut buf = [0u8; 512]; // Standard DNS UDP max
 
@@ -107,7 +108,7 @@ pub async fn run_dns_responder(
 
         let query_bytes = &buf[..len];
 
-        match handle_dns_packet(query_bytes) {
+        match handle_dns_packet(query_bytes, ttl) {
             Some((response_bytes, identity)) => {
                 if let Some(id) = identity {
                     debug!(
@@ -208,7 +209,7 @@ mod tests {
         let query_name = format!("{}.fips", npub);
         let query_packet = build_test_query(&query_name, TYPE::AAAA);
 
-        let result = handle_dns_packet(&query_packet);
+        let result = handle_dns_packet(&query_packet, 300);
         assert!(result.is_some(), "should handle AAAA query");
 
         let (response_bytes, identity_opt) = result.unwrap();
@@ -231,7 +232,7 @@ mod tests {
     fn test_handle_nxdomain_for_unknown() {
         let query_packet = build_test_query("unknown.fips", TYPE::AAAA);
 
-        let result = handle_dns_packet(&query_packet);
+        let result = handle_dns_packet(&query_packet, 300);
         assert!(result.is_some());
 
         let (response_bytes, identity_opt) = result.unwrap();
@@ -248,7 +249,7 @@ mod tests {
         let query_name = format!("{}.fips", identity.npub());
         let query_packet = build_test_query(&query_name, TYPE::A);
 
-        let result = handle_dns_packet(&query_packet);
+        let result = handle_dns_packet(&query_packet, 300);
         assert!(result.is_some());
 
         let (response_bytes, identity_opt) = result.unwrap();
@@ -271,7 +272,7 @@ mod tests {
         let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
 
         // Spawn the responder
-        let responder_handle = tokio::spawn(run_dns_responder(server_socket, identity_tx));
+        let responder_handle = tokio::spawn(run_dns_responder(server_socket, identity_tx, 300));
 
         // Send a query
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

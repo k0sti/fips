@@ -10,8 +10,7 @@ use crate::identity::NodeAddr;
 use crate::PeerIdentity;
 use tracing::{debug, info, warn};
 
-/// Maximum backoff cap in milliseconds (5 minutes).
-const MAX_BACKOFF_MS: u64 = 300_000;
+// MAX_BACKOFF_MS is now derived from config: node.retry.max_backoff_secs * 1000
 
 /// Tracks retry state for a peer across connection attempts.
 pub struct RetryState {
@@ -39,9 +38,9 @@ impl RetryState {
     ///
     /// Uses exponential backoff: `base_interval_ms * 2^retry_count`,
     /// capped at `MAX_BACKOFF_MS`.
-    pub fn backoff_ms(&self, base_interval_ms: u64) -> u64 {
+    pub fn backoff_ms(&self, base_interval_ms: u64, max_backoff_ms: u64) -> u64 {
         let multiplier = 1u64.checked_shl(self.retry_count).unwrap_or(u64::MAX);
-        base_interval_ms.saturating_mul(multiplier).min(MAX_BACKOFF_MS)
+        base_interval_ms.saturating_mul(multiplier).min(max_backoff_ms)
     }
 }
 
@@ -52,7 +51,8 @@ impl Node {
     /// have not been exhausted. Does nothing if the peer is already connected
     /// or has a connection in progress.
     pub(super) fn schedule_retry(&mut self, node_addr: NodeAddr, now_ms: u64) {
-        let max_retries = self.config.node.max_retries;
+        let retry_cfg = &self.config.node.retry;
+        let max_retries = retry_cfg.max_retries;
         if max_retries == 0 {
             return;
         }
@@ -62,7 +62,8 @@ impl Node {
             return;
         }
 
-        let base_interval_ms = self.config.node.base_retry_interval_secs * 1000;
+        let base_interval_ms = retry_cfg.base_interval_secs * 1000;
+        let max_backoff_ms = retry_cfg.max_backoff_secs * 1000;
 
         if let Some(state) = self.retry_pending.get_mut(&node_addr) {
             // Already tracking — increment
@@ -76,7 +77,7 @@ impl Node {
                 self.retry_pending.remove(&node_addr);
                 return;
             }
-            let delay = state.backoff_ms(base_interval_ms);
+            let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
             state.retry_after_ms = now_ms + delay;
             info!(
                 node_addr = %node_addr,
@@ -99,7 +100,7 @@ impl Node {
             if let Some(pc) = peer_config {
                 let mut state = RetryState::new(pc);
                 state.retry_count = 1;
-                let delay = state.backoff_ms(base_interval_ms);
+                let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
                 state.retry_after_ms = now_ms + delay;
                 info!(
                     node_addr = %node_addr,
@@ -179,6 +180,8 @@ mod tests {
     use super::*;
     use crate::config::PeerConfig;
 
+    const TEST_MAX_BACKOFF_MS: u64 = 300_000;
+
     #[test]
     fn test_backoff_exponential() {
         let state = RetryState {
@@ -187,31 +190,31 @@ mod tests {
             retry_after_ms: 0,
         };
         // base = 5000ms
-        assert_eq!(state.backoff_ms(5000), 5000); // 5s * 2^0
+        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 5000); // 5s * 2^0
 
         let state = RetryState {
             retry_count: 1,
             ..state
         };
-        assert_eq!(state.backoff_ms(5000), 10_000); // 5s * 2^1
+        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 10_000); // 5s * 2^1
 
         let state = RetryState {
             retry_count: 2,
             ..state
         };
-        assert_eq!(state.backoff_ms(5000), 20_000); // 5s * 2^2
+        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 20_000); // 5s * 2^2
 
         let state = RetryState {
             retry_count: 3,
             ..state
         };
-        assert_eq!(state.backoff_ms(5000), 40_000); // 5s * 2^3
+        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 40_000); // 5s * 2^3
 
         let state = RetryState {
             retry_count: 4,
             ..state
         };
-        assert_eq!(state.backoff_ms(5000), 80_000); // 5s * 2^4
+        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 80_000); // 5s * 2^4
     }
 
     #[test]
@@ -221,7 +224,7 @@ mod tests {
             retry_count: 20, // 2^20 * 5000 would be huge
             retry_after_ms: 0,
         };
-        assert_eq!(state.backoff_ms(5000), MAX_BACKOFF_MS);
+        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), TEST_MAX_BACKOFF_MS);
     }
 
     #[test]
@@ -231,6 +234,6 @@ mod tests {
             retry_count: 3,
             retry_after_ms: 0,
         };
-        assert_eq!(state.backoff_ms(0), 0);
+        assert_eq!(state.backoff_ms(0, TEST_MAX_BACKOFF_MS), 0);
     }
 }

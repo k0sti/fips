@@ -198,7 +198,8 @@ impl Node {
                 CoordsRequired::new(original.dest_addr, my_addr).encode()
             };
 
-        let error_dg = SessionDatagram::new(my_addr, original.src_addr, error_payload);
+        let error_dg = SessionDatagram::new(my_addr, original.src_addr, error_payload)
+            .with_hop_limit(self.config.node.session.default_hop_limit);
 
         let next_hop_addr = match self.find_next_hop(&original.src_addr) {
             Some(peer) => *peer.node_addr(),

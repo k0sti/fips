@@ -612,7 +612,7 @@ fn test_schedule_retry_max_retries_exhausted() {
     let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
 
     let mut config = Config::new();
-    config.node.max_retries = 2;
+    config.node.retry.max_retries = 2;
     config.peers.push(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
@@ -644,7 +644,7 @@ fn test_schedule_retry_disabled() {
     let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
 
     let mut config = Config::new();
-    config.node.max_retries = 0;
+    config.node.retry.max_retries = 0;
     config.peers.push(crate::config::PeerConfig::new(
         peer_npub,
         "udp",

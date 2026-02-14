@@ -51,7 +51,7 @@ impl Node {
             }
         };
 
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut tick = tokio::time::interval(Duration::from_secs(self.config.node.tick_interval_secs));
 
         info!("RX event loop started");
 

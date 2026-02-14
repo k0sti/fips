@@ -449,6 +449,8 @@ pub struct TreeState {
     peer_declarations: HashMap<NodeAddr, ParentDeclaration>,
     /// Each peer's full ancestry to root.
     peer_ancestry: HashMap<NodeAddr, TreeCoordinate>,
+    /// Minimum depth improvement required to switch parents (same root).
+    parent_switch_threshold: usize,
 }
 
 impl TreeState {
@@ -471,6 +473,7 @@ impl TreeState {
             root: my_node_addr,
             peer_declarations: HashMap::new(),
             peer_ancestry: HashMap::new(),
+            parent_switch_threshold: 1,
         }
     }
 
@@ -631,9 +634,10 @@ impl TreeState {
         }
     }
 
-    /// Minimum depth improvement required to switch parents (same root).
-    /// Prevents thrashing on equivalent-depth paths.
-    const PARENT_SWITCH_THRESHOLD: usize = 1;
+    /// Set the parent switch threshold.
+    pub fn set_parent_switch_threshold(&mut self, threshold: usize) {
+        self.parent_switch_threshold = threshold;
+    }
 
     /// Evaluate whether to switch parents based on current peer tree state.
     ///
@@ -720,7 +724,7 @@ impl TreeState {
         let current_depth = self.my_coords.depth();
         let proposed_depth = best_depth + 1;
 
-        if current_depth >= proposed_depth + Self::PARENT_SWITCH_THRESHOLD {
+        if current_depth >= proposed_depth + self.parent_switch_threshold {
             return Some(best_peer_id);
         }
 
