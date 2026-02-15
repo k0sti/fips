@@ -28,14 +28,14 @@ The top-level entity representing a running FIPS instance.
 
 ```
 Node
-├── identity: Identity              // cryptographic identity (npub/nsec)
+├── identity: Identity              // cryptographic identity (keypair + derived IDs)
 ├── config: Config                  // loaded configuration
-├── tun: TunInterface               // IPv6 interface to local applications
+├── tun_state: TunState             // TUN device lifecycle state
 ├── tree_state: TreeState           // local view of spanning tree
 ├── coord_cache: CoordCache         // address → coordinates for routing
-├── transports: HashMap<TransportId, Transport>
+├── transports: HashMap<TransportId, TransportHandle>
 ├── links: HashMap<LinkId, Link>
-└── peers: HashMap<NodeAddr, Peer>
+└── peers: HashMap<NodeAddr, PeerSlot>
 ```
 
 ### Identity
@@ -44,11 +44,13 @@ Cryptographic identity using Nostr keys (secp256k1).
 
 ```
 Identity
-├── npub: PublicKey                 // public key (bech32: npub1...)
-├── nsec: SecretKey                 // secret key (bech32: nsec1...)
-├── node_addr: NodeAddr                 // SHA-256(pubkey) truncated, 16 bytes
-└── address: FipsAddress            // IPv6 ULA derived from node_addr (fd::/8)
+├── keypair: Keypair               // secp256k1 keypair (secret + public)
+├── node_addr: NodeAddr            // SHA-256(pubkey) truncated, 16 bytes
+└── address: FipsAddress           // IPv6 ULA derived from node_addr (fd::/8)
 ```
+
+Accessor methods provide `pubkey()` (x-only), `pubkey_full()`, `npub()` (bech32),
+`node_addr()`, and `address()`. The keypair is also exposed for Noise handshakes.
 
 `NodeAddr` is the routing identifier, derived deterministically from `npub`.
 Transport addresses and FIPS identity are fully decoupled.
@@ -138,26 +140,45 @@ LinkStats
 └── throughput_estimate: u64        // bytes/sec observed
 ```
 
-### Peer
+### Peer Lifecycle (Two-Phase Model)
 
-An authenticated remote FIPS node, reachable via a link.
+Peers use a two-phase lifecycle managed by a `PeerSlot` enum:
 
 ```
-Peer
-├── node_addr: NodeAddr                 // routing identity
-├── npub: PublicKey                 // cryptographic identity
-├── link_id: LinkId                 // which link reaches this peer
-├── state: PeerState                // lifecycle state
+PeerSlot
+├── Connecting(PeerConnection)     // handshake in progress
+└── Active(ActivePeer)             // authenticated, participating
+```
+
+**PeerConnection** — represents a peer during Noise IK handshake:
+
+```
+PeerConnection
+├── node_addr: NodeAddr            // routing identity (if known)
+├── link_id: LinkId                // which link reaches this peer
+├── state: HandshakeState          // Initiating | ReceivedMsg1 | AwaitingMsg2
+├── handshake: NoiseHandshake      // Noise IK state machine
+└── created_at: Instant            // for timeout enforcement
+```
+
+**ActivePeer** — an authenticated remote FIPS node:
+
+```
+ActivePeer
+├── identity: PeerIdentity         // cryptographic identity (verified via handshake)
+├── node_addr: NodeAddr            // routing identity
+├── link_id: LinkId                // which link reaches this peer
+├── state: ConnectivityState       // Active | Stale | Disconnecting
 │
 │  // Spanning tree
-├── declaration: ParentDeclaration  // their latest
-├── ancestry: Vec<NodeAddr>           // their path to root
+├── declaration: Option<ParentDeclaration> // their latest (None until received)
+├── ancestry: Option<TreeCoordinate> // their path to root (None until received)
 │
 │  // Bloom filter (inbound—what's reachable through them)
-├── inbound_filter: BloomFilter
+├── inbound_filter: Option<BloomFilter>  // None until first received
 ├── filter_sequence: u64
-├── filter_received_at: Timestamp
-├── pending_filter_update: bool     // we owe them an update
+├── filter_received_at: u64        // Unix milliseconds
+├── pending_filter_update: bool    // we owe them an update
 │
 │  // Statistics
 └── link_stats: LinkStats
@@ -235,19 +256,24 @@ Nodes do NOT know about other subtrees—only paths toward root.
 
 ```
 BloomState
-├── own_node_addr: NodeAddr             // always included in outgoing filters
-├── leaf_dependents: HashSet<NodeAddr>  // leaf-only nodes we speak for
-├── is_leaf_only: bool              // if true, no filter processing
-└── update_debounce: Duration       // rate limit outgoing updates
+├── own_node_addr: NodeAddr              // always included in outgoing filters
+├── leaf_dependents: HashSet<NodeAddr>   // leaf-only nodes we speak for
+├── is_leaf_only: bool                   // if true, no filter processing
+├── update_debounce_ms: u64              // min interval between updates (ms)
+├── last_update_sent: HashMap<NodeAddr, u64>  // per-peer last-sent timestamp
+├── pending_updates: HashSet<NodeAddr>   // peers needing filter update
+├── sequence: u64                        // monotonic outgoing sequence number
+└── last_sent_filters: HashMap<NodeAddr, BloomFilter>  // for change detection
 ```
 
 ### Per-Peer State
 
-Stored on Peer:
+Stored on ActivePeer:
 
-- `inbound_filter`: what they advertise to us (1KB Bloom filter)
-- `filter_sequence`: freshness/dedup
-- `filter_received_at`: for staleness detection
+- `inbound_filter: Option<BloomFilter>`: what they advertise to us (None until first received)
+- `filter_sequence: u64`: freshness/dedup
+- `filter_received_at: u64`: when received (Unix milliseconds), for staleness detection
+- `pending_filter_update: bool`: whether we owe them an update
 
 ### Computed (On-Demand)
 
@@ -380,7 +406,7 @@ initiated simultaneously):
 
 ```
 PeerEvent
-├── Discovered { link_id, transport_addr, hint: Option<PublicKey> }
+├── Discovered { transport_id, transport_addr, pubkey_hint: Option<XOnlyPublicKey> }
 ├── LinkConnected
 ├── LinkFailed { reason }
 ├── Msg1Received { noise_payload }
@@ -524,7 +550,7 @@ handler:
 ```
 Transport
     │
-    ├──► DiscoveredPeer { transport_id, addr, hint }
+    ├──► DiscoveredPeer { transport_id, addr, pubkey_hint }
     ├──► InboundConnection { transport_id, addr, io }  (connection-oriented)
     └──► PacketReceived { transport_id, addr, data }
               │
@@ -642,11 +668,11 @@ The upstream peer entry for a leaf-only node:
 
 ```
 UpstreamPeer (leaf-only)
+├── identity: PeerIdentity         // cryptographic identity
 ├── node_addr: NodeAddr
-├── npub: PublicKey
 ├── link_id: LinkId
-├── state: PeerState                // auth lifecycle only
-└── link_stats: LinkStats           // for keepalive/timeout
+├── state: ConnectivityState       // auth lifecycle only
+└── link_stats: LinkStats          // for keepalive/timeout
 
 // NOT present:
 // - declaration, ancestry (no tree participation)
@@ -878,7 +904,7 @@ TransportConfig
 
 Discovery is per-transport:
 
-- Transports emit `DiscoveredPeer { addr, hint }` events
+- Transports emit `DiscoveredPeer { transport_id, addr, pubkey_hint }` events
 - Node matches against known peer configs or creates "unknown peer" entries
 - Policy (`auto_connect`, per-peer `connect_policy`) determines action
 

@@ -6,7 +6,6 @@
 pub mod bloom;
 pub mod cache;
 pub mod config;
-pub mod icmp;
 pub mod identity;
 pub mod index;
 pub mod noise;
@@ -15,7 +14,7 @@ pub mod peer;
 pub mod protocol;
 pub mod transport;
 pub mod tree;
-pub mod tun;
+pub mod upper;
 
 // Re-export identity types
 pub use identity::{

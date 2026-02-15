@@ -243,7 +243,7 @@ pub fn run_tun_reader(
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
 ) {
-    use crate::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+    use super::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
 
     let name = device.name().to_string();
     let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers

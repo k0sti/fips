@@ -5,7 +5,6 @@
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
 mod bloom;
-pub(crate) mod dns;
 mod handlers;
 mod lifecycle;
 mod retry;
@@ -27,7 +26,7 @@ use crate::transport::{
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
-use crate::tun::{TunError, TunOutboundRx, TunState, TunTx};
+use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use self::wire::build_encrypted;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
 use std::collections::{HashMap, VecDeque};
@@ -297,7 +296,7 @@ pub struct Node {
 
     // === DNS Responder ===
     /// Receiver for resolved identities from the DNS responder.
-    dns_identity_rx: Option<dns::DnsIdentityRx>,
+    dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
     /// DNS responder task handle.
     dns_task: Option<tokio::task::JoinHandle<()>>,
 

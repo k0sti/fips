@@ -569,7 +569,7 @@ impl Node {
 
     /// Send ICMPv6 Destination Unreachable back through TUN.
     pub(in crate::node) fn send_icmpv6_dest_unreachable(&self, original_packet: &[u8]) {
-        use crate::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+        use crate::upper::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
         use crate::FipsAddress;
 
         if !should_send_icmp_error(original_packet) {
