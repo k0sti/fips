@@ -301,9 +301,17 @@ Each router forwards toward the origin using tree distance.
 ### Security
 
 The target signs the LookupResponse with a proof covering
-`(request_id || target || target_coords)`. Without this signature, a malicious
-node could claim reachability for any target and blackhole traffic. The
-signature proves the target authorized the route.
+`(request_id || target)`. Without this signature, a malicious node could
+claim reachability for any target and blackhole traffic. The signature
+proves the target authorized the route.
+
+Note: `target_coords` are intentionally excluded from the proof. Binding
+coordinates would invalidate the signature whenever the spanning tree
+reconverges (parent switch, root change), causing valid responses to be
+rejected if tree topology shifts during the lookup RTT. Since coordinates
+are ephemeral routing hints and data integrity is protected by the
+session layer, coordinate tampering by a transit node only causes routing
+inefficiency, not a security breach.
 
 ### Caching
 

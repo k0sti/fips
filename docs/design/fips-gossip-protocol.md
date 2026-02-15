@@ -386,8 +386,10 @@ LookupResponse {
 **target_coords**: The target's current tree coordinates. This is the primary
 payload — cached by the originator to enable routing to the target.
 
-**proof**: Target's signature over `(request_id || target || target_coords)`.
-Prevents malicious nodes from claiming reachability and blackholing traffic.
+**proof**: Target's signature over `(request_id || target)`. Prevents
+malicious nodes from claiming reachability and blackholing traffic.
+Coordinates are excluded from the proof to avoid invalidation during
+tree reconvergence (see [fips-routing.md](fips-routing.md) §2.4).
 
 ### 5.3 Routing
 
@@ -680,7 +682,7 @@ PLAINTEXT BYTES:
 40                               ← ttl = 64
 04 00                            ← origin_coords_count = 4
 [16 bytes] × 4                   ← origin's ancestry (64 bytes)
-07                               ← visited hash_count = 7
+05                               ← visited hash_count = 5
 [256 bytes visited bloom]        ← nodes that have seen this request
 
 Total: 1 + 8 + 16 + 16 + 1 + 2 + 64 + 1 + 256 = 365 bytes
@@ -708,8 +710,8 @@ Returns target's coordinates to the requester.
 │  │  ...   │ proof            │ 64 bytes  │ Target's signature            │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
-│  Proof signature covers: (request_id || target || target_coords)            │
-│  Prevents malicious nodes from claiming reachability for any target.        │
+│  Proof signature covers: (request_id || target)                             │
+│  Coords excluded to survive tree reconvergence during lookup RTT.          │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
