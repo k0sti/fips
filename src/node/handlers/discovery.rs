@@ -92,7 +92,7 @@ impl Node {
     /// Processing steps:
     /// 1. Decode and validate
     /// 2. Check recent_requests to determine if we originated or are forwarding
-    /// 3. If originator: cache target_coords in route_cache
+    /// 3. If originator: cache target_coords in coord_cache
     /// 4. If transit: reverse-path forward to from_peer
     pub(in crate::node) async fn handle_lookup_response(
         &mut self,
@@ -139,7 +139,7 @@ impl Node {
             );
 
             let target = response.target;
-            self.route_cache.insert(
+            self.coord_cache.insert(
                 target,
                 response.target_coords,
                 now_ms,
@@ -149,7 +149,7 @@ impl Node {
             self.pending_lookups.remove(&target);
 
             // If we have pending TUN packets for this target, retry session
-            // initiation. The route_cache now has coords, so find_next_hop()
+            // initiation. The coord_cache now has coords, so find_next_hop()
             // should succeed.
             if self.pending_tun_packets.contains_key(&target) {
                 self.retry_session_after_discovery(target).await;
@@ -261,7 +261,7 @@ impl Node {
     /// Creates a LookupRequest and floods it to all peers. The originator
     /// does NOT record the request_id in recent_requests, so when the
     /// response arrives, it's recognized as "our request" and the
-    /// target's coordinates are cached in route_cache.
+    /// target's coordinates are cached in coord_cache.
     pub(in crate::node) async fn initiate_lookup(&mut self, target: &NodeAddr, ttl: u8) {
         let origin = *self.node_addr();
         let origin_coords = self.tree_state().my_coords().clone();

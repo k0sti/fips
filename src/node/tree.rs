@@ -205,13 +205,14 @@ impl Node {
                 return;
             }
             self.tree_state.recompute_coords();
+            self.coord_cache.clear();
 
             info!(
                 new_parent = %new_parent,
                 new_seq = new_seq,
                 new_root = %self.tree_state.root(),
                 depth = self.tree_state.my_coords().depth(),
-                "Parent switched, announcing to all peers"
+                "Parent switched, flushed coord cache, announcing to all peers"
             );
 
             self.send_tree_announce_to_all().await;
@@ -236,6 +237,7 @@ impl Node {
                 return;
             }
             self.tree_state.recompute_coords();
+            self.coord_cache.clear();
 
             let new_root = *self.tree_state.root();
             let new_depth = self.tree_state.my_coords().depth();

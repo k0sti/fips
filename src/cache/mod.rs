@@ -1,18 +1,15 @@
 //! Caching Entities
 //!
-//! Coordinate and route caching for FIPS routing. The CoordCache stores
-//! address-to-coordinate mappings populated by session setup, while
-//! RouteCache stores coordinates learned from discovery queries.
+//! Coordinate caching for FIPS routing. The CoordCache stores
+//! address-to-coordinate mappings populated by session setup and discovery.
 
 mod coord_cache;
 mod entry;
-mod route_cache;
 
 use thiserror::Error;
 
 pub use coord_cache::{CoordCache, DEFAULT_COORD_CACHE_SIZE, DEFAULT_COORD_CACHE_TTL_MS};
 pub use entry::CacheEntry;
-pub use route_cache::{CachedCoords, RouteCache, DEFAULT_ROUTE_CACHE_SIZE};
 
 /// Errors related to cache operations.
 #[derive(Debug, Error)]

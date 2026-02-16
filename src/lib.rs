@@ -48,7 +48,7 @@ pub use protocol::{
 };
 
 // Re-export cache types
-pub use cache::{CacheEntry, CacheError, CacheStats, CachedCoords, CoordCache, RouteCache};
+pub use cache::{CacheEntry, CacheError, CacheStats, CoordCache};
 
 // Re-export peer types
 pub use peer::{

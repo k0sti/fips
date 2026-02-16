@@ -497,9 +497,6 @@ impl Node {
         if let Some(coords) = self.coord_cache.get(dest, now_ms) {
             return coords.clone();
         }
-        if let Some(cached) = self.route_cache.get(dest) {
-            return cached.coords().clone();
-        }
         // Fallback: use our own coordinates. The SessionSetup dest_coords
         // field cannot be empty (wire format requires ≥1 entry). Using our
         // own coords is safe — transit routers will still cache them, and
@@ -675,7 +672,7 @@ impl Node {
     /// Retry session initiation after discovery provided coordinates.
     ///
     /// Called when a LookupResponse arrives and we have pending TUN packets
-    /// for the discovered target. The route_cache now has coords, so
+    /// for the discovered target. The coord_cache now has coords, so
     /// `find_next_hop()` should succeed and the SessionSetup can be sent.
     pub(in crate::node) async fn retry_session_after_discovery(&mut self, dest_addr: NodeAddr) {
         // Look up the destination's public key from the identity cache

@@ -303,14 +303,13 @@ fn test_routing_bloom_hit_without_coords_returns_none() {
     assert!(node.find_next_hop(&dest).is_none());
 }
 
-// === Route cache fallback ===
+// === Discovery-populated coord_cache ===
 
 #[test]
-fn test_routing_route_cache_fallback() {
-    // Verify that find_next_hop() falls back to route_cache when
-    // coord_cache has no entry. This is the key change that enables
-    // discovery-based routing: initiate_lookup() populates route_cache,
-    // and find_next_hop() now consults it.
+fn test_routing_discovery_coord_cache() {
+    // Verify that find_next_hop() uses coord_cache entries populated by
+    // discovery. initiate_lookup() populates coord_cache, and
+    // find_next_hop() consults it.
     let mut node = make_node();
     let transport_id = TransportId::new(1);
     let my_addr = *node.node_addr();
@@ -346,15 +345,15 @@ fn test_routing_route_cache_fallback() {
         .unwrap_or(0);
     assert!(node.coord_cache().get(&dest, now_ms).is_none());
 
-    // Without route_cache entry, should return None (same as before)
+    // Without coord_cache entry, should return None
     assert!(node.find_next_hop(&dest).is_none());
 
-    // Now populate route_cache (as discovery would do)
-    node.route_cache_mut().insert(dest, dest_coords, now_ms);
+    // Now populate coord_cache (as discovery would do)
+    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
-    // find_next_hop should succeed via route_cache fallback
+    // find_next_hop should succeed via coord_cache
     let result = node.find_next_hop(&dest);
-    assert!(result.is_some(), "Should route via route_cache fallback");
+    assert!(result.is_some(), "Should route via coord_cache");
     assert_eq!(
         result.unwrap().node_addr(),
         &peer_addr,

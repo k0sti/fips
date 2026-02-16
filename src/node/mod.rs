@@ -16,7 +16,7 @@ mod tree;
 mod tests;
 
 use crate::bloom::BloomState;
-use crate::cache::{CoordCache, RouteCache};
+use crate::cache::CoordCache;
 use crate::utils::index::IndexAllocator;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
@@ -215,10 +215,8 @@ pub struct Node {
     bloom_state: BloomState,
 
     // === Routing ===
-    /// Address -> coordinates cache (from session setup).
+    /// Address -> coordinates cache (from session setup and discovery).
     coord_cache: CoordCache,
-    /// Discovered routes (from discovery protocol).
-    route_cache: RouteCache,
     /// Recent discovery requests (dedup + reverse-path forwarding).
     /// Maps request_id → RecentRequest.
     recent_requests: HashMap<u64, RecentRequest>,
@@ -360,7 +358,6 @@ impl Node {
             config.node.cache.coord_size,
             config.node.cache.coord_ttl_secs * 1000,
         );
-        let route_cache = RouteCache::new(config.node.cache.route_size);
         let rl = &config.node.rate_limit;
         let msg1_rate_limiter = HandshakeRateLimiter::with_params(
             rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
@@ -379,7 +376,6 @@ impl Node {
             tree_state,
             bloom_state,
             coord_cache,
-            route_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
             links: HashMap::new(),
@@ -438,7 +434,6 @@ impl Node {
             config.node.cache.coord_size,
             config.node.cache.coord_ttl_secs * 1000,
         );
-        let route_cache = RouteCache::new(config.node.cache.route_size);
         let rl = &config.node.rate_limit;
         let msg1_rate_limiter = HandshakeRateLimiter::with_params(
             rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
@@ -457,7 +452,6 @@ impl Node {
             tree_state,
             bloom_state,
             coord_cache,
-            route_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
             links: HashMap::new(),
@@ -637,18 +631,6 @@ impl Node {
     /// Get mutable coordinate cache.
     pub fn coord_cache_mut(&mut self) -> &mut CoordCache {
         &mut self.coord_cache
-    }
-
-    // === Route Cache ===
-
-    /// Get the route cache (discovery protocol).
-    pub fn route_cache(&self) -> &RouteCache {
-        &self.route_cache
-    }
-
-    /// Get mutable route cache.
-    pub fn route_cache_mut(&mut self) -> &mut RouteCache {
-        &mut self.route_cache
     }
 
     // === TUN Interface ===
@@ -891,19 +873,22 @@ impl Node {
         let mut prefix = [0u8; 15];
         prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
         self.identity_cache.insert(prefix, (node_addr, pubkey, Self::now_ms()));
+        // LRU eviction
+        let max = self.config.node.cache.identity_size;
+        if self.identity_cache.len() > max
+            && let Some(oldest_key) = self.identity_cache.iter()
+                .min_by_key(|(_, (_, _, ts))| *ts)
+                .map(|(k, _)| *k)
+        {
+            self.identity_cache.remove(&oldest_key);
+        }
     }
 
     /// Look up a destination by FipsAddress prefix (bytes 1-15 of the IPv6 address).
-    /// Returns None if the entry has expired (lazy expiry).
     pub(crate) fn lookup_by_fips_prefix(&mut self, prefix: &[u8; 15]) -> Option<(NodeAddr, secp256k1::PublicKey)> {
-        let ttl_ms = self.config.node.cache.identity_ttl_secs * 1000;
-        let now_ms = Self::now_ms();
-        if let Some(&(addr, pk, registered_at)) = self.identity_cache.get(prefix) {
-            if now_ms.saturating_sub(registered_at) > ttl_ms {
-                self.identity_cache.remove(prefix);
-                return None;
-            }
-            Some((addr, pk))
+        if let Some(entry) = self.identity_cache.get_mut(prefix) {
+            entry.2 = Self::now_ms(); // LRU touch
+            Some((entry.0, entry.1))
         } else {
             None
         }
@@ -931,10 +916,10 @@ impl Node {
     /// 5. No route → `None`
     ///
     /// Both the bloom filter and tree routing paths require cached destination
-    /// coordinates (checked in `coord_cache` first, then `route_cache` as
-    /// fallback). Without coordinates, the node cannot make loop-free
-    /// forwarding decisions. The caller should signal `CoordsRequired` back
-    /// to the source when `None` is returned for a non-local destination.
+    /// coordinates (checked in `coord_cache`). Without coordinates, the node
+    /// cannot make loop-free forwarding decisions. The caller should signal
+    /// `CoordsRequired` back to the source when `None` is returned for a
+    /// non-local destination.
     pub fn find_next_hop(&mut self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
         // 1. Local delivery
         if dest_node_addr == self.node_addr() {
@@ -948,14 +933,12 @@ impl Node {
             return Some(peer);
         }
 
-        // Look up destination coords (required by both bloom and tree paths).
-        // Try coord_cache first (session-based), then route_cache (discovery-based).
+        // Look up cached destination coordinates (required by both bloom and tree paths).
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_coords = self.coord_cache.get_and_touch(dest_node_addr, now_ms)
-            .or_else(|| self.route_cache.get(dest_node_addr).map(|c| c.coords()))?.clone();
+        let dest_coords = self.coord_cache.get_and_touch(dest_node_addr, now_ms)?.clone();
 
         // 3. Bloom filter candidates — requires dest_coords for loop-free selection
         let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);

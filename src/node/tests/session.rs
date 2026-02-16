@@ -732,12 +732,6 @@ async fn test_session_100_nodes() {
     let min_coord = *coord_cache_sizes.iter().min().unwrap();
     let max_coord = *coord_cache_sizes.iter().max().unwrap();
 
-    let route_cache_sizes: Vec<usize> = nodes
-        .iter()
-        .map(|tn| tn.node.route_cache().len())
-        .collect();
-    let total_route_entries: usize = route_cache_sizes.iter().sum();
-
     // === Report ===
 
     eprintln!("\n  === Session 100-Node Test ===");
@@ -813,7 +807,6 @@ async fn test_session_100_nodes() {
         max_coord,
         total_coord_entries as f64 / NUM_NODES as f64
     );
-    eprintln!("  Route cache: total={}", total_route_entries);
 
     eprintln!("\n  --- Timing ---");
     eprintln!(
@@ -1307,37 +1300,45 @@ fn test_purge_idle_sessions_disabled_when_zero() {
 }
 
 // ============================================================================
-// Unit tests: Identity cache expiry
+// Unit tests: Identity cache
 // ============================================================================
 
 #[test]
-fn test_identity_cache_expiry() {
+fn test_identity_cache_lru_eviction() {
     let mut node = make_node();
-    // Use a short TTL (1s) and insert with an old timestamp
-    node.config.node.cache.identity_ttl_secs = 1;
+    node.config.node.cache.identity_size = 2;
 
-    let remote = Identity::generate();
-    let remote_addr = *remote.node_addr();
+    let id1 = Identity::generate();
+    let id2 = Identity::generate();
+    let id3 = Identity::generate();
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&remote_addr.as_bytes()[0..15]);
+    // Insert first two with explicit timestamps to ensure deterministic ordering
+    let mut prefix1 = [0u8; 15];
+    prefix1.copy_from_slice(&id1.node_addr().as_bytes()[0..15]);
+    node.identity_cache.insert(prefix1, (*id1.node_addr(), id1.pubkey_full(), 1000));
 
-    // Insert directly with a timestamp far in the past (time 0)
-    node.identity_cache.insert(prefix, (remote_addr, remote.pubkey_full(), 0));
+    let mut prefix2 = [0u8; 15];
+    prefix2.copy_from_slice(&id2.node_addr().as_bytes()[0..15]);
+    node.identity_cache.insert(prefix2, (*id2.node_addr(), id2.pubkey_full(), 2000));
 
-    // Lookup should find the entry expired (registered_at=0, TTL=1s, now >> 1s)
-    let result = node.lookup_by_fips_prefix(&prefix);
-    assert!(result.is_none(), "Expired identity should return None");
+    assert_eq!(node.identity_cache_len(), 2);
 
-    // Entry should have been removed from cache
-    assert!(!node.identity_cache.contains_key(&prefix),
-        "Expired entry should be removed from cache");
+    // Adding a third should evict the oldest (id1, timestamp 1000)
+    node.register_identity(*id3.node_addr(), id3.pubkey_full());
+    assert_eq!(node.identity_cache_len(), 2);
+
+    assert!(node.lookup_by_fips_prefix(&prefix1).is_none(),
+        "Oldest entry should have been evicted");
+
+    let mut prefix3 = [0u8; 15];
+    prefix3.copy_from_slice(&id3.node_addr().as_bytes()[0..15]);
+    assert!(node.lookup_by_fips_prefix(&prefix3).is_some(),
+        "Newest entry should be present");
 }
 
 #[test]
-fn test_identity_cache_survives_before_ttl() {
+fn test_identity_cache_lookup() {
     let mut node = make_node();
-    // Default 60s TTL — just registered, should be available
 
     let remote = Identity::generate();
     let remote_addr = *remote.node_addr();
@@ -1348,7 +1349,7 @@ fn test_identity_cache_survives_before_ttl() {
     prefix.copy_from_slice(&remote_addr.as_bytes()[0..15]);
 
     let result = node.lookup_by_fips_prefix(&prefix);
-    assert!(result.is_some(), "Fresh identity should be available");
+    assert!(result.is_some(), "Registered identity should be available");
 
     let (addr, pk) = result.unwrap();
     assert_eq!(addr, remote_addr);

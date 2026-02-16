@@ -110,7 +110,7 @@ async fn test_response_decode_error() {
     let from = make_node_addr(0xAA);
     node.handle_lookup_response(&from, &[0x00; 10]).await;
     // No panic, no route cached
-    assert!(node.route_cache.is_empty());
+    assert!(node.coord_cache().is_empty());
 }
 
 #[tokio::test]
@@ -134,10 +134,13 @@ async fn test_response_originator_caches_route() {
 
     node.handle_lookup_response(&from, payload).await;
 
-    // Route should be cached
-    assert!(node.route_cache.contains(&target));
-    let cached = node.route_cache.get(&target).unwrap();
-    assert_eq!(cached.coords(), &coords);
+    // Route should be cached in coord_cache
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(node.coord_cache().contains(&target, now_ms));
+    assert_eq!(node.coord_cache().get(&target, now_ms).unwrap(), &coords);
 }
 
 #[tokio::test]
@@ -169,8 +172,12 @@ async fn test_response_transit_needs_recent_request() {
     // (will fail silently since 0xDD is not an actual peer)
     node.handle_lookup_response(&from, payload).await;
 
-    // Should NOT cache in route_cache (we're transit, not originator)
-    assert!(!node.route_cache.contains(&target));
+    // Should NOT cache in coord_cache (we're transit, not originator)
+    let now_ms2 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(!node.coord_cache().contains(&target, now_ms2));
 }
 
 // ============================================================================
@@ -275,8 +282,12 @@ async fn test_request_target_found_generates_response() {
     }
 
     // Node0 should have cached node1's route (it originated the request)
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     assert!(
-        nodes[0].node.route_cache.contains(&node1_addr),
+        nodes[0].node.coord_cache().contains(&node1_addr, now_ms),
         "Node 0 should have cached node 1's route from LookupResponse"
     );
 
@@ -317,8 +328,12 @@ async fn test_request_three_node_chain() {
     );
 
     // Node0 should have cached node2's route
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     assert!(
-        nodes[0].node.route_cache.contains(&node2_addr),
+        nodes[0].node.coord_cache().contains(&node2_addr, now_ms),
         "Node 0 should have cached node 2's route through 3-node chain"
     );
 
@@ -436,13 +451,17 @@ async fn test_discovery_100_nodes() {
         }
     }
 
-    // Verify: each originator should have the target's coords in route_cache
+    // Verify: each originator should have the target's coords in coord_cache
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let mut resolved = 0usize;
     let mut failed = 0usize;
     let mut failed_pairs: Vec<(usize, usize)> = Vec::new();
 
     for &(src, dst) in &lookup_pairs {
-        if nodes[src].node.route_cache.contains(&all_addrs[dst]) {
+        if nodes[src].node.coord_cache().contains(&all_addrs[dst], now_ms) {
             resolved += 1;
         } else {
             failed += 1;
@@ -463,12 +482,12 @@ async fn test_discovery_100_nodes() {
         resolved as f64 / total_lookups as f64 * 100.0
     );
 
-    // Report route_cache stats across all nodes
-    let total_cached: usize = nodes.iter().map(|tn| tn.node.route_cache.len()).sum();
-    let min_cached = nodes.iter().map(|tn| tn.node.route_cache.len()).min().unwrap();
-    let max_cached = nodes.iter().map(|tn| tn.node.route_cache.len()).max().unwrap();
+    // Report coord_cache stats across all nodes
+    let total_cached: usize = nodes.iter().map(|tn| tn.node.coord_cache().len()).sum();
+    let min_cached = nodes.iter().map(|tn| tn.node.coord_cache().len()).min().unwrap();
+    let max_cached = nodes.iter().map(|tn| tn.node.coord_cache().len()).max().unwrap();
     eprintln!(
-        "  Route cache entries: total={} min={} max={} avg={:.1}",
+        "  Coord cache entries: total={} min={} max={} avg={:.1}",
         total_cached,
         min_cached,
         max_cached,

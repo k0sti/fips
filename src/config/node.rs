@@ -116,12 +116,9 @@ pub struct CacheConfig {
     /// Coord cache entry TTL in seconds (`node.cache.coord_ttl_secs`).
     #[serde(default = "CacheConfig::default_coord_ttl_secs")]
     pub coord_ttl_secs: u64,
-    /// Max entries in route cache (`node.cache.route_size`).
-    #[serde(default = "CacheConfig::default_route_size")]
-    pub route_size: usize,
-    /// Identity cache entry TTL in seconds (`node.cache.identity_ttl_secs`).
-    #[serde(default = "CacheConfig::default_identity_ttl_secs")]
-    pub identity_ttl_secs: u64,
+    /// Max entries in identity cache (`node.cache.identity_size`).
+    #[serde(default = "CacheConfig::default_identity_size")]
+    pub identity_size: usize,
 }
 
 impl Default for CacheConfig {
@@ -129,8 +126,7 @@ impl Default for CacheConfig {
         Self {
             coord_size: 50_000,
             coord_ttl_secs: 300,
-            route_size: 10_000,
-            identity_ttl_secs: 60,
+            identity_size: 10_000,
         }
     }
 }
@@ -138,8 +134,7 @@ impl Default for CacheConfig {
 impl CacheConfig {
     fn default_coord_size() -> usize { 50_000 }
     fn default_coord_ttl_secs() -> u64 { 300 }
-    fn default_route_size() -> usize { 10_000 }
-    fn default_identity_ttl_secs() -> u64 { 60 }
+    fn default_identity_size() -> usize { 10_000 }
 }
 
 /// Discovery protocol (`node.discovery.*`).
