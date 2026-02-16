@@ -54,6 +54,10 @@ pub(crate) struct SessionEntry {
     created_at: u64,
     /// Last activity timestamp (Unix milliseconds).
     last_activity: u64,
+    /// Remaining DataPackets that should include COORDS_PRESENT.
+    /// Initialized from config when session becomes Established;
+    /// reset on CoordsRequired receipt.
+    coords_warmup_remaining: u8,
 }
 
 impl SessionEntry {
@@ -70,6 +74,7 @@ impl SessionEntry {
             state: Some(state),
             created_at: now_ms,
             last_activity: now_ms,
+            coords_warmup_remaining: 0,
         }
     }
 
@@ -115,5 +120,16 @@ impl SessionEntry {
     /// Get last activity time.
     pub(crate) fn last_activity(&self) -> u64 {
         self.last_activity
+    }
+
+    /// Remaining DataPackets that should include COORDS_PRESENT.
+    pub(crate) fn coords_warmup_remaining(&self) -> u8 {
+        self.coords_warmup_remaining
+    }
+
+    /// Set the coords warmup counter (used on Established transition
+    /// and CoordsRequired reset).
+    pub(crate) fn set_coords_warmup_remaining(&mut self, value: u8) {
+        self.coords_warmup_remaining = value;
     }
 }

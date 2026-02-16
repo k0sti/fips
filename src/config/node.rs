@@ -231,6 +231,11 @@ pub struct SessionConfig {
     /// Established sessions with no activity for this duration are removed.
     #[serde(default = "SessionConfig::default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// Number of initial DataPackets per session that include COORDS_PRESENT
+    /// for transit cache warmup (`node.session.coords_warmup_packets`).
+    /// Also used as the reset count on CoordsRequired receipt.
+    #[serde(default = "SessionConfig::default_coords_warmup_packets")]
+    pub coords_warmup_packets: u8,
 }
 
 impl Default for SessionConfig {
@@ -240,6 +245,7 @@ impl Default for SessionConfig {
             pending_packets_per_dest: 16,
             pending_max_destinations: 256,
             idle_timeout_secs: 90,
+            coords_warmup_packets: 5,
         }
     }
 }
@@ -249,6 +255,7 @@ impl SessionConfig {
     fn default_pending_packets_per_dest() -> usize { 16 }
     fn default_pending_max_destinations() -> usize { 256 }
     fn default_idle_timeout_secs() -> u64 { 90 }
+    fn default_coords_warmup_packets() -> u8 { 5 }
 }
 
 /// Internal buffers (`node.buffers.*`).

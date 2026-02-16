@@ -1300,6 +1300,90 @@ fn test_purge_idle_sessions_disabled_when_zero() {
 }
 
 // ============================================================================
+// Unit tests: COORDS_PRESENT warmup counter
+// ============================================================================
+
+#[test]
+fn test_coords_warmup_counter_default_zero_on_new() {
+    use crate::noise::HandshakeState;
+
+    let identity_a = Identity::generate();
+    let identity_b = Identity::generate();
+
+    let handshake = HandshakeState::new_initiator(
+        identity_a.keypair(),
+        identity_b.pubkey_full(),
+    );
+
+    let entry = crate::node::session::SessionEntry::new(
+        *identity_b.node_addr(),
+        identity_b.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+    );
+
+    assert_eq!(entry.coords_warmup_remaining(), 0,
+        "Counter should be 0 for non-Established sessions");
+}
+
+#[test]
+fn test_coords_warmup_counter_set_and_get() {
+    let node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let mut entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+    );
+
+    assert_eq!(entry.coords_warmup_remaining(), 0);
+
+    entry.set_coords_warmup_remaining(5);
+    assert_eq!(entry.coords_warmup_remaining(), 5);
+
+    entry.set_coords_warmup_remaining(0);
+    assert_eq!(entry.coords_warmup_remaining(), 0);
+}
+
+#[test]
+fn test_coords_warmup_counter_decrement() {
+    let node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let mut entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+    );
+
+    entry.set_coords_warmup_remaining(3);
+
+    // Simulate the decrement pattern used in send_session_data
+    for expected in (0..3).rev() {
+        assert!(entry.coords_warmup_remaining() > 0);
+        entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
+        assert_eq!(entry.coords_warmup_remaining(), expected);
+    }
+
+    assert_eq!(entry.coords_warmup_remaining(), 0,
+        "Counter should reach 0 after N decrements");
+}
+
+#[test]
+fn test_coords_warmup_config_default() {
+    let config = crate::config::Config::new();
+    assert_eq!(config.node.session.coords_warmup_packets, 5,
+        "Default coords_warmup_packets should be 5");
+}
+
+// ============================================================================
 // Unit tests: Identity cache
 // ============================================================================
 

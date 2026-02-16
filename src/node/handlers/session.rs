@@ -211,6 +211,7 @@ impl Node {
         };
 
         entry.set_state(EndToEndState::Established(session));
+        entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
         entry.touch(Self::now_ms());
         self.sessions.insert(*src_addr, entry);
 
@@ -278,6 +279,7 @@ impl Node {
                 }
             };
             entry.set_state(EndToEndState::Established(noise_session));
+            entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
             debug!(src = %src_addr, "Session established (responder, on first data)");
         }
 
@@ -341,6 +343,18 @@ impl Node {
         );
 
         self.maybe_initiate_lookup(&msg.dest_addr).await;
+
+        // Reset coords warmup counter so the next N packets include
+        // COORDS_PRESENT, re-warming transit caches along the path.
+        if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
+            let n = self.config.node.session.coords_warmup_packets;
+            entry.set_coords_warmup_remaining(n);
+            debug!(
+                dest = %msg.dest_addr,
+                warmup_packets = n,
+                "Reset coords warmup counter after CoordsRequired"
+            );
+        }
     }
 
     /// Handle a PathBroken error signal from a transit router.
@@ -449,8 +463,20 @@ impl Node {
             reason: format!("session encrypt failed: {}", e),
         })?;
 
-        // Build DataPacket and wrap in SessionDatagram
-        let data_packet = DataPacket::new(ciphertext);
+        // Check warmup counter and decrement (while entry is still borrowed)
+        let include_coords = entry.coords_warmup_remaining() > 0;
+        if include_coords {
+            entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
+        }
+
+        // Build DataPacket, conditionally with coordinates
+        let mut data_packet = DataPacket::new(ciphertext);
+        if include_coords {
+            let my_coords = self.tree_state.my_coords().clone();
+            let dest_coords = self.get_dest_coords(dest_addr);
+            data_packet = data_packet.with_coords(my_coords, dest_coords);
+        }
+
         let my_addr = *self.node_addr();
         let datagram = SessionDatagram::new(my_addr, *dest_addr, data_packet.encode())
             .with_hop_limit(self.config.node.session.default_hop_limit);
