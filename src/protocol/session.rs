@@ -482,20 +482,21 @@ impl DataFlags {
 }
 
 /// DataPacket header size in bytes (excluding payload).
-/// msg_type(1) + flags(1) + payload_length(2) = 4
+/// msg_type(1) + flags(1) + counter(8) + payload_length(2) = 12
 /// (Addressing and hop_limit are in the SessionDatagram envelope.)
-pub const DATA_HEADER_SIZE: usize = 4;
+pub const DATA_HEADER_SIZE: usize = 12;
 
 /// Encrypted application data carried inside a SessionDatagram.
 ///
 /// ## Wire Format (minimal, no coordinates)
 ///
-/// | Offset | Field          | Size    | Description                |
-/// |--------|----------------|---------|----------------------------|
-/// | 0      | msg_type       | 1 byte  | 0x10                       |
-/// | 1      | flags          | 1 byte  | Bit 0: COORDS_PRESENT      |
-/// | 2      | payload_length | 2 bytes | u16 LE                     |
-/// | 4      | payload        | variable| Encrypted application data |
+/// | Offset | Field          | Size    | Description                   |
+/// |--------|----------------|---------|-------------------------------|
+/// | 0      | msg_type       | 1 byte  | 0x10                          |
+/// | 1      | flags          | 1 byte  | Bit 0: COORDS_PRESENT         |
+/// | 2      | counter        | 8 bytes | u64 LE, encryption nonce      |
+/// | 10     | payload_length | 2 bytes | u16 LE                        |
+/// | 12     | payload        | variable| Encrypted application data    |
 ///
 /// ## Wire Format (with coordinates, when COORDS_PRESENT is set)
 ///
@@ -503,9 +504,10 @@ pub const DATA_HEADER_SIZE: usize = 4;
 /// |--------|------------------|---------|----------------------------|
 /// | 0      | msg_type         | 1 byte  | 0x10                       |
 /// | 1      | flags            | 1 byte  | 0x01 (COORDS_PRESENT)      |
-/// | 2      | payload_length   | 2 bytes | u16 LE                     |
-/// | 4      | src_coords_count | 2 bytes | u16 LE                     |
-/// | 6      | src_coords       | 16 × n  | Source coordinates          |
+/// | 2      | counter          | 8 bytes | u64 LE, encryption nonce   |
+/// | 10     | payload_length   | 2 bytes | u16 LE                     |
+/// | 12     | src_coords_count | 2 bytes | u16 LE                     |
+/// | 14     | src_coords       | 16 × n  | Source coordinates          |
 /// | ...    | dest_coords_count| 2 bytes | u16 LE                     |
 /// | ...    | dest_coords      | 16 × m  | Destination coordinates    |
 /// | ...    | payload          | variable| Encrypted application data |
@@ -513,6 +515,9 @@ pub const DATA_HEADER_SIZE: usize = 4;
 pub struct DataPacket {
     /// Packet flags.
     pub flags: DataFlags,
+    /// Encryption counter (used as nonce for ChaCha20Poly1305).
+    /// Transmitted on the wire so the receiver can decrypt out-of-order packets.
+    pub counter: u64,
     /// Payload data (end-to-end encrypted application data).
     pub payload: Vec<u8>,
     /// Source coordinates (present when COORDS_PRESENT flag is set).
@@ -522,10 +527,11 @@ pub struct DataPacket {
 }
 
 impl DataPacket {
-    /// Create a new data packet.
-    pub fn new(payload: Vec<u8>) -> Self {
+    /// Create a new data packet with the given counter and payload.
+    pub fn new(counter: u64, payload: Vec<u8>) -> Self {
         Self {
             flags: DataFlags::new(),
+            counter,
             payload,
             src_coords: None,
             dest_coords: None,
@@ -576,6 +582,7 @@ impl DataPacket {
         let mut buf = Vec::new();
         buf.push(SessionMessageType::DataPacket.to_byte());
         buf.push(self.flags.to_byte());
+        buf.extend_from_slice(&self.counter.to_le_bytes());
         let payload_len = self.payload.len() as u16;
         buf.extend_from_slice(&payload_len.to_le_bytes());
         if self.flags.coords_present {
@@ -596,15 +603,20 @@ impl DataPacket {
 
     /// Decode from wire format (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        if payload.len() < 3 {
+        // flags(1) + counter(8) + payload_len(2) = 11
+        if payload.len() < 11 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 3,
+                expected: 11,
                 got: payload.len(),
             });
         }
         let flags = DataFlags::from_byte(payload[0]);
-        let payload_len = u16::from_le_bytes([payload[1], payload[2]]) as usize;
-        let mut offset = 3;
+        let counter = u64::from_le_bytes([
+            payload[1], payload[2], payload[3], payload[4],
+            payload[5], payload[6], payload[7], payload[8],
+        ]);
+        let payload_len = u16::from_le_bytes([payload[9], payload[10]]) as usize;
+        let mut offset = 11;
 
         let (src_coords, dest_coords) = if flags.coords_present {
             let (src, consumed) = decode_optional_coords(&payload[offset..])?;
@@ -626,6 +638,7 @@ impl DataPacket {
 
         Ok(Self {
             flags,
+            counter,
             payload: data,
             src_coords,
             dest_coords,
@@ -854,17 +867,17 @@ mod tests {
 
     #[test]
     fn test_data_packet_size() {
-        let packet = DataPacket::new(vec![0u8; 100]);
+        let packet = DataPacket::new(0, vec![0u8; 100]);
 
-        // 4 byte header + 100 byte payload
-        assert_eq!(packet.total_size(), 104);
-        assert_eq!(packet.header_size(), 4);
+        // 12 byte header + 100 byte payload
+        assert_eq!(packet.total_size(), 112);
+        assert_eq!(packet.header_size(), 12);
         assert_eq!(packet.payload_len(), 100);
     }
 
     #[test]
     fn test_data_packet_builder() {
-        let packet = DataPacket::new(vec![1, 2, 3])
+        let packet = DataPacket::new(0, vec![1, 2, 3])
             .with_flags(DataFlags::from_byte(0x80));
 
         assert_eq!(packet.flags.to_byte(), 0x80);
@@ -983,7 +996,7 @@ mod tests {
     #[test]
     fn test_data_packet_encode_decode_minimal() {
         let data = vec![1, 2, 3, 4, 5];
-        let packet = DataPacket::new(data.clone());
+        let packet = DataPacket::new(42, data.clone());
 
         let encoded = packet.encode();
         assert_eq!(encoded[0], 0x10); // msg_type
@@ -991,6 +1004,7 @@ mod tests {
 
         let decoded = DataPacket::decode(&encoded[1..]).unwrap();
         assert_eq!(decoded.payload, data);
+        assert_eq!(decoded.counter, 42);
         assert!(!decoded.flags.coords_present);
         assert!(decoded.src_coords.is_none());
         assert!(decoded.dest_coords.is_none());
@@ -1001,7 +1015,7 @@ mod tests {
         let data = vec![0xFF; 100];
         let src = make_coords(&[1, 2, 0]);
         let dest = make_coords(&[3, 4, 0]);
-        let packet = DataPacket::new(data.clone())
+        let packet = DataPacket::new(1000, data.clone())
             .with_coords(src.clone(), dest.clone());
 
         let encoded = packet.encode();
@@ -1010,6 +1024,7 @@ mod tests {
 
         let decoded = DataPacket::decode(&encoded[1..]).unwrap();
         assert_eq!(decoded.payload, data);
+        assert_eq!(decoded.counter, 1000);
         assert!(decoded.flags.coords_present);
         assert_eq!(decoded.src_coords.unwrap(), src);
         assert_eq!(decoded.dest_coords.unwrap(), dest);
@@ -1086,7 +1101,7 @@ mod tests {
     #[test]
     fn test_data_packet_large_payload() {
         let data = vec![0x42; 65000];
-        let packet = DataPacket::new(data.clone());
+        let packet = DataPacket::new(0, data.clone());
 
         let encoded = packet.encode();
         let decoded = DataPacket::decode(&encoded[1..]).unwrap();

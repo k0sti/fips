@@ -65,9 +65,9 @@ const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADE
 /// - Noise encryption tag: 16 bytes
 /// - Encrypted frame header: 13 bytes
 /// - SessionDatagram header: 34 bytes
-/// - DataPacket header: 4 bytes
+/// - DataPacket header: 12 bytes (msg_type + flags + counter + payload_len)
 /// - Coordinates (worst case): ~60 bytes (2 coords with depth 3 each)
-pub const FIPS_OVERHEAD: u16 = 16 + 13 + 34 + 4 + 60; // 127 bytes
+pub const FIPS_OVERHEAD: u16 = 16 + 13 + 34 + 12 + 60; // 135 bytes
 
 /// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
 ///

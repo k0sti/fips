@@ -194,7 +194,7 @@ async fn test_coord_cache_warming_data_packet_with_coords() {
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
 
-    let data = DataPacket::new(vec![1, 2, 3, 4])
+    let data = DataPacket::new(0, vec![1, 2, 3, 4])
         .with_coords(src_coords.clone(), dest_coords.clone());
     let data_payload = data.encode();
 
@@ -229,7 +229,7 @@ async fn test_coord_cache_warming_opaque_data_packet() {
     let dest_addr = make_node_addr(0x02);
 
     // DataPacket without COORDS_PRESENT — no coords to cache
-    let data = DataPacket::new(vec![1, 2, 3, 4]);
+    let data = DataPacket::new(0, vec![1, 2, 3, 4]);
     let data_payload = data.encode();
 
     let dg = SessionDatagram::new(src_addr, dest_addr, data_payload);

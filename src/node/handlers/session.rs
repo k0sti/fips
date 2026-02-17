@@ -293,10 +293,10 @@ impl Node {
             }
         };
 
-        let plaintext = match session.decrypt(&packet.payload) {
+        let plaintext = match session.decrypt_with_replay_check(&packet.payload, packet.counter) {
             Ok(pt) => pt,
             Err(e) => {
-                debug!(error = %e, src = %src_addr, "Session decryption failed");
+                debug!(error = %e, src = %src_addr, counter = packet.counter, "Session decryption failed");
                 self.sessions.insert(*src_addr, entry);
                 return;
             }
@@ -473,6 +473,9 @@ impl Node {
             }
         };
 
+        // Get counter before encrypting (encrypt will increment it)
+        let counter = session.current_send_counter();
+
         // Encrypt with session key
         let ciphertext = session.encrypt(plaintext).map_err(|e| NodeError::SendFailed {
             node_addr: *dest_addr,
@@ -485,8 +488,8 @@ impl Node {
             entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
         }
 
-        // Build DataPacket, conditionally with coordinates
-        let mut data_packet = DataPacket::new(ciphertext);
+        // Build DataPacket with explicit counter for replay protection
+        let mut data_packet = DataPacket::new(counter, ciphertext);
         if include_coords {
             let my_coords = self.tree_state.my_coords().clone();
             let dest_coords = self.get_dest_coords(dest_addr);
