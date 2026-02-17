@@ -148,6 +148,22 @@ impl Node {
             // Clean up pending lookup tracking
             self.pending_lookups.remove(&target);
 
+            // If an established session exists, reset the warmup counter.
+            // Discovery has completed and transit nodes along the response
+            // path now have fresh coords. Reset warmup so the next N
+            // DataPackets include COORDS_PRESENT to re-warm the forward path.
+            if let Some(entry) = self.sessions.get_mut(&target)
+                && entry.is_established()
+            {
+                let n = self.config.node.session.coords_warmup_packets;
+                entry.set_coords_warmup_remaining(n);
+                debug!(
+                    dest = %target,
+                    warmup_packets = n,
+                    "Reset coords warmup after discovery for existing session"
+                );
+            }
+
             // If we have pending TUN packets for this target, retry session
             // initiation. The coord_cache now has coords, so find_next_hop()
             // should succeed.

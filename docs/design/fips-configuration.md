@@ -122,13 +122,12 @@ Controls flood-based node discovery (LookupRequest/LookupResponse).
 
 ### Spanning Tree (`node.tree.*`)
 
-Controls tree construction, root announcement, and parent selection.
+Controls tree construction and parent selection.
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `node.tree.root_refresh_secs` | u64 | `1800` | Root self-announcement interval (30 minutes) |
-| `node.tree.announce_min_interval_ms` | u64 | `500` | Per-peer TreeAnnounce rate limit |
-| `node.tree.parent_switch_threshold` | usize | `1` | Min depth improvement required to switch parents |
+| Parameter                              | Type  | Default | Description                                      |
+|----------------------------------------|-------|---------|--------------------------------------------------|
+| `node.tree.announce_min_interval_ms`   | u64   | `500`   | Per-peer TreeAnnounce rate limit                 |
+| `node.tree.parent_switch_threshold`    | usize | `1`     | Min depth improvement required to switch parents |
 
 ### Bloom Filter (`node.bloom.*`)
 
@@ -293,7 +292,6 @@ node:
     timeout_secs: 10
     recent_expiry_secs: 10
   tree:
-    root_refresh_secs: 1800
     announce_min_interval_ms: 500
     parent_switch_threshold: 1
   bloom:

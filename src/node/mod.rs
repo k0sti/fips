@@ -9,6 +9,7 @@ mod handlers;
 mod lifecycle;
 mod retry;
 mod rate_limit;
+mod routing_error_rate_limit;
 pub(crate) mod session;
 pub(crate) mod wire;
 mod tree;
@@ -21,6 +22,7 @@ use crate::utils::index::IndexAllocator;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use self::rate_limit::HandshakeRateLimiter;
+use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 use crate::transport::{
     Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportHandle, TransportId,
 };
@@ -314,10 +316,8 @@ pub struct Node {
     msg1_rate_limiter: HandshakeRateLimiter,
     /// Rate limiter for ICMP Packet Too Big messages.
     icmp_rate_limiter: IcmpRateLimiter,
-
-    // === Tree Announce Timing ===
-    /// Last time we refreshed our root announcement (Unix seconds).
-    last_root_refresh_secs: u64,
+    /// Rate limiter for routing error signals (CoordsRequired / PathBroken).
+    routing_error_rate_limiter: RoutingErrorRateLimiter,
 
     // === Connection Retry ===
     /// Retry state for peers whose outbound connections have failed.
@@ -406,7 +406,7 @@ impl Node {
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
-            last_root_refresh_secs: 0,
+            routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
             retry_pending: HashMap::new(),
         })
     }
@@ -482,7 +482,7 @@ impl Node {
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
-            last_root_refresh_secs: 0,
+            routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
             retry_pending: HashMap::new(),
         }
     }

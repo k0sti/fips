@@ -9,8 +9,6 @@ use crate::NodeAddr;
 use super::{Node, NodeError};
 use tracing::{debug, info, warn};
 
-// Root refresh interval is configurable via `node.tree.root_refresh_secs`.
-
 impl Node {
     /// Build a TreeAnnounce from our current tree state.
     fn build_tree_announce(&self) -> Result<TreeAnnounce, NodeError> {
@@ -257,35 +255,9 @@ impl Node {
 
     /// Periodic tree maintenance, called from the tick handler.
     ///
-    /// - Sends pending rate-limited announces
-    /// - Refreshes root announcement every ROOT_REFRESH_INTERVAL_SECS (if root)
+    /// Sends pending rate-limited announces.
     pub(super) async fn check_tree_state(&mut self) {
-        // Send any pending rate-limited announces
         self.send_pending_tree_announces().await;
-
-        // Root refresh
-        if self.tree_state.is_root() && !self.peers.is_empty() {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let root_refresh_secs = self.config.node.tree.root_refresh_secs;
-            if now_secs.saturating_sub(self.last_root_refresh_secs) >= root_refresh_secs {
-                let new_seq = self.tree_state.my_declaration().sequence() + 1;
-                self.tree_state
-                    .set_parent(*self.identity.node_addr(), new_seq, now_secs);
-                if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
-                    warn!(error = %e, "Failed to sign root refresh declaration");
-                    return;
-                }
-                self.tree_state.recompute_coords();
-                self.last_root_refresh_secs = now_secs;
-
-                debug!(seq = new_seq, "Root refresh: announcing to all peers");
-                self.send_tree_announce_to_all().await;
-            }
-        }
     }
 
     /// Handle tree state cleanup when a peer is removed.

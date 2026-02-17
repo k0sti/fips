@@ -170,9 +170,6 @@ impl DiscoveryConfig {
 /// Spanning tree (`node.tree.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeConfig {
-    /// Root self-announcement interval in seconds (`node.tree.root_refresh_secs`).
-    #[serde(default = "TreeConfig::default_root_refresh_secs")]
-    pub root_refresh_secs: u64,
     /// Per-peer TreeAnnounce rate limit in ms (`node.tree.announce_min_interval_ms`).
     #[serde(default = "TreeConfig::default_announce_min_interval_ms")]
     pub announce_min_interval_ms: u64,
@@ -184,7 +181,6 @@ pub struct TreeConfig {
 impl Default for TreeConfig {
     fn default() -> Self {
         Self {
-            root_refresh_secs: 1800,
             announce_min_interval_ms: 500,
             parent_switch_threshold: 1,
         }
@@ -192,7 +188,6 @@ impl Default for TreeConfig {
 }
 
 impl TreeConfig {
-    fn default_root_refresh_secs() -> u64 { 1800 }
     fn default_announce_min_interval_ms() -> u64 { 500 }
     fn default_parent_switch_threshold() -> usize { 1 }
 }

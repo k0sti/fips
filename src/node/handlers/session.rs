@@ -48,7 +48,7 @@ impl Node {
                 self.handle_coords_required(inner).await;
             }
             Some(SessionMessageType::PathBroken) => {
-                self.handle_path_broken(inner);
+                self.handle_path_broken(inner).await;
             }
             None => {
                 debug!(msg_type, "Unknown session message type");
@@ -360,8 +360,9 @@ impl Node {
     /// Handle a PathBroken error signal from a transit router.
     ///
     /// The router has coordinates but still can't route to the destination.
-    /// Invalidate cached coordinates and consider re-discovery.
-    fn handle_path_broken(&mut self, inner: &[u8]) {
+    /// Invalidate cached coordinates, trigger re-discovery, and reset the
+    /// COORDS_PRESENT warmup counter so the new path gets warmed.
+    async fn handle_path_broken(&mut self, inner: &[u8]) {
         let msg = match PathBroken::decode(inner) {
             Ok(m) => m,
             Err(e) => {
@@ -378,6 +379,21 @@ impl Node {
 
         // Invalidate stale cached coordinates
         self.coord_cache.remove(&msg.dest_addr);
+
+        // Trigger re-discovery to get fresh coordinates
+        self.maybe_initiate_lookup(&msg.dest_addr).await;
+
+        // Reset coords warmup counter so the next N packets include
+        // COORDS_PRESENT, re-warming transit caches along the new path.
+        if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
+            let n = self.config.node.session.coords_warmup_packets;
+            entry.set_coords_warmup_remaining(n);
+            debug!(
+                dest = %msg.dest_addr,
+                warmup_packets = n,
+                "Reset coords warmup counter after PathBroken"
+            );
+        }
     }
 
     // === Session Initiation (Send Path) ===

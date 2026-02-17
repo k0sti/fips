@@ -181,6 +181,11 @@ impl Node {
     /// If we can't route the error back to the source either, drop silently.
     /// No cascading errors.
     async fn send_routing_error(&mut self, original: &SessionDatagram) {
+        // Rate limit: one error signal per destination per 100ms
+        if !self.routing_error_rate_limiter.should_send(&original.dest_addr) {
+            return;
+        }
+
         let my_addr = *self.node_addr();
 
         let now_ms = std::time::SystemTime::now()
