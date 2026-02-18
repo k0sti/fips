@@ -24,7 +24,8 @@ Build the binary and copy it to the docker context:
 ```bash
 docker compose --profile mesh build
 docker compose --profile mesh up -d
-./scripts/ping-test.sh mesh      # 20/20 expected
+./scripts/ping-test.sh mesh      # 20/20 expected (with response times)
+./scripts/iperf-test.sh mesh     # bandwidth test
 docker compose --profile mesh down
 ```
 
@@ -33,7 +34,8 @@ docker compose --profile mesh down
 ```bash
 docker compose --profile chain build
 docker compose --profile chain up -d
-./scripts/ping-test.sh chain     # 6/6 expected
+./scripts/ping-test.sh chain     # 6/6 expected (with response times)
+./scripts/iperf-test.sh chain    # bandwidth test
 docker compose --profile chain down
 ```
 
@@ -74,6 +76,68 @@ The ping test covers:
 - Adjacent hops: A→B, B→C (1 hop each)
 - Multi-hop: A→C (2 hops), A→D (3 hops), A→E (4 hops)
 - Reverse: E→A (4 hops)
+
+## Performance Testing
+
+The `iperf-test.sh` script measures bandwidth between nodes using iperf3:
+
+```bash
+./scripts/iperf-test.sh [mesh|chain]
+```
+
+The test runs iperf3 with the following parameters:
+- Duration: 10 seconds (`-t 10`)
+- Parallel streams: 8 (`-P 8`)
+- Protocol: TCP over IPv6
+
+This exercises the full FIPS stack including encryption, routing, and TUN device performance.
+
+## Configuration Management
+
+Node configurations are generated from templates to ensure consistency across all nodes:
+
+### File Structure
+
+```
+configs/
+├── node.template.yaml          # Single template for all node configs
+├── topologies/
+│   ├── mesh.yaml              # Mesh topology definition (reference)
+│   └── chain.yaml             # Chain topology definition (reference)
+└── [mesh|chain]/              # Original hand-written configs (deprecated)
+
+generated-configs/              # Auto-generated configs (gitignored)
+├── mesh/
+│   ├── node-a.yaml
+│   ├── node-b.yaml
+│   └── ...
+└── chain/
+    ├── node-a.yaml
+    └── ...
+```
+
+### Topology Files
+
+The `configs/topologies/` directory contains YAML files documenting each network topology:
+- Node identities (nsec, npub)
+- Docker IP addresses
+- Peer connections for each node
+
+These files serve as reference documentation and make it easy to understand and modify network topologies.
+
+### Generating Configs
+
+The `scripts/generate-configs.sh` script reads the topology definitions (embedded in the script) and generates node configs into `generated-configs/`:
+
+```bash
+./scripts/generate-configs.sh [mesh|chain|all]
+```
+
+The build script (`scripts/build.sh`) automatically regenerates configs before building Docker images.
+
+### Modifying Topologies
+
+To change network topologies, edit the `get_mesh_peers()` or `get_chain_peers()` functions in `generate-configs.sh`, then update the corresponding YAML file in `configs/topologies/` for documentation.
 
 ## Node Identities
 

@@ -27,7 +27,7 @@ services:
     hostname: node-a
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/mesh/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mesh/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.10
@@ -39,7 +39,7 @@ services:
     hostname: node-b
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/mesh/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mesh/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.11
@@ -51,7 +51,7 @@ services:
     hostname: node-c
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/mesh/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mesh/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.12
@@ -63,7 +63,7 @@ services:
     hostname: node-d
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/mesh/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mesh/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.13
@@ -75,7 +75,7 @@ services:
     hostname: node-e
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/mesh/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mesh/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.14
@@ -88,7 +88,7 @@ services:
     hostname: node-a
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/chain/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/chain/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.10
@@ -100,7 +100,7 @@ services:
     hostname: node-b
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/chain/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/chain/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.11
@@ -112,7 +112,7 @@ services:
     hostname: node-c
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/chain/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/chain/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.12
@@ -124,7 +124,7 @@ services:
     hostname: node-d
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/chain/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/chain/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.13
@@ -136,7 +136,7 @@ services:
     hostname: node-e
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/chain/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/chain/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.14

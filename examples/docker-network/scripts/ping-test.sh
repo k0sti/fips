@@ -7,9 +7,12 @@
 #   ./scripts/ping-test.sh mesh
 set -e
 
+# Exit entire script on Ctrl+C
+trap 'echo ""; echo "Test interrupted"; exit 130' INT
+
 PROFILE="${1:-mesh}"
-COUNT=3
-TIMEOUT=10
+COUNT=1
+TIMEOUT=5
 PASSED=0
 FAILED=0
 
@@ -26,8 +29,15 @@ ping_test() {
     local label="$3"
 
     echo -n "  $label ... "
-    if docker exec "fips-$from" ping6 -c "$COUNT" -W "$TIMEOUT" "${to_npub}.fips" > /dev/null 2>&1; then
-        echo "OK"
+    local output
+    if output=$(docker exec "fips-$from" ping6 -c "$COUNT" -W "$TIMEOUT" "${to_npub}.fips" 2>&1); then
+        # Extract round-trip time from ping output
+        local rtt=$(echo "$output" | grep -oE 'time=[0-9.]+' | cut -d= -f2)
+        if [ -n "$rtt" ]; then
+            echo "OK (${rtt}ms)"
+        else
+            echo "OK"
+        fi
         PASSED=$((PASSED + 1))
     else
         echo "FAIL"
@@ -39,8 +49,8 @@ echo "=== FIPS Ping Test ($PROFILE topology) ==="
 echo ""
 
 # Wait for nodes to converge
-echo "Waiting 5s for mesh convergence..."
-sleep 5
+echo "Waiting 3s for mesh convergence..."
+sleep 3
 
 if [ "$PROFILE" = "mesh" ]; then
     # Sparse mesh topology: A-B, B-C, C-D, D-E, E-A, A-D

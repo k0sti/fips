@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        iproute2 iputils-ping dnsutils openssh-client openssh-server && \
+        iproute2 iputils-ping dnsutils openssh-client openssh-server iperf3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Setup SSH server with no authentication (test only!)
@@ -16,5 +16,5 @@ RUN mkdir -p /var/run/sshd && \
 COPY fips /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips
 
-# Start SSH server in background, then run FIPS
-ENTRYPOINT ["/bin/bash", "-c", "/usr/sbin/sshd && exec fips --config /etc/fips/fips.yaml"]
+# Start SSH server and iperf3 server in background, then run FIPS
+ENTRYPOINT ["/bin/bash", "-c", "/usr/sbin/sshd && iperf3 -s -D && exec fips --config /etc/fips/fips.yaml"]

@@ -53,4 +53,7 @@ fi
 
 echo "Done. Binary at $DOCKER_DIR/fips"
 echo ""
+echo "Generating node configurations from templates..."
+"$SCRIPT_DIR/generate-configs.sh" all
+echo ""
 echo "Next: cd $DOCKER_DIR && docker compose --profile mesh build"
