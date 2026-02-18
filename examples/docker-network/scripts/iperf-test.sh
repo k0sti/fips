@@ -65,7 +65,7 @@ iperf_test() {
             # Check if we got valid results
             if echo "$output" | grep -q "sender"; then
                 # Extract and display results (get SUM line for aggregate bandwidth)
-                local bandwidth=$(echo "$output" | grep "\[SUM\].*sender" | tail -1 | awk '{print $(NF-2), $(NF-1)}')
+                local bandwidth=$(echo "$output" | grep "\[SUM\].*sender" | tail -1 | awk '{for(i=1;i<=NF;i++) if($i ~ /bits\/sec/) {print $(i-1), $i; exit}}')
                 echo "OK"
                 echo "Bandwidth: $bandwidth"
                 PASSED=$((PASSED + 1))
