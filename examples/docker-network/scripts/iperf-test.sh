@@ -86,7 +86,7 @@ echo ""
 echo "Waiting 3s for mesh convergence..."
 sleep 3
 
-if [ "$PROFILE" = "mesh" ]; then
+if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     # Test key paths in mesh topology
     echo ""
     echo "Testing mesh topology paths:"
