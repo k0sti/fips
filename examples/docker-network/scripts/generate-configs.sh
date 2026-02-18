@@ -129,9 +129,20 @@ generate_config() {
     echo "$config" > "$output_file"
 }
 
-# Associative arrays for resolved keys (populated in generate_topology)
-declare -A RESOLVED_NSEC
-declare -A RESOLVED_NPUB
+# Key storage for bash 3.2 compatibility (using prefixed variables instead of associative arrays)
+# Usage: set_key NSEC a "value" / get_key NSEC a
+set_key() {
+    local prefix="$1"
+    local key="$2"
+    local value="$3"
+    eval "${prefix}_${key}=\"${value}\""
+}
+
+get_key() {
+    local prefix="$1"
+    local key="$2"
+    eval "echo \"\$${prefix}_${key}\""
+}
 
 generate_topology() {
     local topology_name="$1"
