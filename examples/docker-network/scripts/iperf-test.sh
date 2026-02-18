@@ -95,31 +95,31 @@ if [ "$PROFILE" = "mesh" ]; then
     echo ""
     echo "Testing mesh topology paths:"
     
-    # Direct peer links
-    iperf_test node-a node-d "$NPUB_D" "A → D (direct peer)"
-    iperf_test node-a node-e "$NPUB_E" "A → E (direct peer)"
-    
-    # Multi-hop paths
-    iperf_test node-a node-b "$NPUB_B" "A → B (multi-hop)"
-    iperf_test node-a node-c "$NPUB_C" "A → C (multi-hop)"
-    
-    # Reverse test
-    iperf_test node-e node-a "$NPUB_A" "E → A (direct peer)"
+    # Direct peer links (client on A, server on D/E)
+    iperf_test node-d node-a "$NPUB_D" "A → D (direct peer)"
+    iperf_test node-e node-a "$NPUB_E" "A → E (direct peer)"
+
+    # Multi-hop paths (client on A, server on B/C)
+    iperf_test node-b node-a "$NPUB_B" "A → B (multi-hop)"
+    iperf_test node-c node-a "$NPUB_C" "A → C (multi-hop)"
+
+    # Reverse test (client on E, server on A)
+    iperf_test node-a node-e "$NPUB_A" "E → A (direct peer)"
 
 elif [ "$PROFILE" = "chain" ]; then
     echo ""
     echo "Testing chain topology paths:"
     
-    # Adjacent hop
-    iperf_test node-a node-b "$NPUB_B" "A → B (1 hop)"
-    
-    # Multi-hop tests
-    iperf_test node-a node-c "$NPUB_C" "A → C (2 hops)"
-    iperf_test node-a node-d "$NPUB_D" "A → D (3 hops)"
-    iperf_test node-a node-e "$NPUB_E" "A → E (4 hops)"
-    
-    # Reverse multi-hop
-    iperf_test node-e node-a "$NPUB_A" "E → A (4 hops)"
+    # Adjacent hop (client on A, server on B)
+    iperf_test node-b node-a "$NPUB_B" "A → B (1 hop)"
+
+    # Multi-hop tests (client on A, server on C/D/E)
+    iperf_test node-c node-a "$NPUB_C" "A → C (2 hops)"
+    iperf_test node-d node-a "$NPUB_D" "A → D (3 hops)"
+    iperf_test node-e node-a "$NPUB_E" "A → E (4 hops)"
+
+    # Reverse multi-hop (client on E, server on A)
+    iperf_test node-a node-e "$NPUB_A" "E → A (4 hops)"
 fi
 
 echo ""

@@ -86,11 +86,62 @@ The `iperf-test.sh` script measures bandwidth between nodes using iperf3:
 ```
 
 The test runs iperf3 with the following parameters:
+
 - Duration: 10 seconds (`-t 10`)
 - Parallel streams: 8 (`-P 8`)
 - Protocol: TCP over IPv6
 
 This exercises the full FIPS stack including encryption, routing, and TUN device performance.
+
+## Network Impairment
+
+The `netem.sh` script simulates adverse network conditions using `tc`/`netem`
+on all running containers:
+
+```bash
+./scripts/netem.sh [mesh|chain] <apply|remove|status> [options]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--delay <ms>` | Fixed delay in milliseconds |
+| `--jitter <ms>` | Delay variation (requires `--delay`) |
+| `--loss <percent>` | Packet loss percentage |
+| `--loss-corr <percent>` | Loss correlation for bursty loss |
+| `--duplicate <percent>` | Packet duplication percentage |
+| `--reorder <percent>` | Packet reordering probability (requires `--delay`) |
+| `--corrupt <percent>` | Bit-level corruption percentage |
+
+### Presets
+
+| Preset | Parameters |
+|--------|------------|
+| `lossy` | 5% loss, 25% correlation |
+| `congested` | 50ms delay, 20ms jitter, 2% loss |
+| `terrible` | 100ms delay, 40ms jitter, 10% loss, 1% dup, 5% reorder |
+
+### Examples
+
+```bash
+# Apply 50ms delay with 5% packet loss
+./scripts/netem.sh mesh apply --delay 50 --loss 5
+
+# Use a preset
+./scripts/netem.sh chain apply --preset congested
+
+# Check current rules
+./scripts/netem.sh mesh status
+
+# Remove all impairment
+./scripts/netem.sh mesh remove
+```
+
+Rules are applied to egress on each container's `eth0` interface. With all
+containers impaired equally, both directions of every link see the effect.
+The script uses `tc qdisc replace` so it can be re-run safely without
+removing rules first.
 
 ## Configuration Management
 
@@ -119,6 +170,7 @@ generated-configs/              # Auto-generated configs (gitignored)
 ### Topology Files
 
 The `configs/topologies/` directory contains YAML files documenting each network topology:
+
 - Node identities (nsec, npub)
 - Docker IP addresses
 - Peer connections for each node
