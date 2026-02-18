@@ -1,10 +1,17 @@
 #!/bin/bash
-# Build the FIPS binary and copy it to the docker build context.
+# Build the FIPS binary, generate configs, and build Docker images.
 # Supports cross-compilation from macOS to Linux using cargo-zigbuild.
+# Usage: ./build.sh [topology] [mesh-name]
+#   topology:  mesh, mesh-public, chain, etc. (default: mesh)
+#   mesh-name: optional; derives unique node identities via sha256(mesh-name|node-id)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DOCKER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Topology to use (default: mesh)
+TOPOLOGY="${1:-mesh}"
+MESH_NAME="${2:-}"
 
 # Find project root (directory containing Cargo.toml)
 PROJECT_ROOT="$(cd "$DOCKER_DIR/../.." && pwd)"
@@ -13,6 +20,8 @@ if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
     echo "Expected layout: <project-root>/examples/docker-network/scripts/build.sh" >&2
     exit 1
 fi
+
+echo "Using topology: $TOPOLOGY"
 
 # Detect host OS
 UNAME_S=$(uname -s)
@@ -54,6 +63,9 @@ fi
 echo "Done. Binary at $DOCKER_DIR/fips"
 echo ""
 echo "Generating node configurations from templates..."
-"$SCRIPT_DIR/generate-configs.sh" all
+"$SCRIPT_DIR/generate-configs.sh" "$TOPOLOGY" $MESH_NAME
 echo ""
-echo "Next: cd $DOCKER_DIR && docker compose --profile mesh build"
+echo "Building Docker images..."
+docker compose --profile "$TOPOLOGY" build
+echo ""
+echo "Ready: docker compose --profile $TOPOLOGY up -d"

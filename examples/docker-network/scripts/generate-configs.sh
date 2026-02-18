@@ -1,7 +1,10 @@
 #!/bin/bash
 # Generate FIPS node configuration files from template and topology definition.
 #
-# Usage: ./generate-configs.sh [mesh|chain|all]
+# Usage: ./generate-configs.sh <topology> [mesh-name]
+#   topology:  mesh, mesh-public, chain, etc.
+#   mesh-name: optional; when given, docker node identities are derived
+#              deterministically via sha256(mesh-name|node-id)
 
 set -e
 
@@ -9,79 +12,97 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$SCRIPT_DIR/../configs"
 GENERATED_DIR="$SCRIPT_DIR/../generated-configs"
 TEMPLATE_FILE="$CONFIG_DIR/node.template.yaml"
+DERIVE_KEYS="$SCRIPT_DIR/derive-keys.py"
 
-# Node data lookup functions
-get_nsec() {
-    case "$1" in
-        a) echo "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" ;;
-        b) echo "b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0" ;;
-        c) echo "c102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fc0" ;;
-        d) echo "d102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fd0" ;;
-        e) echo "e102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fe0" ;;
-    esac
+# Parse topology YAML to extract node attributes
+# Usage: get_node_attr <topology_file> <node_id> <attr_name>
+get_node_attr() {
+    local topology_file="$1"
+    local node_id="$2"
+    local attr="$3"
+    # Handle both docker_ip and external_ip as "address"
+    if [ "$attr" = "address" ]; then
+        local ip=$(grep -A 10 "^  $node_id:" "$topology_file" | grep "docker_ip:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/')
+        if [ -z "$ip" ]; then
+            ip=$(grep -A 10 "^  $node_id:" "$topology_file" | grep "external_ip:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/')
+        fi
+        echo "$ip"
+    else
+        grep -A 10 "^  $node_id:" "$topology_file" | grep "${attr}:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/'
+    fi
 }
 
-get_npub() {
-    case "$1" in
-        a) echo "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m" ;;
-        b) echo "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le" ;;
-        c) echo "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6" ;;
-        d) echo "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl" ;;
-        e) echo "npub1wf8akf8lu2zdkjkmwhl75pqvven654mpv4sz2x2tprl5265mgrzq8nhak4" ;;
-    esac
+# Check if a node is external (has external_ip instead of docker_ip)
+is_external_node() {
+    local topology_file="$1"
+    local node_id="$2"
+    local docker_ip=$(grep -A 10 "^  $node_id:" "$topology_file" | grep "docker_ip:" | head -1)
+    [ -z "$docker_ip" ]
 }
 
-get_docker_ip() {
-    case "$1" in
-        a) echo "172.20.0.10" ;;
-        b) echo "172.20.0.11" ;;
-        c) echo "172.20.0.12" ;;
-        d) echo "172.20.0.13" ;;
-        e) echo "172.20.0.14" ;;
-    esac
+# Get peers list from topology
+get_peers() {
+    local topology_file="$1"
+    local node_id="$2"
+    grep -A 10 "^  $node_id:" "$topology_file" | grep "peers:" | head -1 | \
+        sed 's/.*: *\[\(.*\)\].*/\1/' | \
+        sed 's/,/ /g' | \
+        tr -s ' ' | \
+        sed 's/^ *//;s/ *$//'
 }
 
-get_mesh_peers() {
-    case "$1" in
-        a) echo "d e" ;;
-        b) echo "c" ;;
-        c) echo "b d e" ;;
-        d) echo "a c e" ;;
-        e) echo "a c d" ;;
-    esac
+# Get all node IDs from topology file
+get_node_ids() {
+    local topology_file="$1"
+    grep "^  [a-z][a-z0-9_-]*:" "$topology_file" | sed 's/^  \([a-z][a-z0-9_-]*\):.*/\1/'
 }
 
-get_chain_peers() {
-    case "$1" in
-        a) echo "b" ;;
-        b) echo "a c" ;;
-        c) echo "b d" ;;
-        d) echo "c e" ;;
-        e) echo "d" ;;
-    esac
+# Resolve nsec and npub for a node.
+# If MESH_NAME is set and node is not external, derive from mesh-name.
+# Otherwise use the value from the topology YAML.
+# Output: two lines: nsec=<hex>\nnpub=<bech32>
+resolve_keys() {
+    local topology_file="$1"
+    local node_id="$2"
+
+    if [ -n "$MESH_NAME" ] && ! is_external_node "$topology_file" "$node_id"; then
+        python3 "$DERIVE_KEYS" "$MESH_NAME" "$node_id"
+    else
+        local nsec
+        local npub
+        nsec=$(get_node_attr "$topology_file" "$node_id" "nsec")
+        npub=$(get_node_attr "$topology_file" "$node_id" "npub")
+        echo "nsec=$nsec"
+        echo "npub=$npub"
+    fi
 }
 
 generate_peer_block() {
-    local peer_id="$1"
+    local topology_file="$1"
+    local peer_id="$2"
+
+    local peer_npub="${RESOLVED_NPUB[$peer_id]}"
+    local peer_ip=$(get_node_attr "$topology_file" "$peer_id" "address")
+
     cat <<EOF
-  - npub: "$(get_npub "$peer_id")"
+  - npub: "$peer_npub"
     alias: "node-$peer_id"
     addresses:
       - transport: udp
-        addr: "$(get_docker_ip "$peer_id"):4000"
+        addr: "$peer_ip:4000"
     connect_policy: auto_connect
 EOF
 }
 
 generate_config() {
     local node_id="$1"
-    local topology="$2"
-    local peers="$3"
-    
-    local node_name=$(echo "$node_id" | tr '[:lower:]' '[:upper:]')
-    local template
-    template=$(cat "$TEMPLATE_FILE")
-    
+    local topology_file="$2"
+    local output_file="$3"
+
+    local node_npub="${RESOLVED_NPUB[$node_id]}"
+    local node_nsec="${RESOLVED_NSEC[$node_id]}"
+    local peers=$(get_peers "$topology_file" "$node_id")
+
     # Generate peers section
     local peers_config=""
     if [ -n "$peers" ]; then
@@ -89,67 +110,97 @@ generate_config() {
             if [ -n "$peers_config" ]; then
                 peers_config="$peers_config"$'\n'
             fi
-            peers_config="$peers_config$(generate_peer_block "$peer_id")"
+            peers_config="$peers_config$(generate_peer_block "$topology_file" "$peer_id")"
         done
     else
         peers_config="  []"
     fi
-    
-    # Replace template variables
+
+    # Read and process template
+    local template=$(cat "$TEMPLATE_FILE")
     local config="$template"
-    config="${config//\{\{NODE_NAME\}\}/$node_name}"
-    config="${config//\{\{TOPOLOGY\}\}/$topology}"
-    config="${config//\{\{NPUB\}\}/$(get_npub "$node_id")}"
-    config="${config//\{\{NSEC\}\}/$(get_nsec "$node_id")}"
+
+    config="${config//\{\{NODE_NAME\}\}/$(echo "$node_id" | tr '[:lower:]' '[:upper:]')}"
+    config="${config//\{\{TOPOLOGY\}\}/$(basename "$topology_file" .yaml)}"
+    config="${config//\{\{NPUB\}\}/$node_npub}"
+    config="${config//\{\{NSEC\}\}/$node_nsec}"
     config="${config//\{\{PEERS\}\}/$peers_config}"
-    
-    echo "$config"
+
+    echo "$config" > "$output_file"
 }
 
+# Associative arrays for resolved keys (populated in generate_topology)
+declare -A RESOLVED_NSEC
+declare -A RESOLVED_NPUB
+
 generate_topology() {
-    local topology="$1"
-    local output_dir="$GENERATED_DIR/$topology"
-    
-    echo "Generating $topology topology configs..."
+    local topology_name="$1"
+    local topology_file="$CONFIG_DIR/topologies/$topology_name.yaml"
+    local output_dir="$GENERATED_DIR/$topology_name"
+
+    if [ ! -f "$topology_file" ]; then
+        echo "Error: Topology file not found: $topology_file"
+        exit 1
+    fi
+
+    echo "Generating $topology_name topology configs..."
+    if [ -n "$MESH_NAME" ]; then
+        echo "  Mesh name: $MESH_NAME (deriving docker node identities)"
+    fi
     mkdir -p "$output_dir"
-    
-    for node_id in a b c d e; do
-        local peers
-        if [ "$topology" = "mesh" ]; then
-            peers=$(get_mesh_peers "$node_id")
-        else
-            peers=$(get_chain_peers "$node_id")
+
+    # Phase 1: resolve keys for all nodes
+    for node_id in $(get_node_ids "$topology_file"); do
+        local keys=""
+        keys=$(resolve_keys "$topology_file" "$node_id")
+        RESOLVED_NSEC[$node_id]=$(echo "$keys" | grep "^nsec=" | cut -d= -f2)
+        RESOLVED_NPUB[$node_id]=$(echo "$keys" | grep "^npub=" | cut -d= -f2)
+    done
+
+    # Phase 2: generate config files for docker nodes
+    for node_id in $(get_node_ids "$topology_file"); do
+        # Skip external nodes (they don't need Docker config files)
+        if is_external_node "$topology_file" "$node_id"; then
+            echo "  ⚠ Skipping $node_id (external node)"
+            continue
         fi
-        
+
         local output_file="$output_dir/node-$node_id.yaml"
-        generate_config "$node_id" "$topology" "$peers" > "$output_file"
+        generate_config "$node_id" "$topology_file" "$output_file"
         echo "  ✓ Generated $output_file"
     done
+
+    # Phase 3: write npubs.env
+    local env_file="$GENERATED_DIR/npubs.env"
+    echo "# Generated by generate-configs.sh (topology: $topology_name)" > "$env_file"
+    if [ -n "$MESH_NAME" ]; then
+        echo "# Mesh name: $MESH_NAME" >> "$env_file"
+    fi
+    for node_id in $(get_node_ids "$topology_file"); do
+        local var_name="NPUB_$(echo "$node_id" | tr '[:lower:]' '[:upper:]')"
+        echo "${var_name}=${RESOLVED_NPUB[$node_id]}" >> "$env_file"
+    done
+    echo "  ✓ Generated $env_file"
 }
 
 main() {
-    local requested="${1:-all}"
-    
-    case "$requested" in
-        mesh)
-            generate_topology "mesh"
-            ;;
-        chain)
-            generate_topology "chain"
-            ;;
-        all)
-            generate_topology "mesh"
-            generate_topology "chain"
-            ;;
-        *)
-            echo "Error: Unknown topology '$requested'"
-            echo "Usage: $0 [mesh|chain|all]"
-            exit 1
-            ;;
-    esac
-    
+    local requested="${1:-mesh}"
+
+    # Support any topology file in the topologies directory
+    if [ -f "$CONFIG_DIR/topologies/$requested.yaml" ]; then
+        generate_topology "$requested"
+    else
+        echo "Error: Unknown topology '$requested'"
+        echo "Usage: $0 <topology> [mesh-name]"
+        echo ""
+        echo "Available topologies:"
+        ls -1 "$CONFIG_DIR/topologies/" | sed 's/\.yaml$//' | sed 's/^/  - /'
+        exit 1
+    fi
+
     echo ""
     echo "✓ All configurations generated successfully!"
 }
 
+MESH_NAME="${2:-}"
 main "$@"

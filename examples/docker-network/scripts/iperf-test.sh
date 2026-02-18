@@ -23,19 +23,15 @@ PARALLEL=8
 PASSED=0
 FAILED=0
 
-# Node identities
-NPUB_A="npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
-NPUB_B="npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
-NPUB_C="npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
-NPUB_D="npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
-NPUB_E="npub1wf8akf8lu2zdkjkmwhl75pqvven654mpv4sz2x2tprl5265mgrzq8nhak4"
-
-# FIPS IPv6 addresses (derived from npubs)
-ADDR_A="fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b"
-ADDR_B="fd8e:302c:287e:b48d:e5b7:6eee:e8a7:4f1e"
-ADDR_C="fdac:a221:4069:5044:e0e5:7a5f:5a0f:4d43"
-ADDR_D="fdb6:8411:a191:6d48:c5f7:e5f5:e5a5:2a50"
-ADDR_E="fded:7dee:d386:a546:e5f7:e5f5:e5a5:2a50"
+# Node identities (from generated env file)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../generated-configs/npubs.env"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "Error: $ENV_FILE not found. Run generate-configs.sh first." >&2
+    exit 1
+fi
+# shellcheck source=../generated-configs/npubs.env
+source "$ENV_FILE"
 
 iperf_test() {
     local server_node="$1"

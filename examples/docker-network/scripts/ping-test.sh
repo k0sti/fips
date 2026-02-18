@@ -16,12 +16,15 @@ TIMEOUT=5
 PASSED=0
 FAILED=0
 
-# Node identities
-NPUB_A="npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
-NPUB_B="npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
-NPUB_C="npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
-NPUB_D="npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
-NPUB_E="npub1wf8akf8lu2zdkjkmwhl75pqvven654mpv4sz2x2tprl5265mgrzq8nhak4"
+# Node identities (from generated env file)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../generated-configs/npubs.env"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "Error: $ENV_FILE not found. Run generate-configs.sh first." >&2
+    exit 1
+fi
+# shellcheck source=../generated-configs/npubs.env
+source "$ENV_FILE"
 
 ping_test() {
     local from="$1"
@@ -52,7 +55,7 @@ echo ""
 echo "Waiting 3s for mesh convergence..."
 sleep 3
 
-if [ "$PROFILE" = "mesh" ]; then
+if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     # Sparse mesh topology: A-B, B-C, C-D, D-E, E-A, A-D
     # Test all 20 directed pairs (5 nodes × 4 targets each)
     echo ""

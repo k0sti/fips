@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         iproute2 iputils-ping dnsutils openssh-client openssh-server iperf3 \
-        dnsmasq curl python3 && \
+        dnsmasq curl python3 rsync && \
     rm -rf /var/lib/apt/lists/*
 
 # Setup SSH server with no authentication (test only!)
@@ -27,5 +27,8 @@ RUN printf '%s\n' \
 COPY fips /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips
 
-# Start dnsmasq, SSH server, and iperf3 in background, then run FIPS
-ENTRYPOINT ["/bin/bash", "-c", "dnsmasq && /usr/sbin/sshd && iperf3 -s -D && exec fips --config /etc/fips/fips.yaml"]
+# Static web page served via Python HTTP server
+RUN printf 'Fuck IPs!\n' > /root/index.html
+
+# Start dnsmasq, SSH server, iperf3, and HTTP server in background, then run FIPS
+ENTRYPOINT ["/bin/bash", "-c", "dnsmasq && /usr/sbin/sshd && iperf3 -s -D && python3 -m http.server 8000 -d /root -b :: &>/dev/null & exec fips --config /etc/fips/fips.yaml"]
