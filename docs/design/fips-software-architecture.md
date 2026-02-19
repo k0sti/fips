@@ -157,6 +157,49 @@ retransmission timers, and acknowledgment tracking — complexity that gossip
 protocols avoid by sending full state periodically. A lost TreeAnnounce is
 simply replaced by the next one, which carries the same or newer state.
 
+## Metrics Measurement Protocol
+
+MMP is instantiated at two independent layers, each with its own
+configuration and state:
+
+- **Link layer**: One `MmpPeerState` per `ActivePeer`. Measures per-hop
+  quality using the FLP counter and timestamp fields that already exist on
+  every encrypted frame. No additional message overhead beyond periodic
+  SenderReport/ReceiverReport exchanges.
+
+- **Session layer**: One `MmpSessionState` per established `SessionEntry`.
+  Measures end-to-end quality using the FSP counter and timestamp fields.
+  Reports are encrypted and forwarded through every transit link.
+
+Both instantiations use identical algorithms (SRTT, loss, jitter, dual EWMA,
+OWD trend) but are configured independently via `node.mmp.*` and
+`node.session_mmp.*`. This allows operators to run Full mode on links (low
+overhead, single hop) while using Lightweight mode for sessions (reduces
+bandwidth cost on transit links).
+
+### Peer Display Names
+
+The node maintains a `peer_aliases` map (`HashMap<NodeAddr, String>`) populated
+from the `peers[].alias` field in configuration. All log output uses
+`peer_display_name()` to show human-readable names (e.g., "node-b") instead
+of truncated public keys, improving operator experience.
+
+### Buffer Sizing Chain
+
+Under high forwarding load, back-pressure propagates through:
+
+1. **UDP socket receive buffer** (`transports.udp.recv_buf_size`, default 2 MB) —
+   kernel-level buffer for incoming datagrams.
+2. **Packet channel** (`node.buffers.packet_channel`, default 1024) — async
+   channel from transport receive loop to the node's RX event loop.
+3. **Processing** — decryption, routing decision, forwarding.
+
+If the packet channel fills (RX loop can't keep up), the transport receive
+loop blocks, and the kernel receive buffer absorbs bursts. If the kernel
+buffer also fills, incoming datagrams are silently dropped
+(`RcvbufErrors` in `/proc/net/snmp`). The 2 MB default socket buffer was
+chosen to handle ~85 MB/s forwarding throughput without kernel drops.
+
 ## Bounded State Principle
 
 FIPS nodes maintain state proportional to O(P × D), where P is the number

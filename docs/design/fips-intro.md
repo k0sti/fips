@@ -58,6 +58,10 @@ alone, the network self-organizes:
 - **Routing decisions** are made locally at each hop, using only the node's
   immediate peers and cached coordinate information
 
+Each peer link and end-to-end session actively measures RTT, loss, jitter, and
+goodput through a lightweight in-band Metrics Measurement Protocol (MMP),
+providing operator visibility and a foundation for future quality-aware routing.
+
 The result is a network that builds itself from the bottom up, heals around
 failures automatically, and scales without central coordination. Adding a node
 is as simple as connecting to one existing peer — the network integrates the

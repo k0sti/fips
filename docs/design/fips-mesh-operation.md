@@ -181,8 +181,9 @@ through to greedy tree routing (functional but suboptimal).
 When bloom filters identify multiple candidate peers, they are ranked by a
 composite key:
 
-1. **link_cost** — Per-link quality metric (currently constant; designed for
-   future ETX or similar metrics)
+1. **link_cost** — Per-link quality metric. ETX is computed from bidirectional
+   delivery ratios in MMP metrics but is not yet wired into `find_next_hop()`
+   candidate ranking; link cost remains constant in the current implementation.
 2. **tree_distance** — Coordinate-based distance to destination through this
    peer
 3. **node_addr** — Deterministic tie-breaker
@@ -392,6 +393,10 @@ source.
 Both error types are rate-limited at transit nodes: maximum one error per
 destination per 100ms. This prevents storms during topology changes when many
 packets to the same destination hit the same routing failure simultaneously.
+
+Error signals (CoordsRequired, PathBroken) are handled asynchronously outside
+the packet receive path, allowing the RX loop to continue processing without
+blocking on discovery or session repair.
 
 ### Error Routing Limitation
 

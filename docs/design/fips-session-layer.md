@@ -159,6 +159,13 @@ encrypted message includes:
 Sessions that see no traffic for a configurable duration (default 90s) are
 torn down. When traffic resumes, a new session is established automatically.
 
+Only DataPacket (message type 0x10) send/receive and session establishment
+reset `last_activity`. MMP traffic — SenderReport, ReceiverReport, and
+PathMtuNotification — does not reset the idle timer. This means a session
+carrying only MMP reports and no application data will still tear down after
+`node.session.idle_timeout_secs`. MMP reports continue flowing until the
+session is torn down, providing final measurement data for the teardown log.
+
 The idle timeout is deliberately shorter than the coordinate cache TTL (300s).
 This ordering ensures that when traffic stops and the session tears down, the
 transit node coordinate caches are still warm when a new session is established.
@@ -375,6 +382,71 @@ When traffic stops: the session tears down at 90s. When traffic resumes: DNS
 re-resolves the identity, a fresh SessionSetup carries coordinates, and transit
 node caches (still within their 300s TTL) are re-warmed.
 
+## Session-Layer MMP
+
+Each established session runs its own Metrics Measurement Protocol instance,
+providing end-to-end quality metrics independent of the number of hops.
+
+### Relationship to Link-Layer MMP
+
+Session-layer MMP uses the same report wire format (SenderReport 0x11,
+ReceiverReport 0x12) and identical algorithms as link-layer MMP, but with
+two key differences:
+
+1. **End-to-end routing**: Session reports are encrypted and forwarded through
+   every transit link. A 3-hop session generates report traffic on all 3 links,
+   making bandwidth cost proportional to path length.
+2. **Independent configuration**: The `node.session_mmp.*` parameters are
+   separate from `node.mmp.*`, allowing operators to run a lighter mode for
+   sessions (e.g., Lightweight) while keeping Full mode on links.
+
+### Metrics
+
+The same metrics as link-layer MMP: SRTT, loss rate, jitter, goodput, OWD
+trend, ETX, and dual EWMA trends. Session MMP additionally tracks observed
+path MTU.
+
+### Report Intervals
+
+Session-layer report intervals are higher than link-layer to account for
+bandwidth cost: clamped to [500ms, 10s] with a cold-start interval of 1s
+(vs. link-layer [100ms, 2s] with 500ms cold-start).
+
+### Path MTU Tracking
+
+PathMtuNotification (message type 0x13) provides end-to-end path MTU
+feedback:
+
+1. The source sets `path_mtu` in each SessionDatagram envelope to its
+   outbound link MTU.
+2. Each transit node applies `min(current, transport.mtu())` before
+   forwarding.
+3. The destination receives the forward-path minimum and sends a
+   PathMtuNotification (2-byte body: u16 LE path_mtu) back to the source.
+4. The source applies the notification with hysteresis:
+   - **Decrease**: immediate (take lower value).
+   - **Increase**: requires 3 consecutive higher-value notifications spanning
+     at least 2 × notification interval.
+5. Notifications are sent on first measurement, on any decrease, and
+   periodically at `max(10s, 5 × SRTT)`.
+
+### Idle Timeout Interaction
+
+MMP reports (SenderReport, ReceiverReport) and PathMtuNotification do **not**
+reset the session idle timer. Only application data (DataPacket, type 0x10)
+resets `last_activity`. This ensures sessions with no application traffic
+tear down after `node.session.idle_timeout_secs` (default 90s), while MMP
+continues providing measurement data up to the teardown moment.
+
+### Operator Logging
+
+Session metrics are logged at info level (configurable via
+`node.session_mmp.log_interval_secs`, default 30s):
+
+```text
+MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms goodput=71.3MB/s mtu=1472 tx_pkts=1234 rx_pkts=5678
+```
+
 ## Implementation Status
 
 | Feature | Status |
@@ -384,7 +456,7 @@ node caches (still within their 300s TTL) are re-warmed.
 | Explicit counter replay protection | **Implemented** |
 | CP warmup-then-reactive | **Implemented** |
 | FSP wire format (prefix, AAD, inner header) | **Implemented** |
-| Session-layer MMP report types | **Implemented** (wire format) |
+| Session-layer MMP | **Implemented** |
 | Identity cache (LRU-only) | **Implemented** |
 | Coordinate cache (unified, TTL + refresh) | **Implemented** |
 | Session idle timeout | **Implemented** |
@@ -394,7 +466,7 @@ node caches (still within their 300s TTL) are re-warmed.
 | Flush coord cache on parent change | **Implemented** |
 | Rekey | Planned |
 | Path MTU tracking (FLP SessionDatagram field) | **Implemented** |
-| Path MTU notification (end-to-end echo) | Planned |
+| Path MTU notification (end-to-end echo) | **Implemented** |
 
 ## References
 

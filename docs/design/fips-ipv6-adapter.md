@@ -283,7 +283,7 @@ TUN device creation requires `CAP_NET_ADMIN`. Options:
 | Per-destination route MTU (netlink) | Planned |
 | Transit MTU error signal | Planned |
 | Path MTU tracking (SessionDatagram field) | **Implemented** |
-| Path MTU notification (end-to-end echo) | Future direction |
+| Path MTU notification (end-to-end echo) | **Implemented** |
 | Endpoint fragmentation/reassembly | Future direction |
 
 ## Design Considerations
@@ -296,8 +296,10 @@ Two complementary mechanisms support full PMTUD:
    is implemented at the FLP level. The source sets it to its outbound link MTU
    minus overhead; each transit node applies
    `min(current, own_outbound_mtu - overhead)`. The destination receives the
-   forward-path minimum. A session-layer echo (PathMtuNotification, 2 bytes
-   inside encryption) to return the value to the source is a future direction.
+   forward-path minimum. PathMtuNotification is handled at the session layer;
+   the destination sends the observed forward-path MTU back to the source,
+   which applies it with decrease-immediate / increase-requires-3-consecutive
+   hysteresis.
 
 2. **Reactive**: When a transit node cannot forward a packet (MTU exceeded), it
    sends an error signal back to the source. This handles the in-flight gap

@@ -204,6 +204,41 @@ For internet-connected nodes, UDP/IP is the recommended transport:
 Raw IP with a custom protocol number would be simpler but is blocked by most
 NAT devices and firewalls, limiting deployment to networks without NAT.
 
+### Socket Buffer Sizing
+
+The default Linux UDP receive buffer (`net.core.rmem_default`, typically
+212 KB) is insufficient for high-throughput forwarding. At ~85 MB/s, a 212 KB
+buffer fills in ~2.5 ms; any stall in the async receive loop (decryption,
+routing, forwarding overhead) causes the kernel to silently drop incoming
+datagrams.
+
+FIPS uses the `socket2` crate to configure socket buffers at bind time,
+before the receive loop starts:
+
+| Parameter        | Default | Description                          |
+| ---------------- | ------- | ------------------------------------ |
+| `recv_buf_size`  | 2 MB    | `SO_RCVBUF` — kernel receive buffer  |
+| `send_buf_size`  | 2 MB    | `SO_SNDBUF` — kernel send buffer     |
+
+Linux internally doubles the requested value (to account for kernel
+bookkeeping overhead), so requesting 2 MB yields 4 MB actual buffer space.
+The kernel silently clamps to `net.core.rmem_max` if the request exceeds it.
+
+**Host requirement**: `net.core.rmem_max` and `net.core.wmem_max` must be
+set to at least the requested buffer size on the host. For Docker containers,
+this must be configured on the Docker host (containers share the host kernel).
+Verify with:
+
+```text
+sysctl net.core.rmem_max net.core.wmem_max
+```
+
+Actual buffer sizes are logged at startup:
+
+```text
+UDP transport started local_addr=0.0.0.0:4000 recv_buf=4194304 send_buf=4194304
+```
+
 ## Discovery
 
 Discovery determines that a FIPS-capable endpoint is reachable at a given

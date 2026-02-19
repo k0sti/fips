@@ -128,8 +128,8 @@ Minimum frame: 37 bytes (empty body)
 | Type | Message | Description |
 | ---- | ------- | ----------- |
 | 0x00 | SessionDatagram | Encapsulated session-layer payload for forwarding |
-| 0x01 | SenderReport | MMP sender-side report (reserved) |
-| 0x02 | ReceiverReport | MMP receiver-side report (reserved) |
+| 0x01 | SenderReport | MMP sender-side metrics report (48 bytes) |
+| 0x02 | ReceiverReport | MMP receiver-side metrics report (68 bytes) |
 | 0x10 | TreeAnnounce | Spanning tree state announcement |
 | 0x20 | FilterAnnounce | Bloom filter reachability update |
 | 0x30 | LookupRequest | Coordinate discovery request |
@@ -396,6 +396,50 @@ Orderly link teardown with reason code.
 | 0x07 | Timeout | Keepalive or stale detection timeout |
 | 0xFF | Other | Unspecified reason |
 
+### SenderReport (0x01)
+
+Sent by the frame sender to provide interval-based transmission statistics.
+
+| Offset | Field | Size | Encoding |
+| ------ | ----- | ---- | -------- |
+| 0 | msg_type | 1 | `0x01` |
+| 1 | reserved | 3 | Zero |
+| 4 | interval_start_counter | 8 | u64 LE — first counter in this interval |
+| 12 | interval_end_counter | 8 | u64 LE — last counter in this interval |
+| 20 | interval_start_timestamp | 4 | u32 LE — timestamp at interval start |
+| 24 | interval_end_timestamp | 4 | u32 LE — timestamp at interval end |
+| 28 | interval_bytes_sent | 4 | u32 LE — payload bytes sent in interval |
+| 32 | cumulative_packets_sent | 8 | u64 LE — total packets sent on this link |
+| 40 | cumulative_bytes_sent | 8 | u64 LE — total bytes sent on this link |
+
+**Total: 48 bytes.**
+
+### ReceiverReport (0x02)
+
+Sent by the frame receiver to provide loss, jitter, and timing feedback.
+
+| Offset | Field | Size | Encoding |
+| ------ | ----- | ---- | -------- |
+| 0 | msg_type | 1 | `0x02` |
+| 1 | reserved | 3 | Zero |
+| 4 | highest_counter | 8 | u64 LE — highest counter value received |
+| 12 | cumulative_packets_recv | 8 | u64 LE — total packets received |
+| 20 | cumulative_bytes_recv | 8 | u64 LE — total bytes received |
+| 28 | timestamp_echo | 4 | u32 LE — echoed sender timestamp for RTT |
+| 32 | dwell_time | 2 | u16 LE — time between receive and echo (ms) |
+| 34 | max_burst_loss | 2 | u16 LE — largest loss burst in interval |
+| 36 | mean_burst_loss | 2 | u16 LE — mean burst length (u8.8 fixed-point) |
+| 38 | reserved | 2 | Zero |
+| 40 | jitter | 4 | u32 LE — interarrival jitter (microseconds) |
+| 44 | ecn_ce_count | 4 | u32 LE — cumulative ECN-CE marked packets |
+| 48 | owd_trend | 4 | i32 LE — one-way delay trend (µs/s, signed) |
+| 52 | burst_loss_count | 4 | u32 LE — number of loss bursts in interval |
+| 56 | cumulative_reorder_count | 4 | u32 LE — total reordered packets |
+| 60 | interval_packets_recv | 4 | u32 LE — packets received in interval |
+| 64 | interval_bytes_recv | 4 | u32 LE — bytes received in interval |
+
+**Total: 68 bytes.**
+
 ## Session-Layer Message Formats
 
 Session-layer messages are carried as the payload of a SessionDatagram (0x00).
@@ -489,6 +533,11 @@ Message types 0x10-0x13 are carried inside the AEAD ciphertext (dispatched
 by the `msg_type` field in the encrypted inner header). Types 0x20-0x21 are
 plaintext error signals (U flag set, no encryption).
 
+Session-layer SenderReport (0x11) and ReceiverReport (0x12) use the same
+body format as their link-layer counterparts (0x01 and 0x02). The msg_type
+byte in the body matches the link-layer value; dispatch to the correct layer
+happens at the session level based on the FSP message type.
+
 ### SessionSetup (phase 0x1)
 
 Establishes a session and warms transit coordinate caches.
@@ -526,6 +575,16 @@ Encoded with FSP prefix: ver=0, phase=0x2, flags=0, payload_len.
 Application data (typically IPv6 payload). This is the `msg_type` byte
 inside the encrypted inner header — there is no separate DataPacket struct.
 The body after the inner header is delivered directly to the TUN interface.
+
+### PathMtuNotification (0x13)
+
+Sent by the destination to report the observed forward-path MTU.
+
+| Offset | Field | Size | Encoding |
+| ------ | ----- | ---- | -------- |
+| 0 | path_mtu | 2 | u16 LE — minimum MTU observed along the forward path |
+
+**Total body: 2 bytes** (plus FSP common prefix + encrypted header + AEAD tag).
 
 ### CoordsRequired (0x20)
 

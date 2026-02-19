@@ -311,8 +311,8 @@ FLP defines eight message types carried inside encrypted frames:
 | 0x30 | LookupRequest | Coordinate discovery — flood toward destination |
 | 0x31 | LookupResponse | Coordinate discovery — response with coordinates |
 | 0x00 | SessionDatagram | Encapsulated session-layer payload for forwarding |
-| 0x01 | SenderReport | Link statistics — what this node sent (reserved) |
-| 0x02 | ReceiverReport | Link statistics — what this node observed (reserved) |
+| 0x01 | SenderReport | MMP sender-side metrics report |
+| 0x02 | ReceiverReport | MMP receiver-side metrics report |
 | 0x50 | Disconnect | Orderly link teardown with reason code |
 
 Additionally, handshake messages (phase 0x1 msg1, phase 0x2 msg2) are sent
@@ -326,6 +326,77 @@ toward the destination. Disconnect is peer-to-peer.
 See [fips-mesh-operation.md](fips-mesh-operation.md) for how these messages
 work together to build and maintain the mesh, and
 [fips-wire-formats.md](fips-wire-formats.md) for byte-level message layouts.
+
+## Metrics Measurement Protocol (MMP)
+
+Each active peer link runs an instance of the Metrics Measurement Protocol,
+providing per-link quality metrics to the operator and (in future) to the
+routing layer for link-cost decisions.
+
+### Metrics Tracked
+
+MMP computes the following metrics from the per-frame counter and timestamp
+fields in the FLP wire format:
+
+- **SRTT** — Smoothed round-trip time (Jacobson/RFC 6298, α=1/8). Derived
+  from timestamp-echo in ReceiverReports with dwell-time compensation.
+- **Loss rate** — Bidirectional loss inferred from counter gaps. Tracked as
+  both instantaneous (per-interval) and long-term EWMA.
+- **Jitter** — Interarrival jitter (RFC 3550 algorithm) in microseconds.
+- **Goodput** — Bytes per second of payload data (excludes MMP reports).
+- **OWD trend** — One-way delay trend (µs/s, signed). Indicates congestion
+  buildup before loss occurs.
+- **ETX** — Expected Transmission Count, computed from bidirectional delivery
+  ratios. Not yet wired into routing decisions (link cost is currently
+  constant).
+- **Dual EWMA trends** — Short-term (α=1/4) and long-term (α=1/32) trend
+  indicators for both RTT and loss, enabling change detection.
+
+### Operating Modes
+
+MMP supports three modes, configured via `node.mmp.mode`:
+
+| Mode | Reports Exchanged | Metrics Available |
+| ---- | ----------------- | ----------------- |
+| **Full** (default) | SenderReport + ReceiverReport | All metrics including RTT, loss, jitter, goodput, OWD trend |
+| **Lightweight** | ReceiverReport only | Loss (from counter gaps), jitter, OWD trend. No RTT. |
+| **Minimal** | None | Spin bit and CE echo flags only. No computed metrics. |
+
+### Report Scheduling
+
+Reports are sent at RTT-adaptive intervals, clamped to [100ms, 2s]. A
+cold-start interval of 500ms is used before SRTT converges. The interval
+formula is `clamp(2 × SRTT, 100ms, 2000ms)`.
+
+### Spin Bit and RTT
+
+The SP (spin bit) flag in the FLP inner header follows the QUIC spin bit
+pattern: reflected on receive, toggled on send when the reflected value
+matches the last sent value. The spin bit state machine runs for TX
+reflection, but **RTT samples from the spin bit are discarded**. In a mesh
+protocol where frames are sent irregularly (tree announces, bloom filters,
+MMP reports on different timers), inter-frame processing delays inflate spin
+bit RTT measurements unpredictably. Timestamp-echo from ReceiverReports
+(with dwell-time compensation) is the sole SRTT source.
+
+### CE Echo
+
+The CE (Congestion Experienced) echo flag (bit 1 in the FLP flags byte) is
+reserved for ECN signaling. The transport trait does not currently expose
+ECN marking, so the CE echo flag is never set. One-way delay trend serves
+as the sole pre-loss congestion indicator.
+
+### Operator Logging
+
+MMP emits periodic link metrics at info level (configurable via
+`node.mmp.log_interval_secs`, default 30s):
+
+```text
+MMP link metrics peer=node-b rtt=2.3ms loss=0.2% jitter=0.1ms goodput=76.0MB/s tx_pkts=1234 rx_pkts=5678
+```
+
+Teardown logs include final SRTT, loss rate, jitter, ETX, goodput, and
+cumulative tx/rx packet and byte counts.
 
 ## Security Properties
 
@@ -379,6 +450,7 @@ an attacker sends invalid packets to elicit responses.
 | AAD binding on encrypted frames | **Implemented** |
 | Inner header timestamps | **Implemented** |
 | Path MTU tracking (SessionDatagram) | **Implemented** |
+| Metrics Measurement Protocol (MMP) | **Implemented** |
 | Rekey with index rotation | Planned |
 | Allowlist/blocklist | Planned |
 

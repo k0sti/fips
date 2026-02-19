@@ -144,14 +144,37 @@ Controls end-to-end session behavior and packet queuing.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.session.default_hop_limit` | u8 | `64` | Default SessionDatagram hop limit |
+| `node.session.default_ttl` | u8 | `64` | Default SessionDatagram TTL |
 | `node.session.pending_packets_per_dest` | usize | `16` | Queue depth per destination during session establishment |
 | `node.session.pending_max_destinations` | usize | `256` | Max destinations with pending packets |
-| `node.session.idle_timeout_secs` | u64 | `90` | Idle session timeout; established sessions with no activity for this duration are removed |
+| `node.session.idle_timeout_secs` | u64 | `90` | Idle session timeout; established sessions with no application data for this duration are removed. MMP reports (SenderReport, ReceiverReport, PathMtuNotification) do not count as activity |
 | `node.session.coords_warmup_packets` | u8 | `5` | Number of initial data packets per session that include the CP flag for transit cache warmup; also the reset count on CoordsRequired receipt |
 
 The anti-replay window size (2048 packets) is a compile-time constant and not
 configurable.
+
+### Link-Layer MMP (`node.mmp.*`)
+
+Metrics Measurement Protocol for per-peer link measurement. See
+[fips-link-layer.md](fips-link-layer.md) for behavioral details.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.mmp.mode` | string | `"full"` | Operating mode: `full` (sender + receiver reports), `lightweight` (receiver reports only), or `minimal` (spin bit + CE echo only, no reports) |
+| `node.mmp.log_interval_secs` | u64 | `30` | Periodic operator log interval for link metrics |
+| `node.mmp.owd_window_size` | usize | `32` | One-way delay trend ring buffer size |
+
+### Session-Layer MMP (`node.session_mmp.*`)
+
+Metrics Measurement Protocol for end-to-end session measurement. Configured
+independently from link-layer MMP because session reports are routed through
+every transit link, consuming bandwidth proportional to path length.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.session_mmp.mode` | string | `"full"` | Operating mode: `full`, `lightweight`, or `minimal` |
+| `node.session_mmp.log_interval_secs` | u64 | `30` | Periodic operator log interval for session metrics |
+| `node.session_mmp.owd_window_size` | usize | `32` | One-way delay trend ring buffer size |
 
 ### Internal Buffers (`node.buffers.*`)
 
@@ -196,6 +219,8 @@ stale address mappings.
 |-----------|------|---------|-------------|
 | `transports.udp.bind_addr` | string | `"0.0.0.0:4000"` | UDP bind address and port |
 | `transports.udp.mtu` | u16 | `1280` | Transport MTU |
+| `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
+| `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
 
 ## Peers (`peers[]`)
 
@@ -297,11 +322,19 @@ node:
   bloom:
     update_debounce_ms: 500
   session:
-    default_hop_limit: 64
+    default_ttl: 64
     pending_packets_per_dest: 16
     pending_max_destinations: 256
     idle_timeout_secs: 90
     coords_warmup_packets: 5
+  mmp:
+    mode: full                       # full | lightweight | minimal
+    log_interval_secs: 30
+    owd_window_size: 32
+  session_mmp:
+    mode: full                       # full | lightweight | minimal
+    log_interval_secs: 30
+    owd_window_size: 32
   buffers:
     packet_channel: 1024
     tun_channel: 1024
@@ -322,6 +355,8 @@ transports:
   udp:
     bind_addr: "0.0.0.0:4000"
     mtu: 1280
+    recv_buf_size: 2097152           # 2 MB (kernel doubles to 4 MB actual)
+    send_buf_size: 2097152           # 2 MB
 
 peers: []
 ```
