@@ -59,24 +59,35 @@ const ICMPV6_HEADER_LEN: usize = 8;
 /// Maximum original packet bytes to include in ICMPv6 error.
 const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADER_LEN;
 
-/// Total FIPS encapsulation overhead (worst case).
+/// FIPS encapsulation overhead for data packets (no piggybacked coordinates).
 ///
-/// Breakdown:
-/// - Noise encryption tag: 16 bytes (FLP link-layer AEAD)
-/// - FLP established frame header: 16 bytes (common prefix + receiver_idx + counter)
-/// - FLP inner header: 5 bytes (4-byte timestamp + 1-byte msg_type)
-/// - SessionDatagram fields: 35 bytes (ttl + path_mtu + src_addr + dest_addr)
-/// - FSP header: 12 bytes (4-byte prefix + 8-byte counter)
-/// - FSP inner header: 6 bytes (4-byte timestamp + 1-byte msg_type + 1-byte inner_flags)
-/// - Session AEAD tag: 16 bytes (FSP session-layer AEAD)
-/// - Coordinates (worst case): ~60 bytes (2 coords with depth 3 each)
+/// This is the fixed overhead for a SessionDatagram carrying an FSP DataPacket,
+/// used to compute `effective_ipv6_mtu()` and TCP MSS clamping. Coordinate
+/// piggybacking (CP flag) adds variable overhead on top of this; the send path
+/// guards against exceeding the transport MTU when coords are included.
 ///
-/// The old 12-byte session header is replaced by FSP header (12) + FSP inner
-/// header (6) + session AEAD tag (16) = 34 bytes, an increase of 22 bytes.
-/// However, the old overhead already accounted for the session AEAD tag in
-/// the "Noise encryption tag" line, and the old header included the counter.
-/// Net change: +6 bytes for FSP inner header.
-pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 6 + 60; // 150 bytes
+/// Breakdown (traced through the actual send path):
+///
+/// ```text
+/// FLP outer header (cleartext AAD)              16
+///   common prefix (4) + receiver_idx (4) + counter (8)
+/// FLP AEAD ciphertext:
+///   timestamp (4) + msg_type (1)                 5   [FLP inner header]
+///   ttl (1) + path_mtu (2) + src (16) + dst (16) 35  [SessionDatagram body]
+///   FSP header (4 prefix + 8 counter)            12   [cleartext AAD]
+///   FSP AEAD ciphertext:
+///     timestamp (4) + msg_type (1) + flags (1)    6   [FSP inner header]
+///     <application data>
+///     Poly1305 tag                               16   [FSP AEAD]
+/// FLP Poly1305 tag                              16   [FLP AEAD]
+///                                              ────
+///                                               106
+/// ```
+///
+/// Note: the FLP inner header msg_type byte IS the SessionDatagram msg_type
+/// byte (shared, not double-counted). The "35 bytes" is the SessionDatagram
+/// body after msg_type is consumed by the dispatch layer.
+pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 6 + 16; // 106 bytes
 
 /// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
 ///

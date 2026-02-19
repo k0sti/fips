@@ -84,6 +84,11 @@ impl fmt::Display for SessionMessageType {
 // Coordinate Wire Format Helpers
 // ============================================================================
 
+/// Wire size of a TreeCoordinate in address-only format: 2 + entries × 16.
+pub(crate) fn coords_wire_size(coords: &TreeCoordinate) -> usize {
+    2 + coords.entries().len() * 16
+}
+
 /// Encode a TreeCoordinate as address-only wire format: count(u16 LE) + addrs(16 × n).
 ///
 /// Session-layer messages serialize coordinates as NodeAddr arrays (16 bytes each),

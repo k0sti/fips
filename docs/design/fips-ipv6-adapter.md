@@ -119,17 +119,19 @@ after all layers of wrapping.
 
 | Layer | Overhead | Purpose |
 | ----- | -------- | ------- |
-| Link encryption | 37 bytes | 16-byte outer header + 5-byte inner header + 16-byte AEAD tag |
-| SessionDatagram envelope | 36 bytes | type + ttl + path_mtu + src_addr + dest_addr |
+| Link encryption | 37 bytes | 16-byte outer header + 5-byte inner header (timestamp + msg_type) + 16-byte AEAD tag |
+| SessionDatagram body | 35 bytes | ttl + path_mtu + src_addr + dest_addr (msg_type counted in inner header) |
 | FSP header | 12 bytes | 4-byte prefix + 8-byte counter (used as AEAD AAD) |
 | FSP inner header | 6 bytes | 4-byte timestamp + 1-byte msg_type + 1-byte inner_flags (inside AEAD) |
 | Session AEAD tag | 16 bytes | ChaCha20-Poly1305 tag on session-encrypted payload |
-| **Minimal total** | **107 bytes** | |
-| Coordinates (if present) | ~43 bytes | Depth-dependent, first few packets only |
-| **Worst case total** | **150 bytes** | With CP flag set for depth-3 paths |
+| **Data path total** | **106 bytes** | `FIPS_OVERHEAD` constant |
 
-The `FIPS_OVERHEAD` constant (150 bytes) is used for conservative MTU
-calculations.
+Coordinate piggybacking (CP flag) adds variable overhead: `2 + entries × 16`
+per coordinate, with both src and dst coords sent. The send path skips the
+CP flag if adding coords would exceed the transport MTU.
+
+The `FIPS_OVERHEAD` constant (106 bytes) represents the fixed data path
+overhead and is used for MTU calculations.
 
 ### Effective IPv6 MTU
 
@@ -143,14 +145,14 @@ For typical deployments:
 
 | Transport MTU | Effective IPv6 MTU | Notes |
 | ------------- | ------------------ | ----- |
-| 1472 (UDP/Ethernet) | 1322 | Standard deployment |
-| 1280 (UDP minimum) | 1130 | Below IPv6 minimum |
+| 1472 (UDP/Ethernet) | 1366 | Standard deployment |
+| 1280 (UDP minimum) | 1174 | Below IPv6 minimum |
 
 IPv6 mandates that every link support at least 1280 bytes. The minimum
 transport path MTU for the IPv6 adapter is therefore:
 
 ```text
-1280 + 150 = 1430 bytes
+1280 + 106 = 1386 bytes
 ```
 
 Transports with smaller MTUs (LoRa at ~250 bytes, serial at 256 bytes) cannot

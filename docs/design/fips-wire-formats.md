@@ -648,14 +648,12 @@ Layer 0: Transport
 
 | Layer | Overhead | Component |
 | ----- | -------- | --------- |
-| Link encryption | 37 bytes | 16 outer header (AAD) + 5 inner header + 16 AEAD tag |
-| SessionDatagram | 36 bytes | 1 type + 1 ttl + 2 path_mtu + 16 src + 16 dest |
+| Link encryption | 37 bytes | 16 outer header (AAD) + 5 inner header (timestamp + msg_type) + 16 AEAD tag |
+| SessionDatagram body | 35 bytes | 1 ttl + 2 path_mtu + 16 src + 16 dest (msg_type counted in inner header) |
 | FSP header | 12 bytes | 4 prefix + 8 counter |
 | FSP inner header | 6 bytes | 4 timestamp + 1 msg_type + 1 inner_flags (inside AEAD) |
 | Session AEAD tag | 16 bytes | Poly1305 tag on session-encrypted payload |
-| **Minimal total** | **107 bytes** | |
-| Coordinates (if present) | ~43 bytes | Varies with tree depth |
-| **Worst case** | **150 bytes** | `FIPS_OVERHEAD` constant |
+| **Data path total** | **106 bytes** | `FIPS_OVERHEAD` constant |
 
 ### At Each Transit Node
 
@@ -717,8 +715,8 @@ endpoint session keys).
 | Scenario | Wire Size | Notes |
 | -------- | --------- | ----- |
 | Encrypted frame minimum | 37 bytes | Empty body |
-| SessionDatagram + Data (minimal) | 37 + 36 + 12 + 6 + payload + 16 | 107 + payload |
-| SessionDatagram + Data (with coords) | ~150 + payload | Worst case |
+| SessionDatagram + Data (minimal) | 37 + 35 + 12 + 6 + payload + 16 | 106 + payload |
+| SessionDatagram + Data (with coords) | 106 + coords + payload | Coords vary with tree depth |
 | SessionDatagram + SessionSetup | ~275 bytes | Depth-3, both dirs |
 | SessionDatagram + CoordsRequired | 37 + 36 + 38 = 111 bytes | Including link overhead |
 

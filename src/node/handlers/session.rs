@@ -11,7 +11,8 @@ use crate::node::session_wire::{
     parse_encrypted_coords, FspCommonPrefix, FspEncryptedHeader, FSP_COMMON_PREFIX_SIZE,
     FSP_FLAG_CP, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
 };
-use crate::protocol::encode_coords;
+use crate::protocol::{coords_wire_size, encode_coords};
+use crate::upper::icmp::FIPS_OVERHEAD;
 use crate::node::{Node, NodeError};
 use crate::noise::{HandshakeState, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE};
 use crate::mmp::report::ReceiverReport;
@@ -726,10 +727,7 @@ impl Node {
         })?;
 
         // Check warmup counter and get session timestamp
-        let include_coords = entry.coords_warmup_remaining() > 0;
-        if include_coords {
-            entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
-        }
+        let wants_coords = entry.coords_warmup_remaining() > 0;
         let timestamp = entry.session_timestamp(now_ms);
         let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
 
@@ -751,12 +749,53 @@ impl Node {
         let inner_flags = FspInnerFlags { spin_bit }.to_byte();
         let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, plaintext);
 
-        // Build FSP flags
+        // Determine whether coords fit within transport MTU.
+        // Total wire size: FIPS_OVERHEAD (106) + coords_size + plaintext.len()
+        // The transport MTU is the UDP payload budget available for the FLP frame.
+        let (include_coords, my_coords, dest_coords) = if wants_coords {
+            let src = self.tree_state.my_coords().clone();
+            let dst = self.get_dest_coords(dest_addr);
+            let coords_size = coords_wire_size(&src) + coords_wire_size(&dst);
+            let total_wire = FIPS_OVERHEAD as usize + coords_size + plaintext.len();
+            if total_wire <= self.transport_mtu() as usize {
+                (true, Some(src), Some(dst))
+            } else {
+                trace!("CP flag skipped: {} bytes with coords exceeds transport MTU {}",
+                    total_wire, self.transport_mtu());
+                (false, None, None)
+            }
+        } else {
+            (false, None, None)
+        };
+
+        // Decrement warmup counter only if we actually include coords
+        if include_coords
+            && let Some(entry) = self.sessions.get_mut(dest_addr)
+        {
+            entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
+        }
+
+        // Build FSP flags (CP flag only if coords will be included)
         let flags = if include_coords { FSP_FLAG_CP } else { 0 };
 
         // Build 12-byte FSP header (used as AAD for AEAD)
         let payload_len = inner_plaintext.len() as u16;
         let header = build_fsp_header(counter, flags, payload_len);
+
+        // Re-borrow session for encryption
+        let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
+            node_addr: *dest_addr,
+            reason: "no session".into(),
+        })?;
+        let session = match entry.state_mut() {
+            EndToEndState::Established(s) => s,
+            _ => {
+                return Err(NodeError::SendFailed {
+                    node_addr: *dest_addr,
+                    reason: "session not established".into(),
+                });
+            }
+        };
 
         // Encrypt with AAD binding to the FSP header
         let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| {
@@ -769,11 +808,9 @@ impl Node {
         // Assemble: header(12) + [coords] + ciphertext
         let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + ciphertext.len() + 200);
         fsp_payload.extend_from_slice(&header);
-        if include_coords {
-            let my_coords = self.tree_state.my_coords().clone();
-            let dest_coords = self.get_dest_coords(dest_addr);
-            encode_coords(&my_coords, &mut fsp_payload);
-            encode_coords(&dest_coords, &mut fsp_payload);
+        if let (Some(src), Some(dst)) = (&my_coords, &dest_coords) {
+            encode_coords(src, &mut fsp_payload);
+            encode_coords(dst, &mut fsp_payload);
         }
         fsp_payload.extend_from_slice(&ciphertext);
 

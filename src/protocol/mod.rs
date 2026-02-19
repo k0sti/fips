@@ -42,7 +42,7 @@ pub use session::{
     COORDS_REQUIRED_SIZE, PATH_MTU_NOTIFICATION_SIZE, SESSION_RECEIVER_REPORT_SIZE,
     SESSION_SENDER_REPORT_SIZE,
 };
-pub(crate) use session::{decode_optional_coords, encode_coords};
+pub(crate) use session::{coords_wire_size, decode_optional_coords, encode_coords};
 
 /// Protocol version for message compatibility.
 pub const PROTOCOL_VERSION: u8 = 1;
