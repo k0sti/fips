@@ -1,6 +1,8 @@
-//! Timeout management for stale handshake connections and idle sessions.
+//! Timeout management for stale handshake connections, idle sessions,
+//! and handshake message resend scheduling.
 
 use crate::node::Node;
+use crate::peer::HandshakeState;
 use crate::transport::LinkId;
 use tracing::{debug, info};
 
@@ -77,6 +79,76 @@ impl Node {
 
         // Remove link and addr_to_link
         self.remove_link(&link_id);
+    }
+
+    /// Resend handshake messages for pending connections.
+    ///
+    /// For outbound connections in SentMsg1 state, resends the stored msg1
+    /// with exponential backoff. Called periodically from the RX event loop.
+    pub(in crate::node) async fn resend_pending_handshakes(&mut self, now_ms: u64) {
+        if self.connections.is_empty() {
+            return;
+        }
+
+        let max_resends = self.config.node.rate_limit.handshake_max_resends;
+        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config.node.rate_limit.handshake_resend_backoff;
+
+        // Collect resend candidates: outbound, in SentMsg1, with stored msg1,
+        // under max resends, and past the scheduled time.
+        let candidates: Vec<(LinkId, Vec<u8>)> = self.connections.iter()
+            .filter(|(_, conn)| {
+                conn.is_outbound()
+                    && conn.handshake_state() == HandshakeState::SentMsg1
+                    && conn.resend_count() < max_resends
+                    && conn.next_resend_at_ms() > 0
+                    && now_ms >= conn.next_resend_at_ms()
+            })
+            .filter_map(|(link_id, conn)| {
+                conn.handshake_msg1().map(|msg1| (*link_id, msg1.to_vec()))
+            })
+            .collect();
+
+        for (link_id, msg1_bytes) in candidates {
+            // Get transport and address info from the connection
+            let (transport_id, remote_addr) = match self.connections.get(&link_id) {
+                Some(conn) => match (conn.transport_id(), conn.source_addr()) {
+                    (Some(tid), Some(addr)) => (tid, addr.clone()),
+                    _ => continue,
+                },
+                None => continue,
+            };
+
+            // Send the stored msg1
+            let sent = if let Some(transport) = self.transports.get(&transport_id) {
+                match transport.send(&remote_addr, &msg1_bytes).await {
+                    Ok(_) => true,
+                    Err(e) => {
+                        debug!(
+                            link_id = %link_id,
+                            error = %e,
+                            "Handshake msg1 resend failed"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            if sent
+                && let Some(conn) = self.connections.get_mut(&link_id)
+            {
+                let count = conn.resend_count() + 1;
+                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                conn.record_resend(next);
+                debug!(
+                    link_id = %link_id,
+                    resend = count,
+                    "Resent handshake msg1"
+                );
+            }
+        }
     }
 
     /// Remove established sessions that have been idle too long.

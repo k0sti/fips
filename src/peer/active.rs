@@ -130,6 +130,11 @@ pub struct ActivePeer {
     // === MMP ===
     /// Per-peer MMP state (None for legacy peers without Noise sessions).
     mmp: Option<MmpPeerState>,
+
+    // === Handshake Resend ===
+    /// Wire-format msg2 for resend on duplicate msg1 (responder only).
+    /// Cleared after the handshake timeout window.
+    handshake_msg2: Option<Vec<u8>>,
 }
 
 impl ActivePeer {
@@ -161,6 +166,7 @@ impl ActivePeer {
             authenticated_at,
             last_seen: authenticated_at,
             mmp: None,
+            handshake_msg2: None,
         }
     }
 
@@ -220,6 +226,7 @@ impl ActivePeer {
             authenticated_at,
             last_seen: authenticated_at,
             mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
+            handshake_msg2: None,
         }
     }
 
@@ -348,6 +355,23 @@ impl ActivePeer {
     pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) {
         self.transport_id = Some(transport_id);
         self.current_addr = Some(addr);
+    }
+
+    // === Handshake Resend ===
+
+    /// Store wire-format msg2 for resend on duplicate msg1.
+    pub fn set_handshake_msg2(&mut self, msg2: Vec<u8>) {
+        self.handshake_msg2 = Some(msg2);
+    }
+
+    /// Get stored msg2 bytes for resend.
+    pub fn handshake_msg2(&self) -> Option<&[u8]> {
+        self.handshake_msg2.as_deref()
+    }
+
+    /// Clear stored msg2 (no longer needed after handshake window).
+    pub fn clear_handshake_msg2(&mut self) {
+        self.handshake_msg2 = None;
     }
 
     // === Tree Accessors ===

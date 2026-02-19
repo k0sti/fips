@@ -60,6 +60,16 @@ pub struct RateLimitConfig {
     /// Stale handshake cleanup timeout in seconds (`node.rate_limit.handshake_timeout_secs`).
     #[serde(default = "RateLimitConfig::default_handshake_timeout_secs")]
     pub handshake_timeout_secs: u64,
+    /// Initial handshake resend interval in ms (`node.rate_limit.handshake_resend_interval_ms`).
+    /// Handshake messages are resent with exponential backoff within the timeout window.
+    #[serde(default = "RateLimitConfig::default_handshake_resend_interval_ms")]
+    pub handshake_resend_interval_ms: u64,
+    /// Handshake resend backoff multiplier (`node.rate_limit.handshake_resend_backoff`).
+    #[serde(default = "RateLimitConfig::default_handshake_resend_backoff")]
+    pub handshake_resend_backoff: f64,
+    /// Max handshake resends per attempt (`node.rate_limit.handshake_max_resends`).
+    #[serde(default = "RateLimitConfig::default_handshake_max_resends")]
+    pub handshake_max_resends: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -68,6 +78,9 @@ impl Default for RateLimitConfig {
             handshake_burst: 100,
             handshake_rate: 10.0,
             handshake_timeout_secs: 30,
+            handshake_resend_interval_ms: 1000,
+            handshake_resend_backoff: 2.0,
+            handshake_max_resends: 5,
         }
     }
 }
@@ -76,6 +89,9 @@ impl RateLimitConfig {
     fn default_handshake_burst() -> u32 { 100 }
     fn default_handshake_rate() -> f64 { 10.0 }
     fn default_handshake_timeout_secs() -> u64 { 30 }
+    fn default_handshake_resend_interval_ms() -> u64 { 1000 }
+    fn default_handshake_resend_backoff() -> f64 { 2.0 }
+    fn default_handshake_max_resends() -> u32 { 5 }
 }
 
 /// Retry/backoff configuration (`node.retry.*`).

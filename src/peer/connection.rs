@@ -116,6 +116,19 @@ pub struct PeerConnection {
 
     /// Current source address (updated on packet receipt).
     source_addr: Option<TransportAddr>,
+
+    // === Handshake Resend ===
+    /// Wire-format msg1 bytes for resend (initiator only, 90 bytes).
+    handshake_msg1: Option<Vec<u8>>,
+
+    /// Wire-format msg2 bytes for resend (responder only).
+    handshake_msg2: Option<Vec<u8>>,
+
+    /// Number of resends performed so far.
+    resend_count: u32,
+
+    /// When the next resend should fire (Unix ms). 0 = no resend scheduled.
+    next_resend_at_ms: u64,
 }
 
 impl PeerConnection {
@@ -143,6 +156,10 @@ impl PeerConnection {
             their_index: None,
             transport_id: None,
             source_addr: None,
+            handshake_msg1: None,
+            handshake_msg2: None,
+            resend_count: 0,
+            next_resend_at_ms: 0,
         }
     }
 
@@ -166,6 +183,10 @@ impl PeerConnection {
             their_index: None,
             transport_id: None,
             source_addr: None,
+            handshake_msg1: None,
+            handshake_msg2: None,
+            resend_count: 0,
+            next_resend_at_ms: 0,
         }
     }
 
@@ -193,6 +214,10 @@ impl PeerConnection {
             their_index: None,
             transport_id: Some(transport_id),
             source_addr: Some(source_addr),
+            handshake_msg1: None,
+            handshake_msg2: None,
+            resend_count: 0,
+            next_resend_at_ms: 0,
         }
     }
 
@@ -313,6 +338,46 @@ impl PeerConnection {
     /// Set the source address.
     pub fn set_source_addr(&mut self, addr: TransportAddr) {
         self.source_addr = Some(addr);
+    }
+
+    // === Handshake Resend ===
+
+    /// Store the wire-format msg1 bytes for resend and schedule the first resend.
+    pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
+        self.handshake_msg1 = Some(msg1);
+        self.resend_count = 0;
+        self.next_resend_at_ms = first_resend_at_ms;
+    }
+
+    /// Store the wire-format msg2 bytes for resend on duplicate msg1.
+    pub fn set_handshake_msg2(&mut self, msg2: Vec<u8>) {
+        self.handshake_msg2 = Some(msg2);
+    }
+
+    /// Get the stored msg1 bytes (if any).
+    pub fn handshake_msg1(&self) -> Option<&[u8]> {
+        self.handshake_msg1.as_deref()
+    }
+
+    /// Get the stored msg2 bytes (if any).
+    pub fn handshake_msg2(&self) -> Option<&[u8]> {
+        self.handshake_msg2.as_deref()
+    }
+
+    /// Number of resends performed.
+    pub fn resend_count(&self) -> u32 {
+        self.resend_count
+    }
+
+    /// When the next resend is scheduled (Unix ms).
+    pub fn next_resend_at_ms(&self) -> u64 {
+        self.next_resend_at_ms
+    }
+
+    /// Record a resend and schedule the next one.
+    pub fn record_resend(&mut self, next_resend_at_ms: u64) {
+        self.resend_count += 1;
+        self.next_resend_at_ms = next_resend_at_ms;
     }
 
     // === Noise Handshake Operations ===

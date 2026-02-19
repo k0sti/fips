@@ -180,6 +180,10 @@ impl Node {
                 "Peer connection initiated"
             );
 
+            // Store msg1 for resend and schedule first resend
+            let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+            connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
+
             // Track in pending_outbound for msg2 dispatch
             self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
             self.connections.insert(link_id, connection);

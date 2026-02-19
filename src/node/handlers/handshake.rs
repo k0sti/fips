@@ -38,21 +38,38 @@ impl Node {
 
         // Check for existing connection from this address.
         //
-        // If we already have an *inbound* link from this address, drop the msg1
-        // (duplicate or replay). But if we have an *outbound* link to this address
-        // (we initiated to them AND they initiated to us), this is a cross-connection.
-        // Allow it to proceed — promote_connection() will resolve via tie-breaker.
+        // If we already have an *inbound* link from this address, this is a
+        // duplicate msg1 (our msg2 was probably lost). Resend msg2 if available.
+        // If we have an *outbound* link to this address (we initiated to them
+        // AND they initiated to us), this is a cross-connection — allow it.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
         if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key)
             && let Some(link) = self.links.get(&existing_link_id)
         {
             if link.direction() == LinkDirection::Inbound {
+                // Duplicate msg1 — try to resend stored msg2
+                let msg2_bytes = self.find_stored_msg2(existing_link_id);
+                if let Some(msg2) = msg2_bytes {
+                    if let Some(transport) = self.transports.get(&packet.transport_id) {
+                        match transport.send(&packet.remote_addr, &msg2).await {
+                            Ok(_) => debug!(
+                                remote_addr = %packet.remote_addr,
+                                "Resent msg2 for duplicate msg1"
+                            ),
+                            Err(e) => debug!(
+                                remote_addr = %packet.remote_addr,
+                                error = %e,
+                                "Failed to resend msg2"
+                            ),
+                        }
+                    }
+                } else {
+                    debug!(
+                        remote_addr = %packet.remote_addr,
+                        "Duplicate msg1 but no stored msg2 to resend"
+                    );
+                }
                 self.msg1_rate_limiter.complete_handshake();
-                debug!(
-                    transport_id = %packet.transport_id,
-                    remote_addr = %packet.remote_addr,
-                    "Already have inbound connection from this address"
-                );
                 return;
             }
             // Outbound link to this address — cross-connection, allow msg1
@@ -126,8 +143,11 @@ impl Node {
         self.addr_to_link.insert(addr_key, link_id);
         self.connections.insert(link_id, conn);
 
-        // Build and send msg2 response
+        // Build and send msg2 response, storing for potential resend
         let wire_msg2 = build_msg2(our_index, header.sender_idx, &msg2_response);
+        if let Some(conn) = self.connections.get_mut(&link_id) {
+            conn.set_handshake_msg2(wire_msg2.clone());
+        }
 
         if let Some(transport) = self.transports.get(&packet.transport_id) {
             match transport.send(&packet.remote_addr, &wire_msg2).await {
@@ -164,6 +184,10 @@ impl Node {
             Ok(result) => {
                 match result {
                     PromotionResult::Promoted(node_addr) => {
+                        // Store msg2 on peer for resend on duplicate msg1
+                        if let Some(peer) = self.peers.get_mut(&node_addr) {
+                            peer.set_handshake_msg2(wire_msg2.clone());
+                        }
                         info!(
                             peer = %self.peer_display_name(&node_addr),
                             link_id = %link_id,
@@ -178,6 +202,10 @@ impl Node {
                         self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
+                        // Store msg2 on peer for resend on duplicate msg1
+                        if let Some(peer) = self.peers.get_mut(&node_addr) {
+                            peer.set_handshake_msg2(wire_msg2.clone());
+                        }
                         // Clean up the losing connection's link
                         self.remove_link(&loser_link_id);
                         info!(
@@ -220,6 +248,28 @@ impl Node {
         }
 
         self.msg1_rate_limiter.complete_handshake();
+    }
+
+    /// Find stored msg2 bytes for a given link (pre- or post-promotion).
+    ///
+    /// Checks the PeerConnection (if still pending) and then the ActivePeer
+    /// (if already promoted).
+    fn find_stored_msg2(&self, link_id: LinkId) -> Option<Vec<u8>> {
+        // Check pending connection first
+        if let Some(conn) = self.connections.get(&link_id)
+            && let Some(msg2) = conn.handshake_msg2()
+        {
+            return Some(msg2.to_vec());
+        }
+        // Check promoted peer
+        for peer in self.peers.values() {
+            if peer.link_id() == link_id
+                && let Some(msg2) = peer.handshake_msg2()
+            {
+                return Some(msg2.to_vec());
+            }
+        }
+        None
     }
 
     /// Handle handshake message 2 (phase 0x2).
