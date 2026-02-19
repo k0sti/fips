@@ -20,6 +20,7 @@ async fn test_two_node_handshake_udp() {
     let udp_config = UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
         mtu: Some(1280),
+        ..Default::default()
     };
 
     let (packet_tx_a, mut packet_rx_a) = packet_channel(64);
@@ -255,6 +256,7 @@ async fn test_run_rx_loop_handshake() {
     let udp_config = UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
         mtu: Some(1280),
+        ..Default::default()
     };
 
     let (packet_tx_a, packet_rx_a) = packet_channel(64);
@@ -445,6 +447,7 @@ async fn test_cross_connection_both_initiate() {
     let udp_config = UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
         mtu: Some(1280),
+        ..Default::default()
     };
 
     let (packet_tx_a, mut packet_rx_a) = packet_channel(64);

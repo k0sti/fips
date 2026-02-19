@@ -13,6 +13,12 @@ const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:4000";
 /// Default UDP MTU (IPv6 minimum).
 const DEFAULT_UDP_MTU: u16 = 1280;
 
+/// Default UDP receive buffer size (2 MB).
+const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
+
+/// Default UDP send buffer size (2 MB).
+const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
+
 /// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +30,14 @@ pub struct UdpConfig {
     /// UDP MTU (`mtu`). Defaults to 1280 (IPv6 minimum).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+
+    /// UDP receive buffer size in bytes (`recv_buf_size`). Defaults to 2 MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recv_buf_size: Option<usize>,
+
+    /// UDP send buffer size in bytes (`send_buf_size`). Defaults to 2 MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_buf_size: Option<usize>,
 }
 
 impl UdpConfig {
@@ -35,6 +49,16 @@ impl UdpConfig {
     /// Get the UDP MTU, using default if not configured.
     pub fn mtu(&self) -> u16 {
         self.mtu.unwrap_or(DEFAULT_UDP_MTU)
+    }
+
+    /// Get the receive buffer size, using default if not configured.
+    pub fn recv_buf_size(&self) -> usize {
+        self.recv_buf_size.unwrap_or(DEFAULT_UDP_RECV_BUF)
+    }
+
+    /// Get the send buffer size, using default if not configured.
+    pub fn send_buf_size(&self) -> usize {
+        self.send_buf_size.unwrap_or(DEFAULT_UDP_SEND_BUF)
     }
 }
 

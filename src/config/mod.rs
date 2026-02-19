@@ -517,6 +517,7 @@ transports: {}
         let single = TransportInstances::Single(UdpConfig {
             bind_addr: Some("0.0.0.0:4000".to_string()),
             mtu: None,
+            ..Default::default()
         });
         let items: Vec<_> = single.iter().collect();
         assert_eq!(items.len(), 1);

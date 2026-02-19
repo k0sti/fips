@@ -25,6 +25,7 @@ pub(super) async fn make_test_node() -> TestNode {
     let udp_config = UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
         mtu: Some(1280),
+        ..Default::default()
     };
 
     let (packet_tx, packet_rx) = packet_channel(256);

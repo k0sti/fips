@@ -7,6 +7,7 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 use crate::config::UdpConfig;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -89,10 +90,32 @@ impl UdpTransport {
             .parse()
             .map_err(|e| TransportError::StartFailed(format!("invalid bind address: {}", e)))?;
 
-        // Bind socket
-        let socket = UdpSocket::bind(bind_addr)
-            .await
+        // Create socket via socket2 for buffer size control
+        let domain = if bind_addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+        let sock2 = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+            .map_err(|e| TransportError::StartFailed(format!("socket create failed: {}", e)))?;
+        sock2.set_nonblocking(true)
+            .map_err(|e| TransportError::StartFailed(format!("set nonblocking failed: {}", e)))?;
+        sock2.bind(&bind_addr.into())
             .map_err(|e| TransportError::StartFailed(format!("bind failed: {}", e)))?;
+
+        // Set socket buffer sizes
+        let recv_buf = self.config.recv_buf_size();
+        let send_buf = self.config.send_buf_size();
+        sock2.set_recv_buffer_size(recv_buf)
+            .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
+        sock2.set_send_buffer_size(send_buf)
+            .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
+
+        let actual_recv = sock2.recv_buffer_size()
+            .map_err(|e| TransportError::StartFailed(format!("get recv buffer: {}", e)))?;
+        let actual_send = sock2.send_buffer_size()
+            .map_err(|e| TransportError::StartFailed(format!("get send buffer: {}", e)))?;
+
+        // Convert to tokio UdpSocket
+        let std_socket: std::net::UdpSocket = sock2.into();
+        let socket = UdpSocket::from_std(std_socket)
+            .map_err(|e| TransportError::StartFailed(format!("tokio socket failed: {}", e)))?;
 
         self.local_addr = Some(
             socket
@@ -119,11 +142,15 @@ impl UdpTransport {
             info!(
                 name = %name,
                 local_addr = %self.local_addr.unwrap(),
+                recv_buf = actual_recv,
+                send_buf = actual_send,
                 "UDP transport started"
             );
         } else {
             info!(
                 local_addr = %self.local_addr.unwrap(),
+                recv_buf = actual_recv,
+                send_buf = actual_send,
                 "UDP transport started"
             );
         }
@@ -309,6 +336,8 @@ mod tests {
         UdpConfig {
             bind_addr: Some(format!("127.0.0.1:{}", port)),
             mtu: Some(1280),
+            recv_buf_size: None,
+            send_buf_size: None,
         }
     }
 
