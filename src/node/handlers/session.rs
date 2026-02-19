@@ -1,16 +1,24 @@
 //! End-to-end session message handlers.
 //!
 //! Handles locally-delivered session payloads from SessionDatagram envelopes.
-//! Dispatches based on session message type to specific handlers for
-//! SessionSetup (Noise IK msg1), SessionAck (msg2), DataPacket, and
-//! error signals (CoordsRequired, PathBroken).
+//! Dispatches based on FSP common prefix phase to specific handlers for
+//! SessionSetup (Noise IK msg1), SessionAck (msg2), encrypted data,
+//! and error signals (CoordsRequired, PathBroken).
 
 use crate::node::session::{EndToEndState, SessionEntry};
+use crate::node::session_wire::{
+    build_fsp_header, fsp_prepend_inner_header, fsp_strip_inner_header,
+    parse_encrypted_coords, FspCommonPrefix, FspEncryptedHeader, FSP_COMMON_PREFIX_SIZE,
+    FSP_FLAG_CP, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
+};
+use crate::protocol::encode_coords;
 use crate::node::{Node, NodeError};
 use crate::noise::{HandshakeState, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE};
+use crate::mmp::report::ReceiverReport;
+use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
 use crate::protocol::{
-    CoordsRequired, DataPacket, PathBroken, SessionAck, SessionDatagram, SessionMessageType,
-    SessionSetup,
+    CoordsRequired, FspInnerFlags, PathBroken, PathMtuNotification, SessionAck, SessionDatagram,
+    SessionMessageType, SessionReceiverReport, SessionSenderReport, SessionSetup,
 };
 use crate::NodeAddr;
 use secp256k1::PublicKey;
@@ -20,40 +28,237 @@ impl Node {
     /// Handle a locally-delivered session datagram payload.
     ///
     /// Called from `handle_session_datagram()` when `dest_addr == self.node_addr()`.
-    /// Dispatches to the appropriate handler based on the session message type byte.
+    /// Dispatches based on the 4-byte FSP common prefix:
+    ///
+    /// - Phase 0x1 → SessionSetup (handshake msg1)
+    /// - Phase 0x2 → SessionAck (handshake msg2)
+    /// - Phase 0x0 + U flag → plaintext error signal (CoordsRequired/PathBroken)
+    /// - Phase 0x0 + !U → encrypted session message (data, reports, etc.)
     pub(in crate::node) async fn handle_session_payload(
         &mut self,
         src_addr: &NodeAddr,
         payload: &[u8],
+        path_mtu: u16,
     ) {
-        if payload.is_empty() {
-            debug!("Empty session payload");
-            return;
-        }
+        let prefix = match FspCommonPrefix::parse(payload) {
+            Some(p) => p,
+            None => {
+                debug!(len = payload.len(), "Session payload too short for FSP prefix");
+                return;
+            }
+        };
 
-        let msg_type = payload[0];
-        let inner = &payload[1..];
+        let inner = &payload[FSP_COMMON_PREFIX_SIZE..];
 
-        match SessionMessageType::from_byte(msg_type) {
-            Some(SessionMessageType::SessionSetup) => {
+        match prefix.phase {
+            FSP_PHASE_MSG1 => {
                 self.handle_session_setup(src_addr, inner).await;
             }
-            Some(SessionMessageType::SessionAck) => {
+            FSP_PHASE_MSG2 => {
                 self.handle_session_ack(src_addr, inner).await;
             }
-            Some(SessionMessageType::DataPacket) => {
-                self.handle_data_packet(src_addr, inner).await;
+            FSP_PHASE_ESTABLISHED if prefix.is_unencrypted() => {
+                // Plaintext error signals: read msg_type from first byte after prefix
+                if inner.is_empty() {
+                    debug!("Empty plaintext error signal");
+                    return;
+                }
+                let error_type = inner[0];
+                let error_body = &inner[1..];
+                match SessionMessageType::from_byte(error_type) {
+                    Some(SessionMessageType::CoordsRequired) => {
+                        self.handle_coords_required(error_body).await;
+                    }
+                    Some(SessionMessageType::PathBroken) => {
+                        self.handle_path_broken(error_body).await;
+                    }
+                    _ => {
+                        debug!(error_type, "Unknown plaintext error signal type");
+                    }
+                }
             }
-            Some(SessionMessageType::CoordsRequired) => {
-                self.handle_coords_required(inner).await;
+            FSP_PHASE_ESTABLISHED => {
+                self.handle_encrypted_session_msg(src_addr, payload, path_mtu).await;
             }
-            Some(SessionMessageType::PathBroken) => {
-                self.handle_path_broken(inner).await;
-            }
-            None => {
-                debug!(msg_type, "Unknown session message type");
+            _ => {
+                debug!(phase = prefix.phase, "Unknown FSP phase");
             }
         }
+    }
+
+    /// Handle an encrypted session message (phase 0x0, U flag clear).
+    ///
+    /// Full FSP receive pipeline:
+    /// 1. Parse FspEncryptedHeader (12 bytes) → counter, flags, header_bytes
+    /// 2. If CP flag: parse cleartext coords, cache them
+    /// 3. Session lookup with Responding→Established transition
+    /// 4. AEAD decrypt with AAD = header_bytes
+    /// 5. Strip FSP inner header → timestamp, msg_type, inner_flags
+    /// 6. Dispatch by msg_type
+    async fn handle_encrypted_session_msg(&mut self, src_addr: &NodeAddr, payload: &[u8], path_mtu: u16) {
+        // Parse the 12-byte encrypted header (includes the 4-byte prefix)
+        let header = match FspEncryptedHeader::parse(payload) {
+            Some(h) => h,
+            None => {
+                debug!(len = payload.len(), "Encrypted session message too short for FSP header");
+                return;
+            }
+        };
+
+        // Determine where ciphertext starts (after header, optionally after coords)
+        let mut ciphertext_offset = FSP_HEADER_SIZE;
+
+        // If CP flag set, parse cleartext coords between header and ciphertext
+        if header.has_coords() {
+            let coord_data = &payload[FSP_HEADER_SIZE..];
+            match parse_encrypted_coords(coord_data) {
+                Ok((src_coords, dest_coords, bytes_consumed)) => {
+                    let now_ms = Self::now_ms();
+                    if let Some(coords) = src_coords {
+                        self.coord_cache.insert(*src_addr, coords, now_ms);
+                    }
+                    if let Some(coords) = dest_coords {
+                        self.coord_cache.insert(*self.node_addr(), coords, now_ms);
+                    }
+                    ciphertext_offset += bytes_consumed;
+                }
+                Err(e) => {
+                    debug!(error = %e, "Failed to parse coords from encrypted session message");
+                    return;
+                }
+            }
+        }
+
+        let ciphertext = &payload[ciphertext_offset..];
+
+        // Look up session entry, handle Responding→Established transition
+        let mut entry = match self.sessions.remove(src_addr) {
+            Some(e) => e,
+            None => {
+                debug!(src = %src_addr, "Encrypted session message for unknown session");
+                return;
+            }
+        };
+
+        if entry.state().is_responding() {
+            let old_state = entry.take_state();
+            let handshake = match old_state {
+                Some(EndToEndState::Responding(hs)) => hs,
+                _ => {
+                    debug!(src = %src_addr, "Unexpected state during Responding transition");
+                    return;
+                }
+            };
+            let noise_session = match handshake.into_session() {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(error = %e, "Failed to create session from responding handshake");
+                    return;
+                }
+            };
+            entry.set_state(EndToEndState::Established(noise_session));
+            entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
+            entry.mark_established(Self::now_ms());
+            entry.init_mmp(&self.config.node.session_mmp);
+            debug!(src = %src_addr, "Session established (responder, on first encrypted message)");
+        }
+
+        // Decrypt with AAD = the 12-byte header
+        let session = match entry.state_mut() {
+            EndToEndState::Established(s) => s,
+            _ => {
+                debug!(src = %src_addr, "Encrypted message but session not established");
+                self.sessions.insert(*src_addr, entry);
+                return;
+            }
+        };
+
+        let plaintext = match session.decrypt_with_replay_check_and_aad(
+            ciphertext,
+            header.counter,
+            &header.header_bytes,
+        ) {
+            Ok(pt) => pt,
+            Err(e) => {
+                debug!(
+                    error = %e, src = %src_addr, counter = header.counter,
+                    "Session AEAD decryption failed"
+                );
+                self.sessions.insert(*src_addr, entry);
+                return;
+            }
+        };
+
+        entry.touch(Self::now_ms());
+        self.sessions.insert(*src_addr, entry);
+
+        // Strip FSP inner header (6 bytes)
+        let (timestamp, msg_type, inner_flags_byte, rest) = match fsp_strip_inner_header(&plaintext) {
+            Some(parts) => parts,
+            None => {
+                debug!(src = %src_addr, "Decrypted payload too short for FSP inner header");
+                return;
+            }
+        };
+
+        // MMP per-message recording on RX path
+        if let Some(entry) = self.sessions.get_mut(src_addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            let now = std::time::Instant::now();
+            mmp.receiver.record_recv(
+                header.counter, timestamp, plaintext.len(), false, now,
+            );
+            // Spin bit: advance state machine for correct TX reflection.
+            // RTT samples not fed into SRTT — timestamp-echo provides
+            // accurate RTT; spin bit includes variable inter-frame delays.
+            let inner_flags = FspInnerFlags::from_byte(inner_flags_byte);
+            let _spin_rtt = mmp.spin_bit.rx_observe(
+                inner_flags.spin_bit, header.counter, now,
+            );
+        }
+
+        // Feed path_mtu from datagram envelope to MMP path MTU tracking.
+        // Done for ALL session messages, not just DataPackets, so the
+        // destination learns the path MTU even when only reports flow.
+        if let Some(entry) = self.sessions.get_mut(src_addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            mmp.path_mtu.observe_incoming_mtu(path_mtu);
+        }
+
+        // Dispatch by msg_type
+        match SessionMessageType::from_byte(msg_type) {
+            Some(SessionMessageType::DataPacket) => {
+                // msg_type 0x10: deliver rest (IPv6 payload) to TUN
+                if let Some(tun_tx) = &self.tun_tx {
+                    if let Err(e) = tun_tx.send(rest.to_vec()) {
+                        debug!(error = %e, "Failed to deliver decrypted packet to TUN");
+                    }
+                } else {
+                    debug!(
+                        src = %src_addr,
+                        "DataPacket decrypted (no TUN interface, plaintext dropped)"
+                    );
+                }
+            }
+            Some(SessionMessageType::SenderReport) => {
+                self.handle_session_sender_report(src_addr, rest);
+            }
+            Some(SessionMessageType::ReceiverReport) => {
+                self.handle_session_receiver_report(src_addr, rest);
+            }
+            Some(SessionMessageType::PathMtuNotification) => {
+                self.handle_session_path_mtu_notification(src_addr, rest);
+            }
+            _ => {
+                debug!(src = %src_addr, msg_type, "Unknown session message type, dropping");
+            }
+        }
+
+        // Flush any pending outbound packets (e.g., simultaneous initiation
+        // where responder also had queued outbound packets)
+        self.flush_pending_packets(src_addr).await;
     }
 
     /// Handle an incoming SessionSetup (Noise IK msg1).
@@ -143,18 +348,18 @@ impl Node {
         let our_coords = self.tree_state.my_coords().clone();
         let ack = SessionAck::new(our_coords).with_handshake(msg2);
         let my_addr = *self.node_addr();
-        let datagram = SessionDatagram::new(my_addr, *src_addr, ack.encode())
+        let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack.encode())
             .with_ttl(self.config.node.session.default_ttl);
 
         // Route the ack back to the initiator
-        if let Err(e) = self.send_session_datagram(&datagram).await {
+        if let Err(e) = self.send_session_datagram(&mut datagram).await {
             debug!(error = %e, dest = %src_addr, "Failed to send SessionAck");
             return;
         }
 
         // Store session entry in Responding state
         let now_ms = Self::now_ms();
-        let entry = SessionEntry::new(*src_addr, remote_pubkey, EndToEndState::Responding(handshake), now_ms);
+        let entry = SessionEntry::new(*src_addr, remote_pubkey, EndToEndState::Responding(handshake), now_ms, false);
         self.sessions.insert(*src_addr, entry);
 
         debug!(src = %src_addr, "SessionSetup processed, SessionAck sent");
@@ -210,19 +415,149 @@ impl Node {
             }
         };
 
+        let now_ms = Self::now_ms();
         entry.set_state(EndToEndState::Established(session));
         entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
-        entry.touch(Self::now_ms());
+        entry.mark_established(now_ms);
+        entry.init_mmp(&self.config.node.session_mmp);
+        entry.touch(now_ms);
         self.sessions.insert(*src_addr, entry);
-
-        // Cache the responder's coordinates
-        let now_ms = Self::now_ms();
         self.coord_cache.insert(*src_addr, ack.src_coords, now_ms);
 
         // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;
 
         debug!(src = %src_addr, "Session established (initiator)");
+    }
+
+    // === Session-layer MMP report handlers ===
+
+    /// Handle an incoming session-layer SenderReport (msg_type 0x11).
+    ///
+    /// Informational only — the peer is telling us about what they sent.
+    /// Logged but not used for metrics (same pattern as link-layer).
+    fn handle_session_sender_report(&mut self, src_addr: &NodeAddr, body: &[u8]) {
+        let sr = match SessionSenderReport::decode(body) {
+            Ok(sr) => sr,
+            Err(e) => {
+                debug!(src = %src_addr, error = %e, "Malformed SessionSenderReport");
+                return;
+            }
+        };
+
+        debug!(
+            src = %src_addr,
+            cum_pkts = sr.cumulative_packets_sent,
+            interval_bytes = sr.interval_bytes_sent,
+            "Received SessionSenderReport"
+        );
+    }
+
+    /// Handle an incoming session-layer ReceiverReport (msg_type 0x12).
+    ///
+    /// The peer is telling us about what they received from us. We feed
+    /// this to our metrics to compute RTT, loss rate, and trend indicators.
+    fn handle_session_receiver_report(&mut self, src_addr: &NodeAddr, body: &[u8]) {
+        let session_rr = match SessionReceiverReport::decode(body) {
+            Ok(rr) => rr,
+            Err(e) => {
+                debug!(src = %src_addr, error = %e, "Malformed SessionReceiverReport");
+                return;
+            }
+        };
+
+        // Convert to link-layer ReceiverReport for MmpMetrics processing
+        let rr: ReceiverReport = ReceiverReport::from(&session_rr);
+
+        let now_ms = Self::now_ms();
+        let entry = match self.sessions.get_mut(src_addr) {
+            Some(e) => e,
+            None => {
+                debug!(src = %src_addr, "SessionReceiverReport for unknown session");
+                return;
+            }
+        };
+
+        let our_timestamp_ms = entry.session_timestamp(now_ms);
+
+        let Some(mmp) = entry.mmp_mut() else {
+            return;
+        };
+
+        let now = std::time::Instant::now();
+        mmp.metrics.process_receiver_report(&rr, our_timestamp_ms, now);
+
+        // Feed SRTT back to sender/receiver report interval tuning (session-layer bounds)
+        if let Some(srtt_ms) = mmp.metrics.srtt_ms() {
+            let srtt_us = (srtt_ms * 1000.0) as i64;
+            mmp.sender.update_report_interval_with_bounds(
+                srtt_us,
+                MIN_SESSION_REPORT_INTERVAL_MS,
+                MAX_SESSION_REPORT_INTERVAL_MS,
+            );
+            mmp.receiver.update_report_interval_with_bounds(
+                srtt_us,
+                MIN_SESSION_REPORT_INTERVAL_MS,
+                MAX_SESSION_REPORT_INTERVAL_MS,
+            );
+            // Also update PathMtu notification interval from SRTT
+            mmp.path_mtu.update_interval_from_srtt(srtt_ms);
+        }
+
+        // Update reverse delivery ratio from our own receiver state
+        let our_recv_packets = mmp.receiver.cumulative_packets_recv();
+        let peer_highest = mmp.receiver.highest_counter();
+        if peer_highest > 0 {
+            let reverse_ratio = (our_recv_packets as f64) / (peer_highest as f64);
+            mmp.metrics.set_delivery_ratio_reverse(reverse_ratio);
+        }
+
+        debug!(
+            src = %src_addr,
+            rtt_ms = ?mmp.metrics.srtt_ms(),
+            loss = format_args!("{:.1}%", mmp.metrics.loss_rate() * 100.0),
+            "Processed SessionReceiverReport"
+        );
+    }
+
+    /// Handle an incoming PathMtuNotification (msg_type 0x13).
+    ///
+    /// The destination is telling us the path MTU has changed.
+    /// Apply source-side rules (decrease immediate, increase validated).
+    fn handle_session_path_mtu_notification(&mut self, src_addr: &NodeAddr, body: &[u8]) {
+        let notif = match PathMtuNotification::decode(body) {
+            Ok(n) => n,
+            Err(e) => {
+                debug!(src = %src_addr, error = %e, "Malformed PathMtuNotification");
+                return;
+            }
+        };
+
+        let entry = match self.sessions.get_mut(src_addr) {
+            Some(e) => e,
+            None => {
+                debug!(src = %src_addr, "PathMtuNotification for unknown session");
+                return;
+            }
+        };
+
+        let Some(mmp) = entry.mmp_mut() else {
+            return;
+        };
+
+        let old_mtu = mmp.path_mtu.current_mtu();
+        let now = std::time::Instant::now();
+        mmp.path_mtu.apply_notification(notif.path_mtu, now);
+        let new_mtu = mmp.path_mtu.current_mtu();
+
+        if new_mtu != old_mtu {
+            debug!(
+                src = %src_addr,
+                old_mtu,
+                new_mtu,
+                "Path MTU changed via notification"
+            );
+        }
     }
 
     /// Complete an initiator-side Noise IK handshake given msg2.
@@ -236,90 +571,6 @@ impl Node {
         handshake
             .into_session()
             .map_err(|e| format!("into_session failed: {}", e))
-    }
-
-    /// Handle an incoming DataPacket.
-    ///
-    /// Decrypts the payload using the established session key and delivers
-    /// to the TUN interface.
-    async fn handle_data_packet(&mut self, src_addr: &NodeAddr, inner: &[u8]) {
-        let packet = match DataPacket::decode(inner) {
-            Ok(p) => p,
-            Err(e) => {
-                debug!(error = %e, "Malformed DataPacket");
-                return;
-            }
-        };
-
-        // Remove entry to take ownership for potential state transition
-        let mut entry = match self.sessions.remove(src_addr) {
-            Some(e) => e,
-            None => {
-                debug!(src = %src_addr, "DataPacket for unknown session");
-                return;
-            }
-        };
-
-        // If in Responding state, transition to Established first
-        // (responder wrote msg2, handshake is complete from our side)
-        if entry.state().is_responding() {
-            let old_state = entry.take_state();
-            let handshake = match old_state {
-                Some(EndToEndState::Responding(hs)) => hs,
-                _ => {
-                    debug!(src = %src_addr, "Unexpected state in DataPacket handler");
-                    return;
-                }
-            };
-            let noise_session = match handshake.into_session() {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!(error = %e, "Failed to create session from responding handshake");
-                    return;
-                }
-            };
-            entry.set_state(EndToEndState::Established(noise_session));
-            entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
-            debug!(src = %src_addr, "Session established (responder, on first data)");
-        }
-
-        // Decrypt
-        let session = match entry.state_mut() {
-            EndToEndState::Established(s) => s,
-            _ => {
-                debug!(src = %src_addr, "DataPacket but session not established");
-                self.sessions.insert(*src_addr, entry);
-                return;
-            }
-        };
-
-        let plaintext = match session.decrypt_with_replay_check(&packet.payload, packet.counter) {
-            Ok(pt) => pt,
-            Err(e) => {
-                debug!(error = %e, src = %src_addr, counter = packet.counter, "Session decryption failed");
-                self.sessions.insert(*src_addr, entry);
-                return;
-            }
-        };
-
-        entry.touch(Self::now_ms());
-        self.sessions.insert(*src_addr, entry);
-
-        // Deliver to TUN
-        if let Some(tun_tx) = &self.tun_tx {
-            if let Err(e) = tun_tx.send(plaintext) {
-                debug!(error = %e, "Failed to deliver decrypted packet to TUN");
-            }
-        } else {
-            debug!(
-                src = %src_addr,
-                "DataPacket decrypted (no TUN interface, plaintext dropped)"
-            );
-        }
-
-        // Flush any pending outbound packets (e.g., simultaneous initiation
-        // where responder also had queued outbound packets)
-        self.flush_pending_packets(src_addr).await;
     }
 
     /// Handle a CoordsRequired error signal from a transit router.
@@ -431,18 +682,18 @@ impl Node {
 
         // Wrap in SessionDatagram
         let my_addr = *self.node_addr();
-        let datagram = SessionDatagram::new(my_addr, dest_addr, setup.encode())
+        let mut datagram = SessionDatagram::new(my_addr, dest_addr, setup.encode())
             .with_ttl(self.config.node.session.default_ttl);
 
         // Route toward destination
-        self.send_session_datagram(&datagram).await?;
+        self.send_session_datagram(&mut datagram).await?;
 
         // Register destination identity for TUN → session routing
         self.register_identity(dest_addr, dest_pubkey);
 
         // Store session entry
         let now_ms = Self::now_ms();
-        let entry = SessionEntry::new(dest_addr, dest_pubkey, EndToEndState::Initiating(handshake), now_ms);
+        let entry = SessionEntry::new(dest_addr, dest_pubkey, EndToEndState::Initiating(handshake), now_ms, true);
         self.sessions.insert(dest_addr, entry);
 
         debug!(dest = %dest_addr, "Session initiation started");
@@ -451,17 +702,27 @@ impl Node {
 
     /// Send application data over an established session.
     ///
-    /// Encrypts the payload with the session key, wraps in DataPacket
-    /// and SessionDatagram, routes toward destination.
+    /// Uses the FSP pipeline: builds a 12-byte cleartext header (used as AAD),
+    /// prepends the 6-byte inner header to the plaintext, encrypts with AAD,
+    /// optionally inserts cleartext coords, and wraps in a SessionDatagram.
     pub(in crate::node) async fn send_session_data(
         &mut self,
         dest_addr: &NodeAddr,
         plaintext: &[u8],
     ) -> Result<(), NodeError> {
+        let now_ms = Self::now_ms();
         let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
             node_addr: *dest_addr,
             reason: "no session".into(),
         })?;
+
+        // Check warmup counter and get session timestamp
+        let include_coords = entry.coords_warmup_remaining() > 0;
+        if include_coords {
+            entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
+        }
+        let timestamp = entry.session_timestamp(now_ms);
+        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
 
         let session = match entry.state_mut() {
             EndToEndState::Established(s) => s,
@@ -476,35 +737,129 @@ impl Node {
         // Get counter before encrypting (encrypt will increment it)
         let counter = session.current_send_counter();
 
-        // Encrypt with session key
-        let ciphertext = session.encrypt(plaintext).map_err(|e| NodeError::SendFailed {
-            node_addr: *dest_addr,
-            reason: format!("session encrypt failed: {}", e),
+        // FSP inner header: [timestamp:4 LE][msg_type:1][inner_flags:1] + plaintext
+        let msg_type = SessionMessageType::DataPacket.to_byte(); // 0x10
+        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+        let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, plaintext);
+
+        // Build FSP flags
+        let flags = if include_coords { FSP_FLAG_CP } else { 0 };
+
+        // Build 12-byte FSP header (used as AAD for AEAD)
+        let payload_len = inner_plaintext.len() as u16;
+        let header = build_fsp_header(counter, flags, payload_len);
+
+        // Encrypt with AAD binding to the FSP header
+        let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| {
+            NodeError::SendFailed {
+                node_addr: *dest_addr,
+                reason: format!("session encrypt failed: {}", e),
+            }
         })?;
 
-        // Check warmup counter and decrement (while entry is still borrowed)
-        let include_coords = entry.coords_warmup_remaining() > 0;
-        if include_coords {
-            entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
-        }
-
-        // Build DataPacket with explicit counter for replay protection
-        let mut data_packet = DataPacket::new(counter, ciphertext);
+        // Assemble: header(12) + [coords] + ciphertext
+        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + ciphertext.len() + 200);
+        fsp_payload.extend_from_slice(&header);
         if include_coords {
             let my_coords = self.tree_state.my_coords().clone();
             let dest_coords = self.get_dest_coords(dest_addr);
-            data_packet = data_packet.with_coords(my_coords, dest_coords);
+            encode_coords(&my_coords, &mut fsp_payload);
+            encode_coords(&dest_coords, &mut fsp_payload);
         }
+        fsp_payload.extend_from_slice(&ciphertext);
 
         let my_addr = *self.node_addr();
-        let datagram = SessionDatagram::new(my_addr, *dest_addr, data_packet.encode())
+        let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
             .with_ttl(self.config.node.session.default_ttl);
 
-        self.send_session_datagram(&datagram).await?;
+        self.send_session_datagram(&mut datagram).await?;
 
         // Re-borrow after send (which borrowed &mut self)
         if let Some(entry) = self.sessions.get_mut(dest_addr) {
-            entry.touch(Self::now_ms());
+            if let Some(mmp) = entry.mmp_mut() {
+                mmp.sender.record_sent(counter, timestamp, ciphertext.len());
+            }
+            entry.touch(now_ms);
+        }
+
+        Ok(())
+    }
+
+    /// Send a non-data session message (reports, notifications) over an established session.
+    ///
+    /// Similar to `send_session_data()` but:
+    /// - Takes an explicit `msg_type` byte (0x11, 0x12, 0x13, etc.)
+    /// - Never includes COORDS_PRESENT (reports are lightweight)
+    /// - Reads spin bit from MMP state for the inner header
+    /// - Records the send in MMP sender state
+    pub(in crate::node) async fn send_session_msg(
+        &mut self,
+        dest_addr: &NodeAddr,
+        msg_type: u8,
+        payload: &[u8],
+    ) -> Result<(), NodeError> {
+        let now_ms = Self::now_ms();
+
+        // Read spin bit and session timestamp from entry
+        let entry = self.sessions.get(dest_addr).ok_or_else(|| NodeError::SendFailed {
+            node_addr: *dest_addr,
+            reason: "no session".into(),
+        })?;
+        let timestamp = entry.session_timestamp(now_ms);
+        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
+
+        // Build inner flags with spin bit
+        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+
+        // Get mutable access for encryption
+        let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
+            node_addr: *dest_addr,
+            reason: "no session".into(),
+        })?;
+        let session = match entry.state_mut() {
+            EndToEndState::Established(s) => s,
+            _ => {
+                return Err(NodeError::SendFailed {
+                    node_addr: *dest_addr,
+                    reason: "session not established".into(),
+                });
+            }
+        };
+
+        let counter = session.current_send_counter();
+
+        // FSP inner header + plaintext
+        let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, payload);
+
+        // Build 12-byte FSP header (no flags — no CP for reports)
+        let payload_len = inner_plaintext.len() as u16;
+        let header = build_fsp_header(counter, 0, payload_len);
+
+        // Encrypt with AAD
+        let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| {
+            NodeError::SendFailed {
+                node_addr: *dest_addr,
+                reason: format!("session encrypt failed: {}", e),
+            }
+        })?;
+
+        // Assemble: header(12) + ciphertext (no coords)
+        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + ciphertext.len());
+        fsp_payload.extend_from_slice(&header);
+        fsp_payload.extend_from_slice(&ciphertext);
+
+        let my_addr = *self.node_addr();
+        let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
+            .with_ttl(self.config.node.session.default_ttl);
+
+        self.send_session_datagram(&mut datagram).await?;
+
+        // Record in MMP sender state and touch
+        if let Some(entry) = self.sessions.get_mut(dest_addr) {
+            if let Some(mmp) = entry.mmp_mut() {
+                mmp.sender.record_sent(counter, timestamp, ciphertext.len());
+            }
+            entry.touch(now_ms);
         }
 
         Ok(())
@@ -512,11 +867,11 @@ impl Node {
 
     /// Route and send a SessionDatagram through the mesh.
     ///
-    /// Finds the next hop for the destination and sends the datagram
-    /// as an encrypted link message.
+    /// Finds the next hop for the destination, seeds path_mtu from the
+    /// first-hop transport MTU, and sends as an encrypted link message.
     async fn send_session_datagram(
         &mut self,
-        datagram: &SessionDatagram,
+        datagram: &mut SessionDatagram,
     ) -> Result<(), NodeError> {
         let next_hop_addr = match self.find_next_hop(&datagram.dest_addr) {
             Some(peer) => *peer.node_addr(),
@@ -527,6 +882,23 @@ impl Node {
                 });
             }
         };
+
+        // Seed path_mtu from the first-hop transport MTU (same as forwarding path)
+        if let Some(peer) = self.peers.get(&next_hop_addr)
+            && let Some(tid) = peer.transport_id()
+            && let Some(transport) = self.transports.get(&tid)
+        {
+            datagram.path_mtu = datagram.path_mtu.min(transport.mtu());
+        }
+
+        // Source-side: seed our PathMtuState.current_mtu from the outbound
+        // transport MTU so it doesn't stay at u16::MAX until the destination
+        // sends a PathMtuNotification back.
+        if let Some(entry) = self.sessions.get_mut(&datagram.dest_addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            mmp.path_mtu.seed_source_mtu(datagram.path_mtu);
+        }
 
         let encoded = datagram.encode();
         self.send_encrypted_link_message(&next_hop_addr, &encoded).await

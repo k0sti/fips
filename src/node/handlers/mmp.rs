@@ -5,8 +5,12 @@
 //! and teardown metric logs.
 
 use crate::mmp::MmpMode;
+use crate::mmp::MmpSessionState;
 use crate::mmp::report::{ReceiverReport, SenderReport};
 use crate::node::Node;
+use crate::protocol::{
+    PathMtuNotification, SessionMessageType, SessionReceiverReport, SessionSenderReport,
+};
 use crate::NodeAddr;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -139,17 +143,19 @@ impl Node {
             let mode = mmp.mode();
 
             // Sender reports: Full mode only
-            if mode == MmpMode::Full && mmp.sender.should_send_report(now) {
-                if let Some(sr) = mmp.sender.build_report(now) {
-                    sender_reports.push((*node_addr, sr.encode()));
-                }
+            if mode == MmpMode::Full
+                && mmp.sender.should_send_report(now)
+                && let Some(sr) = mmp.sender.build_report(now)
+            {
+                sender_reports.push((*node_addr, sr.encode()));
             }
 
             // Receiver reports: Full and Lightweight modes
-            if mode != MmpMode::Minimal && mmp.receiver.should_send_report(now) {
-                if let Some(rr) = mmp.receiver.build_report(now) {
-                    receiver_reports.push((*node_addr, rr.encode()));
-                }
+            if mode != MmpMode::Minimal
+                && mmp.receiver.should_send_report(now)
+                && let Some(rr) = mmp.receiver.build_report(now)
+            {
+                receiver_reports.push((*node_addr, rr.encode()));
             }
 
             // Periodic operator logging
@@ -241,6 +247,155 @@ impl Node {
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
             jitter_us = mmp.receiver.jitter_us(),
             "MMP link teardown"
+        );
+    }
+
+    // === Session-layer MMP ===
+
+    /// Check all sessions for pending MMP reports and send them.
+    ///
+    /// Called from the tick handler. Also emits periodic session MMP logs.
+    /// Uses the collect-then-send pattern to avoid borrowing conflicts.
+    pub(in crate::node) async fn check_session_mmp_reports(&mut self) {
+        let now = Instant::now();
+
+        // Collect reports to send: (dest_addr, msg_type, encoded_body)
+        let mut reports: Vec<(NodeAddr, u8, Vec<u8>)> = Vec::new();
+
+        for (dest_addr, entry) in self.sessions.iter_mut() {
+            let Some(mmp) = entry.mmp_mut() else {
+                continue;
+            };
+
+            let mode = mmp.mode();
+
+            // Sender reports: Full mode only
+            if mode == MmpMode::Full
+                && mmp.sender.should_send_report(now)
+                && let Some(sr) = mmp.sender.build_report(now)
+            {
+                let session_sr: SessionSenderReport = SessionSenderReport::from(&sr);
+                reports.push((
+                    *dest_addr,
+                    SessionMessageType::SenderReport.to_byte(),
+                    session_sr.encode(),
+                ));
+            }
+
+            // Receiver reports: Full and Lightweight modes
+            if mode != MmpMode::Minimal
+                && mmp.receiver.should_send_report(now)
+                && let Some(rr) = mmp.receiver.build_report(now)
+            {
+                let session_rr: SessionReceiverReport = SessionReceiverReport::from(&rr);
+                reports.push((
+                    *dest_addr,
+                    SessionMessageType::ReceiverReport.to_byte(),
+                    session_rr.encode(),
+                ));
+            }
+
+            // PathMtu notifications (all modes)
+            if mmp.path_mtu.should_send_notification(now)
+                && let Some(mtu_value) = mmp.path_mtu.build_notification(now)
+            {
+                let notif = PathMtuNotification::new(mtu_value);
+                reports.push((
+                    *dest_addr,
+                    SessionMessageType::PathMtuNotification.to_byte(),
+                    notif.encode(),
+                ));
+            }
+
+            // Periodic operator logging
+            if mmp.should_log(now) {
+                Self::log_session_mmp_metrics(dest_addr, mmp);
+                mmp.mark_logged(now);
+            }
+        }
+
+        // Send collected reports via session-layer encryption
+        for (dest_addr, msg_type, body) in reports {
+            if let Err(e) = self.send_session_msg(&dest_addr, msg_type, &body).await {
+                debug!(
+                    dest = %dest_addr,
+                    msg_type,
+                    error = %e,
+                    "Failed to send session MMP report"
+                );
+            }
+        }
+    }
+
+    /// Emit periodic session MMP metrics at info and debug levels.
+    fn log_session_mmp_metrics(dest_addr: &NodeAddr, mmp: &MmpSessionState) {
+        let m = &mmp.metrics;
+
+        let rtt_str = match m.srtt_ms() {
+            Some(rtt) => format!("{:.1}ms", rtt),
+            None => "n/a".to_string(),
+        };
+        let loss_pct = m.loss_rate() * 100.0;
+        let tx_pkts = mmp.sender.cumulative_packets_sent();
+        let rx_pkts = mmp.receiver.cumulative_packets_recv();
+        let goodput_str = format_throughput(m.goodput_bps());
+        let send_mtu = mmp.path_mtu.current_mtu();
+        let observed_mtu = mmp.path_mtu.last_observed_mtu();
+
+        info!(
+            session = %dest_addr,
+            rtt = %rtt_str,
+            loss = format_args!("{:.1}%", loss_pct),
+            goodput = %goodput_str,
+            send_mtu,
+            observed_mtu,
+            tx_pkts,
+            rx_pkts,
+            "MMP session metrics"
+        );
+
+        debug!(
+            session = %dest_addr,
+            jitter_us = mmp.receiver.jitter_us(),
+            rtt_trend = format_args!("{}", if m.rtt_trend.initialized() {
+                format!("short={:.1} long={:.1}", m.rtt_trend.short(), m.rtt_trend.long())
+            } else {
+                "n/a".to_string()
+            }),
+            loss_trend = format_args!("{}", if m.loss_trend.initialized() {
+                format!("short={:.4} long={:.4}", m.loss_trend.short(), m.loss_trend.long())
+            } else {
+                "n/a".to_string()
+            }),
+            delivery_fwd = format_args!("{:.3}", m.delivery_ratio_forward),
+            delivery_rev = format_args!("{:.3}", m.delivery_ratio_reverse),
+            mode = %mmp.mode(),
+            "MMP session metrics (detail)"
+        );
+    }
+
+    /// Emit a teardown log summarizing lifetime session MMP metrics.
+    pub(in crate::node) fn log_session_mmp_teardown(dest_addr: &NodeAddr, mmp: &MmpSessionState) {
+        let m = &mmp.metrics;
+
+        let rtt_str = match m.srtt_ms() {
+            Some(rtt) => format!("{:.1}ms", rtt),
+            None => "n/a".to_string(),
+        };
+
+        info!(
+            session = %dest_addr,
+            rtt = %rtt_str,
+            loss = format_args!("{:.1}%", m.loss_rate() * 100.0),
+            etx = format_args!("{:.2}", m.etx),
+            send_mtu = mmp.path_mtu.current_mtu(),
+            observed_mtu = mmp.path_mtu.last_observed_mtu(),
+            tx_pkts = mmp.sender.cumulative_packets_sent(),
+            tx_bytes = mmp.sender.cumulative_bytes_sent(),
+            rx_pkts = mmp.receiver.cumulative_packets_recv(),
+            rx_bytes = mmp.receiver.cumulative_bytes_recv(),
+            jitter_us = mmp.receiver.jitter_us(),
+            "MMP session teardown"
         );
     }
 }

@@ -5,7 +5,8 @@
 //! multi-hop forwarding through live node topologies.
 
 use super::*;
-use crate::protocol::{DataPacket, SessionAck, SessionDatagram, SessionSetup};
+use crate::node::session_wire::{build_fsp_header, FSP_FLAG_CP};
+use crate::protocol::{SessionAck, SessionDatagram, SessionSetup, encode_coords};
 use crate::tree::TreeCoordinate;
 use spanning_tree::{
     cleanup_nodes, process_available_packets, run_tree_test, verify_tree_convergence,
@@ -184,7 +185,7 @@ async fn test_coord_cache_warming_session_ack() {
 }
 
 #[tokio::test]
-async fn test_coord_cache_warming_data_packet_with_coords() {
+async fn test_coord_cache_warming_encrypted_msg_with_coords() {
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     let src_addr = make_node_addr(0x01);
@@ -194,9 +195,13 @@ async fn test_coord_cache_warming_data_packet_with_coords() {
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
 
-    let data = DataPacket::new(0, vec![1, 2, 3, 4])
-        .with_coords(src_coords.clone(), dest_coords.clone());
-    let data_payload = data.encode();
+    // Build FSP encrypted message with CP flag: header(12) + coords + fake_ciphertext
+    let header = build_fsp_header(0, FSP_FLAG_CP, 20);
+    let mut data_payload = Vec::new();
+    data_payload.extend_from_slice(&header);
+    encode_coords(&src_coords, &mut data_payload);
+    encode_coords(&dest_coords, &mut data_payload);
+    data_payload.extend_from_slice(&[0xCC; 36]); // fake ciphertext (20 payload + 16 tag)
 
     let dg = SessionDatagram::new(src_addr, dest_addr, data_payload);
     let encoded = dg.encode();
@@ -213,24 +218,26 @@ async fn test_coord_cache_warming_data_packet_with_coords() {
 
     assert!(
         node.coord_cache().get(&src_addr, now_ms).is_some(),
-        "src coords not cached from DataPacket"
+        "src coords not cached from encrypted message"
     );
     assert!(
         node.coord_cache().get(&dest_addr, now_ms).is_some(),
-        "dest coords not cached from DataPacket"
+        "dest coords not cached from encrypted message"
     );
 }
 
 #[tokio::test]
-async fn test_coord_cache_warming_opaque_data_packet() {
+async fn test_coord_cache_warming_encrypted_msg_no_coords() {
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     let src_addr = make_node_addr(0x01);
     let dest_addr = make_node_addr(0x02);
 
-    // DataPacket without COORDS_PRESENT — no coords to cache
-    let data = DataPacket::new(0, vec![1, 2, 3, 4]);
-    let data_payload = data.encode();
+    // Build FSP encrypted message without CP flag: header(12) + fake_ciphertext
+    let header = build_fsp_header(0, 0, 20);
+    let mut data_payload = Vec::new();
+    data_payload.extend_from_slice(&header);
+    data_payload.extend_from_slice(&[0xCC; 36]); // fake ciphertext (20 payload + 16 tag)
 
     let dg = SessionDatagram::new(src_addr, dest_addr, data_payload);
     let encoded = dg.encode();
@@ -244,11 +251,11 @@ async fn test_coord_cache_warming_opaque_data_packet() {
 
     assert!(
         node.coord_cache().get(&src_addr, now_ms).is_none(),
-        "Should not cache coords from opaque DataPacket"
+        "Should not cache coords from message without CP flag"
     );
     assert!(
         node.coord_cache().get(&dest_addr, now_ms).is_none(),
-        "Should not cache coords from opaque DataPacket"
+        "Should not cache coords from message without CP flag"
     );
 }
 

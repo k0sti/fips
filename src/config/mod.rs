@@ -30,7 +30,7 @@ use thiserror::Error;
 
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, DiscoveryConfig, LimitsConfig, NodeConfig,
-    RateLimitConfig, RetryConfig, SessionConfig, TreeConfig,
+    RateLimitConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
 pub use transport::{TransportInstances, TransportsConfig, UdpConfig};

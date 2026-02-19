@@ -62,13 +62,21 @@ const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADE
 /// Total FIPS encapsulation overhead (worst case).
 ///
 /// Breakdown:
-/// - Noise encryption tag: 16 bytes
-/// - Established frame header: 16 bytes (common prefix + receiver_idx + counter)
-/// - Inner header: 5 bytes (4-byte timestamp + 1-byte msg_type)
+/// - Noise encryption tag: 16 bytes (FLP link-layer AEAD)
+/// - FLP established frame header: 16 bytes (common prefix + receiver_idx + counter)
+/// - FLP inner header: 5 bytes (4-byte timestamp + 1-byte msg_type)
 /// - SessionDatagram fields: 35 bytes (ttl + path_mtu + src_addr + dest_addr)
-/// - DataPacket header: 12 bytes (msg_type + flags + counter + payload_len)
+/// - FSP header: 12 bytes (4-byte prefix + 8-byte counter)
+/// - FSP inner header: 6 bytes (4-byte timestamp + 1-byte msg_type + 1-byte inner_flags)
+/// - Session AEAD tag: 16 bytes (FSP session-layer AEAD)
 /// - Coordinates (worst case): ~60 bytes (2 coords with depth 3 each)
-pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 60; // 144 bytes
+///
+/// The old 12-byte session header is replaced by FSP header (12) + FSP inner
+/// header (6) + session AEAD tag (16) = 34 bytes, an increase of 22 bytes.
+/// However, the old overhead already accounted for the session AEAD tag in
+/// the "Noise encryption tag" line, and the old header included the counter.
+/// Net change: +6 bytes for FSP inner header.
+pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 6 + 60; // 150 bytes
 
 /// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
 ///

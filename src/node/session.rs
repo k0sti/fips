@@ -4,6 +4,8 @@
 //! Sessions are established via SessionSetup/SessionAck handshake
 //! messages carried inside SessionDatagram envelopes through the mesh.
 
+use crate::config::SessionMmpConfig;
+use crate::mmp::MmpSessionState;
 use crate::noise::{HandshakeState, NoiseSession};
 use crate::NodeAddr;
 use secp256k1::PublicKey;
@@ -54,10 +56,19 @@ pub(crate) struct SessionEntry {
     created_at: u64,
     /// Last activity timestamp (Unix milliseconds).
     last_activity: u64,
-    /// Remaining DataPackets that should include COORDS_PRESENT.
+    /// When the session transitioned to Established (Unix milliseconds).
+    /// Used to compute session-relative timestamps for the FSP inner header.
+    /// Set to 0 until the session is established.
+    session_start_ms: u64,
+    /// Remaining data packets that should include COORDS_PRESENT.
     /// Initialized from config when session becomes Established;
     /// reset on CoordsRequired receipt.
     coords_warmup_remaining: u8,
+    /// Whether this node initiated the Noise IK handshake.
+    /// Used for spin bit role assignment in session-layer MMP.
+    is_initiator: bool,
+    /// Session-layer MMP state. Initialized on Established transition.
+    mmp: Option<MmpSessionState>,
 }
 
 impl SessionEntry {
@@ -67,6 +78,7 @@ impl SessionEntry {
         remote_pubkey: PublicKey,
         state: EndToEndState,
         now_ms: u64,
+        is_initiator: bool,
     ) -> Self {
         Self {
             remote_addr,
@@ -74,7 +86,10 @@ impl SessionEntry {
             state: Some(state),
             created_at: now_ms,
             last_activity: now_ms,
+            session_start_ms: 0,
             coords_warmup_remaining: 0,
+            is_initiator,
+            mmp: None,
         }
     }
 
@@ -131,5 +146,42 @@ impl SessionEntry {
     /// and CoordsRequired reset).
     pub(crate) fn set_coords_warmup_remaining(&mut self, value: u8) {
         self.coords_warmup_remaining = value;
+    }
+
+    /// Mark the session as started (transition to Established).
+    ///
+    /// Records the current time as the session start for computing
+    /// session-relative timestamps in the FSP inner header.
+    pub(crate) fn mark_established(&mut self, now_ms: u64) {
+        self.session_start_ms = now_ms;
+    }
+
+    /// Compute a session-relative timestamp for the FSP inner header.
+    ///
+    /// Returns `(now_ms - session_start_ms)` truncated to u32.
+    /// Wraps naturally at ~49.7 days, which is fine for relative timing.
+    pub(crate) fn session_timestamp(&self, now_ms: u64) -> u32 {
+        now_ms.wrapping_sub(self.session_start_ms) as u32
+    }
+
+    /// Whether this node initiated the Noise IK handshake.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_initiator(&self) -> bool {
+        self.is_initiator
+    }
+
+    /// Get a reference to the session-layer MMP state, if initialized.
+    pub(crate) fn mmp(&self) -> Option<&MmpSessionState> {
+        self.mmp.as_ref()
+    }
+
+    /// Get a mutable reference to the session-layer MMP state, if initialized.
+    pub(crate) fn mmp_mut(&mut self) -> Option<&mut MmpSessionState> {
+        self.mmp.as_mut()
+    }
+
+    /// Initialize session-layer MMP state (called on Established transition).
+    pub(crate) fn init_mmp(&mut self, config: &SessionMmpConfig) {
+        self.mmp = Some(MmpSessionState::new(config, self.is_initiator));
     }
 }

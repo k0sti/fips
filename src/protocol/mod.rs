@@ -37,10 +37,12 @@ pub use tree::TreeAnnounce;
 pub use filter::FilterAnnounce;
 pub use discovery::{LookupRequest, LookupResponse};
 pub use session::{
-    CoordsRequired, DataFlags, DataPacket, PathBroken, SessionAck, SessionFlags,
-    SessionMessageType, SessionSetup, COORDS_REQUIRED_SIZE, DATA_FLAG_COORDS_PRESENT,
-    DATA_HEADER_SIZE,
+    CoordsRequired, FspFlags, FspInnerFlags, PathBroken, PathMtuNotification, SessionAck,
+    SessionFlags, SessionMessageType, SessionReceiverReport, SessionSenderReport, SessionSetup,
+    COORDS_REQUIRED_SIZE, PATH_MTU_NOTIFICATION_SIZE, SESSION_RECEIVER_REPORT_SIZE,
+    SESSION_SENDER_REPORT_SIZE,
 };
+pub(crate) use session::{decode_optional_coords, encode_coords};
 
 /// Protocol version for message compatibility.
 pub const PROTOCOL_VERSION: u8 = 1;

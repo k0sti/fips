@@ -98,6 +98,12 @@ impl Node {
             .collect();
 
         for addr in idle {
+            // Log MMP teardown metrics before removing the session
+            if let Some(entry) = self.sessions.get(&addr)
+                && let Some(mmp) = entry.mmp()
+            {
+                Self::log_session_mmp_teardown(&addr, mmp);
+            }
             self.sessions.remove(&addr);
             self.pending_tun_packets.remove(&addr);
             debug!(

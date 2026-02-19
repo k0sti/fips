@@ -173,6 +173,82 @@ impl ReceiverReport {
 }
 
 // ============================================================================
+// Conversions between link-layer and session-layer report types
+// ============================================================================
+
+use crate::protocol::{SessionReceiverReport, SessionSenderReport};
+
+impl From<&SenderReport> for SessionSenderReport {
+    fn from(r: &SenderReport) -> Self {
+        Self {
+            interval_start_counter: r.interval_start_counter,
+            interval_end_counter: r.interval_end_counter,
+            interval_start_timestamp: r.interval_start_timestamp,
+            interval_end_timestamp: r.interval_end_timestamp,
+            interval_bytes_sent: r.interval_bytes_sent,
+            cumulative_packets_sent: r.cumulative_packets_sent,
+            cumulative_bytes_sent: r.cumulative_bytes_sent,
+        }
+    }
+}
+
+impl From<&SessionSenderReport> for SenderReport {
+    fn from(r: &SessionSenderReport) -> Self {
+        Self {
+            interval_start_counter: r.interval_start_counter,
+            interval_end_counter: r.interval_end_counter,
+            interval_start_timestamp: r.interval_start_timestamp,
+            interval_end_timestamp: r.interval_end_timestamp,
+            interval_bytes_sent: r.interval_bytes_sent,
+            cumulative_packets_sent: r.cumulative_packets_sent,
+            cumulative_bytes_sent: r.cumulative_bytes_sent,
+        }
+    }
+}
+
+impl From<&ReceiverReport> for SessionReceiverReport {
+    fn from(r: &ReceiverReport) -> Self {
+        Self {
+            highest_counter: r.highest_counter,
+            cumulative_packets_recv: r.cumulative_packets_recv,
+            cumulative_bytes_recv: r.cumulative_bytes_recv,
+            timestamp_echo: r.timestamp_echo,
+            dwell_time: r.dwell_time,
+            max_burst_loss: r.max_burst_loss,
+            mean_burst_loss: r.mean_burst_loss,
+            jitter: r.jitter,
+            ecn_ce_count: r.ecn_ce_count,
+            owd_trend: r.owd_trend,
+            burst_loss_count: r.burst_loss_count,
+            cumulative_reorder_count: r.cumulative_reorder_count,
+            interval_packets_recv: r.interval_packets_recv,
+            interval_bytes_recv: r.interval_bytes_recv,
+        }
+    }
+}
+
+impl From<&SessionReceiverReport> for ReceiverReport {
+    fn from(r: &SessionReceiverReport) -> Self {
+        Self {
+            highest_counter: r.highest_counter,
+            cumulative_packets_recv: r.cumulative_packets_recv,
+            cumulative_bytes_recv: r.cumulative_bytes_recv,
+            timestamp_echo: r.timestamp_echo,
+            dwell_time: r.dwell_time,
+            max_burst_loss: r.max_burst_loss,
+            mean_burst_loss: r.mean_burst_loss,
+            jitter: r.jitter,
+            ecn_ce_count: r.ecn_ce_count,
+            owd_trend: r.owd_trend,
+            burst_loss_count: r.burst_loss_count,
+            cumulative_reorder_count: r.cumulative_reorder_count,
+            interval_packets_recv: r.interval_packets_recv,
+            interval_bytes_recv: r.interval_bytes_recv,
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

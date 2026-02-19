@@ -8,6 +8,7 @@
 use crate::mmp::algorithms::{DualEwma, SrttEstimator, compute_etx};
 use crate::mmp::report::ReceiverReport;
 use std::time::Instant;
+use tracing::debug;
 
 /// Derived MMP metrics, updated from incoming ReceiverReports.
 ///
@@ -80,6 +81,14 @@ impl MmpMetrics {
             if our_timestamp_ms > echo_ms + dwell_ms {
                 let rtt_ms = our_timestamp_ms - echo_ms - dwell_ms;
                 let rtt_us = (rtt_ms as i64) * 1000;
+                debug!(
+                    our_ts = our_timestamp_ms,
+                    echo = echo_ms,
+                    dwell = dwell_ms,
+                    rtt_ms = rtt_ms,
+                    srtt_ms = self.srtt.srtt_us() as f64 / 1000.0,
+                    "RTT sample from timestamp echo"
+                );
                 self.srtt.update(rtt_us);
                 self.rtt_trend.update(rtt_us as f64);
             }

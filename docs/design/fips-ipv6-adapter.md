@@ -121,13 +121,14 @@ after all layers of wrapping.
 | ----- | -------- | ------- |
 | Link encryption | 37 bytes | 16-byte outer header + 5-byte inner header + 16-byte AEAD tag |
 | SessionDatagram envelope | 36 bytes | type + ttl + path_mtu + src_addr + dest_addr |
-| DataPacket header | 12 bytes | type + flags + counter + payload_len |
-| Session encryption | 16 bytes | ChaCha20-Poly1305 AEAD tag |
-| **Minimal total** | **101 bytes** | |
+| FSP header | 12 bytes | 4-byte prefix + 8-byte counter (used as AEAD AAD) |
+| FSP inner header | 6 bytes | 4-byte timestamp + 1-byte msg_type + 1-byte inner_flags (inside AEAD) |
+| Session AEAD tag | 16 bytes | ChaCha20-Poly1305 tag on session-encrypted payload |
+| **Minimal total** | **107 bytes** | |
 | Coordinates (if present) | ~43 bytes | Depth-dependent, first few packets only |
-| **Worst case total** | **144 bytes** | With COORDS_PRESENT for depth-3 paths |
+| **Worst case total** | **150 bytes** | With CP flag set for depth-3 paths |
 
-The `FIPS_OVERHEAD` constant (144 bytes) is used for conservative MTU
+The `FIPS_OVERHEAD` constant (150 bytes) is used for conservative MTU
 calculations.
 
 ### Effective IPv6 MTU
@@ -142,14 +143,14 @@ For typical deployments:
 
 | Transport MTU | Effective IPv6 MTU | Notes |
 | ------------- | ------------------ | ----- |
-| 1472 (UDP/Ethernet) | 1328 | Standard deployment |
-| 1280 (UDP minimum) | 1136 | Below IPv6 minimum |
+| 1472 (UDP/Ethernet) | 1322 | Standard deployment |
+| 1280 (UDP minimum) | 1130 | Below IPv6 minimum |
 
 IPv6 mandates that every link support at least 1280 bytes. The minimum
 transport path MTU for the IPv6 adapter is therefore:
 
 ```text
-1280 + 144 = 1424 bytes
+1280 + 150 = 1430 bytes
 ```
 
 Transports with smaller MTUs (LoRa at ~250 bytes, serial at 256 bytes) cannot
@@ -315,13 +316,13 @@ decryption (opens attack surface).
 
 Endpoint-only fragmentation (fragment before session encryption, reassemble
 after decryption) is a future direction that avoids these objections. Each
-fragment would be independently encrypted and look like a normal DataPacket
+fragment would be independently encrypted and look like a normal data packet
 to transit nodes.
 
 ## References
 
 - [fips-intro.md](fips-intro.md) — Protocol overview and architecture
 - [fips-session-layer.md](fips-session-layer.md) — FSP (below the adapter)
-- [fips-wire-formats.md](fips-wire-formats.md) — DataPacket and SessionDatagram
+- [fips-wire-formats.md](fips-wire-formats.md) — FSP and SessionDatagram wire
   formats
 - [fips-configuration.md](fips-configuration.md) — TUN configuration parameters

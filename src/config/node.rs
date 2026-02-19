@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::IdentityConfig;
-use crate::mmp::MmpConfig;
+use crate::mmp::{MmpConfig, MmpMode, DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE};
 
 // ============================================================================
 // Node Configuration Subsections
@@ -227,7 +227,7 @@ pub struct SessionConfig {
     /// Established sessions with no activity for this duration are removed.
     #[serde(default = "SessionConfig::default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
-    /// Number of initial DataPackets per session that include COORDS_PRESENT
+    /// Number of initial data packets per session that include COORDS_PRESENT
     /// for transit cache warmup (`node.session.coords_warmup_packets`).
     /// Also used as the reset count on CoordsRequired receipt.
     #[serde(default = "SessionConfig::default_coords_warmup_packets")]
@@ -252,6 +252,42 @@ impl SessionConfig {
     fn default_pending_max_destinations() -> usize { 256 }
     fn default_idle_timeout_secs() -> u64 { 90 }
     fn default_coords_warmup_packets() -> u8 { 5 }
+}
+
+/// Session-layer Metrics Measurement Protocol (`node.session_mmp.*`).
+///
+/// Separate from link-layer `node.mmp.*` to allow independent mode/interval
+/// configuration per layer. Session reports consume bandwidth on every transit
+/// link, so operators may want a lighter mode (e.g., Lightweight) for sessions
+/// while running Full mode on links.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMmpConfig {
+    /// Operating mode (`node.session_mmp.mode`).
+    #[serde(default)]
+    pub mode: MmpMode,
+
+    /// Periodic operator log interval in seconds (`node.session_mmp.log_interval_secs`).
+    #[serde(default = "SessionMmpConfig::default_log_interval_secs")]
+    pub log_interval_secs: u64,
+
+    /// OWD trend ring buffer size (`node.session_mmp.owd_window_size`).
+    #[serde(default = "SessionMmpConfig::default_owd_window_size")]
+    pub owd_window_size: usize,
+}
+
+impl Default for SessionMmpConfig {
+    fn default() -> Self {
+        Self {
+            mode: MmpMode::default(),
+            log_interval_secs: DEFAULT_LOG_INTERVAL_SECS,
+            owd_window_size: DEFAULT_OWD_WINDOW_SIZE,
+        }
+    }
+}
+
+impl SessionMmpConfig {
+    fn default_log_interval_secs() -> u64 { DEFAULT_LOG_INTERVAL_SECS }
+    fn default_owd_window_size() -> usize { DEFAULT_OWD_WINDOW_SIZE }
 }
 
 /// Internal buffers (`node.buffers.*`).
@@ -343,9 +379,13 @@ pub struct NodeConfig {
     #[serde(default)]
     pub buffers: BuffersConfig,
 
-    /// Metrics Measurement Protocol (`node.mmp.*`).
+    /// Metrics Measurement Protocol — link layer (`node.mmp.*`).
     #[serde(default)]
     pub mmp: MmpConfig,
+
+    /// Metrics Measurement Protocol — session layer (`node.session_mmp.*`).
+    #[serde(default)]
+    pub session_mmp: SessionMmpConfig,
 }
 
 impl Default for NodeConfig {
@@ -365,6 +405,7 @@ impl Default for NodeConfig {
             session: SessionConfig::default(),
             buffers: BuffersConfig::default(),
             mmp: MmpConfig::default(),
+            session_mmp: SessionMmpConfig::default(),
         }
     }
 }

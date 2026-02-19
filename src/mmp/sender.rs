@@ -35,6 +35,14 @@ pub struct SenderState {
 
 impl SenderState {
     pub fn new() -> Self {
+        Self::new_with_cold_start(DEFAULT_COLD_START_INTERVAL_MS)
+    }
+
+    /// Create with a custom cold-start interval (ms).
+    ///
+    /// Used by session-layer MMP which needs a longer initial interval
+    /// since reports consume bandwidth on every transit link.
+    pub fn new_with_cold_start(cold_start_ms: u64) -> Self {
         Self {
             cumulative_packets_sent: 0,
             cumulative_bytes_sent: 0,
@@ -45,7 +53,7 @@ impl SenderState {
             last_timestamp: 0,
             interval_has_data: false,
             last_report_time: None,
-            report_interval: Duration::from_millis(DEFAULT_COLD_START_INTERVAL_MS),
+            report_interval: Duration::from_millis(cold_start_ms),
         }
     }
 
@@ -104,17 +112,23 @@ impl SenderState {
         }
     }
 
-    /// Update the report interval based on SRTT.
+    /// Update the report interval based on SRTT (link-layer defaults).
     ///
-    /// Sender reports at 2-5× the receiver report interval. For simplicity,
-    /// we use 2× SRTT clamped to [MIN, MAX].
+    /// Sender reports at 2× SRTT clamped to [MIN, MAX].
     pub fn update_report_interval_from_srtt(&mut self, srtt_us: i64) {
+        self.update_report_interval_with_bounds(srtt_us, MIN_REPORT_INTERVAL_MS, MAX_REPORT_INTERVAL_MS);
+    }
+
+    /// Update the report interval based on SRTT with custom bounds.
+    ///
+    /// Used by session-layer MMP which needs higher clamp values since
+    /// each report consumes bandwidth on every transit link.
+    pub fn update_report_interval_with_bounds(&mut self, srtt_us: i64, min_ms: u64, max_ms: u64) {
         if srtt_us <= 0 {
             return;
         }
         let interval_us = (srtt_us * 2) as u64;
-        let interval_ms = (interval_us / 1000)
-            .clamp(MIN_REPORT_INTERVAL_MS, MAX_REPORT_INTERVAL_MS);
+        let interval_ms = (interval_us / 1000).clamp(min_ms, max_ms);
         self.report_interval = Duration::from_millis(interval_ms);
     }
 

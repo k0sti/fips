@@ -212,8 +212,7 @@ be made.
 ### Unified Cache
 
 The coordinate cache is a single unified cache. All sources — SessionSetup
-transit, COORDS_PRESENT DataPackets, LookupResponse — write to the same
-cache.
+transit, CP-flagged data packets, LookupResponse — write to the same cache.
 
 ### Population Sources
 
@@ -221,7 +220,7 @@ cache.
 | ------ | ---- | ---- |
 | SessionSetup transit | Session establishment | Both src and dest coordinates |
 | SessionAck transit | Session establishment | Responder's coordinates |
-| DataPacket with COORDS_PRESENT | Warmup or recovery | Both src and dest coordinates |
+| CP-flagged data packet | Warmup or recovery | Both src and dest coordinates (cleartext) |
 | LookupResponse | Discovery | Target's coordinates |
 
 ### Eviction
@@ -312,7 +311,7 @@ Destination Unreachable.
 ## SessionSetup Self-Bootstrapping
 
 SessionSetup is the mechanism that warms transit node coordinate caches
-along a path, enabling subsequent DataPackets to route efficiently.
+along a path, enabling subsequent data packets to route efficiently.
 
 ### How It Works
 
@@ -335,18 +334,19 @@ coordinates and warming caches in the other direction.
 ### Result
 
 After the handshake completes, the entire forward and reverse paths have
-cached coordinates for both endpoints. Subsequent DataPackets use minimal
+cached coordinates for both endpoints. Subsequent data packets use minimal
 headers (no coordinates) and route efficiently through the warmed caches.
 
-## COORDS_PRESENT Warmup
+## CP (Coords Present) Warmup
 
-The COORDS_PRESENT flag on DataPackets provides a secondary cache-warming
+The CP flag in the FSP common prefix provides a secondary cache-warming
 mechanism that complements SessionSetup. See
 [fips-session-layer.md](fips-session-layer.md) for the warmup-then-reactive
 strategy.
 
-Transit nodes process DataPackets with COORDS_PRESENT by extracting and
-caching both source and destination coordinates — the same operation
+Transit nodes parse the CP flag from the FSP header and extract source and
+destination coordinates from the cleartext section between the header and
+ciphertext — no decryption needed. This is the same caching operation
 performed for SessionSetup coordinates.
 
 ## Error Recovery
@@ -367,8 +367,7 @@ coordinates for the destination. It cannot make a forwarding decision.
 
 **Source recovery**:
 1. Initiate discovery (LookupRequest flood) for the destination
-2. Reset COORDS_PRESENT warmup counter — subsequent DataPackets include
-   coordinates
+2. Reset CP warmup counter — subsequent data packets include coordinates
 3. When discovery completes, warmup counter resets again (covers timing gap)
 
 The crypto session remains active throughout — only routing state is
@@ -386,7 +385,7 @@ source.
 **Source recovery**:
 1. Remove stale coordinates from cache
 2. Initiate discovery for the destination
-3. Reset COORDS_PRESENT warmup counter
+3. Reset CP warmup counter
 
 ### Error Signal Rate Limiting
 
@@ -397,11 +396,11 @@ packets to the same destination hit the same routing failure simultaneously.
 ### Error Routing Limitation
 
 Error signals route back to the source using `find_next_hop(src_addr)`. For
-steady-state DataPackets (after the COORDS_PRESENT warmup window), the
+steady-state data packets (after the CP warmup window), the
 transit node may lack cached coordinates for the source. If so, the error is
 silently dropped.
 
-This blind spot is partially addressed by COORDS_PRESENT warmup: transit
+This blind spot is partially addressed by CP warmup: transit
 nodes receive source coordinates during the warmup phase. But after warmup
 expires and transit caches for the source expire, errors may be lost. The
 session idle timeout (90s) limits the window — if traffic stops long enough
@@ -423,8 +422,8 @@ sequence:
    returns the destination's coordinates
 4. **Session establishment**: SessionSetup carries coordinates, warming
    transit caches along the path
-5. **Warmup**: First N DataPackets include COORDS_PRESENT, reinforcing
-   transit caches
+5. **Warmup**: First N data packets include CP flag, reinforcing transit
+   caches
 
 The first packet to a new destination always triggers this sequence. The
 packet is queued (bounded) until the session is established.
@@ -435,7 +434,7 @@ After session establishment and warmup:
 
 - Transit nodes have cached coordinates for both endpoints
 - Bloom filters have converged for the destination
-- DataPackets use minimal headers (no coordinates)
+- Data packets use minimal headers (no coordinates)
 - Routing decisions are fast: bloom candidate selection + distance ranking
 
 ### Steady State
@@ -445,7 +444,7 @@ In steady state, the mesh is mostly self-maintaining:
 - TreeAnnounce gossip keeps the spanning tree current
 - FilterAnnounce gossip keeps bloom filters current
 - Coordinate caches are refreshed by active routing traffic
-- Occasional cache misses trigger COORDS_PRESENT or discovery, but these
+- Occasional cache misses trigger CP warmup or discovery, but these
   are rare when traffic is flowing
 
 ### Cache Expiry and Recovery
@@ -511,8 +510,8 @@ routing decisions but retains its own end-to-end encryption and identity.
 | LookupResponse | ~400 bytes | Response to discovery | Yes (greedy routed) |
 | SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
 | SessionDatagram + SessionAck | ~122 bytes | Session confirmation | Yes (routed) |
-| SessionDatagram + DataPacket (minimal) | 40 bytes + payload | Bulk traffic | Yes (routed) |
-| SessionDatagram + DataPacket (with coords) | ~172 bytes + payload | Warmup/recovery | Yes (routed) |
+| SessionDatagram + Data (minimal) | ~107 bytes + payload | Bulk traffic | Yes (routed) |
+| SessionDatagram + Data (with CP) | ~150 bytes + payload | Warmup/recovery | Yes (routed) |
 | SessionDatagram + CoordsRequired | 70 bytes | Cache miss error | Yes (routed) |
 | SessionDatagram + PathBroken | 70+ bytes | Dead-end error | Yes (routed) |
 | Disconnect | 2 bytes | Link teardown | No (peer-to-peer) |
@@ -550,7 +549,7 @@ recovery).
 | Flush coord cache on parent change | **Implemented** |
 | LookupRequest/LookupResponse discovery | **Implemented** |
 | SessionSetup self-bootstrapping | **Implemented** |
-| COORDS_PRESENT warmup-then-reactive | **Implemented** |
+| CP warmup-then-reactive | **Implemented** |
 | CoordsRequired recovery | **Implemented** |
 | PathBroken recovery | **Implemented** |
 | Error signal rate limiting | **Implemented** |

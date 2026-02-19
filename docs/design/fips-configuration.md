@@ -148,7 +148,7 @@ Controls end-to-end session behavior and packet queuing.
 | `node.session.pending_packets_per_dest` | usize | `16` | Queue depth per destination during session establishment |
 | `node.session.pending_max_destinations` | usize | `256` | Max destinations with pending packets |
 | `node.session.idle_timeout_secs` | u64 | `90` | Idle session timeout; established sessions with no activity for this duration are removed |
-| `node.session.coords_warmup_packets` | u8 | `5` | Number of initial DataPackets per session that include COORDS_PRESENT for transit cache warmup; also the reset count on CoordsRequired receipt |
+| `node.session.coords_warmup_packets` | u8 | `5` | Number of initial data packets per session that include the CP flag for transit cache warmup; also the reset count on CoordsRequired receipt |
 
 The anti-replay window size (2048 packets) is a compile-time constant and not
 configurable.

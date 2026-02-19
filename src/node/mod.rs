@@ -11,6 +11,7 @@ mod retry;
 mod rate_limit;
 mod routing_error_rate_limit;
 pub(crate) mod session;
+pub(crate) mod session_wire;
 pub(crate) mod wire;
 mod tree;
 #[cfg(test)]

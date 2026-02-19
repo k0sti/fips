@@ -125,7 +125,7 @@ and transmitted after the session is established.
 SessionSetup is self-bootstrapping for routing. It carries the source's and
 destination's tree coordinates in the clear (not inside the Noise payload).
 As the message transits intermediate nodes, each node caches these coordinates,
-warming the path for subsequent DataPackets that carry only addresses (no
+warming the path for subsequent data packets that carry only addresses (no
 coordinates).
 
 SessionAck carries the responder's coordinates back along the reverse path,
@@ -145,12 +145,14 @@ This ensures exactly one handshake completes.
 
 ### Data Transfer
 
-Once established, sessions carry DataPacket messages containing encrypted
-application data. Each DataPacket includes:
+Once established, sessions carry encrypted data using the FSP pipeline. Each
+encrypted message includes:
 
-- An explicit 8-byte counter for replay protection (used as the AEAD nonce)
-- A flags byte (including COORDS_PRESENT for cache warming)
-- The encrypted payload
+- A 12-byte cleartext header (used as AEAD AAD) containing the counter and
+  flags (including the CP flag for coordinate cache warming)
+- Optional cleartext coordinates when the CP flag is set
+- An AEAD-encrypted payload containing a 6-byte inner header (session-relative
+  timestamp, message type, inner flags) followed by the application data
 
 ### Session Idle Timeout
 
@@ -239,9 +241,9 @@ discarded after the handshake.
 ## Replay Protection
 
 FSP uses explicit 8-byte counters on the wire for replay protection. Each side
-maintains a monotonically increasing send counter, transmitted with every
-DataPacket. The receiver maintains a sliding window (2048-entry bitmap)
-tracking which counters have been seen.
+maintains a monotonically increasing send counter, included in the 12-byte
+cleartext header of every encrypted message. The receiver maintains a sliding
+window (2048-entry bitmap) tracking which counters have been seen.
 
 This design is critical for operation over unreliable transports. Under UDP
 packet loss or reordering, implicit nonce counters (where the receiver
@@ -253,34 +255,34 @@ regardless of what packets were lost or reordered.
 The same `ReplayWindow` and `decrypt_with_replay_check()` implementation is
 used at both the link and session layers.
 
-## COORDS_PRESENT Warmup Strategy
+## CP (Coords Present) Warmup Strategy
 
 Session establishment (SessionSetup/SessionAck) warms transit node coordinate
 caches along the path. But coordinate caches have a finite TTL (default 300s),
 and entries may be evicted under memory pressure. When a transit node's cache
-entry expires, it cannot forward DataPackets (which carry only addresses, not
+entry expires, it cannot forward data packets (which carry only addresses, not
 coordinates) and sends a CoordsRequired error.
 
 FSP uses a warmup-then-reactive strategy to keep transit caches populated:
 
 ### Warmup Phase
 
-After session establishment, the first N DataPackets (configurable, default 5)
-include both source and destination coordinates via the COORDS_PRESENT flag.
-Transit nodes cache these coordinates as packets pass through, reinforcing the
-path established by SessionSetup.
+After session establishment, the first N data packets (configurable, default 5)
+include both source and destination coordinates via the CP flag in the FSP
+common prefix. The coordinates appear in cleartext between the 12-byte header
+and the ciphertext, allowing transit nodes to cache them without decryption.
 
 ### Steady State
 
-After the warmup count is reached, FSP clears the COORDS_PRESENT flag and
-sends minimal DataPackets (4-byte header instead of ~136 bytes with
-coordinates). Transit nodes serve from their coordinate caches.
+After the warmup count is reached, FSP clears the CP flag and sends minimal
+data packets (12-byte header + ciphertext). Transit nodes serve from their
+coordinate caches.
 
 ### Reactive Recovery
 
 When FSP receives a CoordsRequired signal:
 
-1. The warmup counter resets — subsequent DataPackets include coordinates again
+1. The warmup counter resets — subsequent data packets include coordinates again
 2. A new LookupRequest may be initiated to rediscover the destination's
    current coordinates
 3. When the LookupResponse arrives for an established session, the warmup
@@ -343,7 +345,7 @@ either fall back to bloom-filter-only routing or signal CoordsRequired.
 
 The coordinate cache is a single unified cache (merged from previously
 separate coord_cache and route_cache). All coordinate sources — SessionSetup
-transit, COORDS_PRESENT DataPackets, LookupResponse — write to the same cache.
+transit, CP-flagged data packets, LookupResponse — write to the same cache.
 
 ### Eviction Policy
 
@@ -380,7 +382,9 @@ node caches (still within their 300s TTL) are re-warmed.
 | Session establishment (Noise IK) | **Implemented** |
 | End-to-end encryption (ChaCha20-Poly1305) | **Implemented** |
 | Explicit counter replay protection | **Implemented** |
-| COORDS_PRESENT warmup-then-reactive | **Implemented** |
+| CP warmup-then-reactive | **Implemented** |
+| FSP wire format (prefix, AAD, inner header) | **Implemented** |
+| Session-layer MMP report types | **Implemented** (wire format) |
 | Identity cache (LRU-only) | **Implemented** |
 | Coordinate cache (unified, TTL + refresh) | **Implemented** |
 | Session idle timeout | **Implemented** |

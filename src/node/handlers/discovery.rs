@@ -151,7 +151,7 @@ impl Node {
             // If an established session exists, reset the warmup counter.
             // Discovery has completed and transit nodes along the response
             // path now have fresh coords. Reset warmup so the next N
-            // DataPackets include COORDS_PRESENT to re-warm the forward path.
+            // data packets include COORDS_PRESENT to re-warm the forward path.
             if let Some(entry) = self.sessions.get_mut(&target)
                 && entry.is_established()
             {

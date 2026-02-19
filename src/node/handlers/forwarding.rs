@@ -6,9 +6,12 @@
 //! locally, and generates error signals on routing failure.
 
 use crate::node::Node;
+use crate::node::session_wire::{
+    parse_encrypted_coords, FspCommonPrefix, FSP_COMMON_PREFIX_SIZE, FSP_HEADER_SIZE,
+    FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
+};
 use crate::protocol::{
-    CoordsRequired, DataPacket, PathBroken, SessionAck, SessionDatagram, SessionMessageType,
-    SessionSetup,
+    CoordsRequired, PathBroken, SessionAck, SessionDatagram, SessionSetup,
 };
 use crate::NodeAddr;
 use tracing::debug;
@@ -42,7 +45,7 @@ impl Node {
 
         // Local delivery: dispatch to session layer handlers
         if datagram.dest_addr == *self.node_addr() {
-            self.handle_session_payload(&datagram.src_addr, &datagram.payload)
+            self.handle_session_payload(&datagram.src_addr, &datagram.payload, datagram.path_mtu)
                 .await;
             return;
         }
@@ -81,28 +84,29 @@ impl Node {
 
     /// Attempt to warm the coordinate cache from session-layer payload headers.
     ///
-    /// Transit routers can read the session message type byte and, for
-    /// SessionSetup and SessionAck, extract plaintext coordinate fields.
-    /// DataPacket with COORDS_PRESENT has plaintext coords before the
-    /// encrypted payload. Other types are ignored.
+    /// Transit routers parse the 4-byte FSP common prefix to identify message
+    /// type, then extract plaintext coordinate fields from:
+    /// - SessionSetup (phase 0x1): src_coords + dest_coords
+    /// - SessionAck (phase 0x2): src_coords
+    /// - Encrypted with CP flag (phase 0x0): cleartext coords between header and ciphertext
     ///
     /// Decode failures are logged and silently ignored — they don't block
     /// forwarding.
     fn try_warm_coord_cache(&mut self, datagram: &SessionDatagram) {
-        if datagram.payload.is_empty() {
-            return;
-        }
+        let prefix = match FspCommonPrefix::parse(&datagram.payload) {
+            Some(p) => p,
+            None => return,
+        };
 
-        let msg_type = datagram.payload[0];
-        let inner = &datagram.payload[1..];
+        let inner = &datagram.payload[FSP_COMMON_PREFIX_SIZE..];
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        match SessionMessageType::from_byte(msg_type) {
-            Some(SessionMessageType::SessionSetup) => {
+        match prefix.phase {
+            FSP_PHASE_MSG1 => {
                 match SessionSetup::decode(inner) {
                     Ok(setup) => {
                         self.coord_cache_mut().insert(
@@ -126,7 +130,7 @@ impl Node {
                     }
                 }
             }
-            Some(SessionMessageType::SessionAck) => {
+            FSP_PHASE_MSG2 => {
                 match SessionAck::decode(inner) {
                     Ok(ack) => {
                         self.coord_cache_mut().insert(
@@ -144,38 +148,41 @@ impl Node {
                     }
                 }
             }
-            Some(SessionMessageType::DataPacket) => {
-                match DataPacket::decode(inner) {
-                    Ok(data) => {
-                        if data.flags.coords_present {
-                            if let Some(src_coords) = data.src_coords {
-                                self.coord_cache_mut().insert(
-                                    datagram.src_addr,
-                                    src_coords,
-                                    now_ms,
-                                );
-                            }
-                            if let Some(dest_coords) = data.dest_coords {
-                                self.coord_cache_mut().insert(
-                                    datagram.dest_addr,
-                                    dest_coords,
-                                    now_ms,
-                                );
-                            }
-                            debug!(
-                                src = %datagram.src_addr,
-                                dest = %datagram.dest_addr,
-                                "Cached coords from DataPacket"
+            FSP_PHASE_ESTABLISHED if prefix.has_coords() => {
+                // CP flag set: coords in cleartext between header and ciphertext.
+                // Parse coords from the cleartext section after the 12-byte header.
+                // inner starts after the 4-byte prefix, so we need 8 more bytes
+                // for the counter (header is 12 total = 4 prefix + 8 counter).
+                let coord_data = &datagram.payload[FSP_HEADER_SIZE..];
+                match parse_encrypted_coords(coord_data) {
+                    Ok((src_coords, dest_coords, _bytes_consumed)) => {
+                        if let Some(coords) = src_coords {
+                            self.coord_cache_mut().insert(
+                                datagram.src_addr,
+                                coords,
+                                now_ms,
                             );
                         }
+                        if let Some(coords) = dest_coords {
+                            self.coord_cache_mut().insert(
+                                datagram.dest_addr,
+                                coords,
+                                now_ms,
+                            );
+                        }
+                        debug!(
+                            src = %datagram.src_addr,
+                            dest = %datagram.dest_addr,
+                            "Cached coords from encrypted message"
+                        );
                     }
                     Err(e) => {
-                        debug!(error = %e, "Failed to decode DataPacket for cache warming");
+                        debug!(error = %e, "Failed to parse coords for cache warming");
                     }
                 }
             }
             _ => {
-                // CoordsRequired, PathBroken, unknown: no coords to cache
+                // Phase 0x0 without CP, error signals, unknown: no coords to cache
             }
         }
     }

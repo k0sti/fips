@@ -100,10 +100,12 @@ impl Node {
                 ce_flag,
                 now,
             );
-            // Spin bit: feed to spin state, get optional RTT sample
-            if let Some(rtt) = mmp.spin_bit.rx_observe(sp_flag, header.counter, now) {
-                mmp.metrics.srtt.update(rtt.as_micros() as i64);
-            }
+            // Spin bit: advance state machine for correct TX reflection.
+            // RTT samples from spin bit are not used for SRTT because
+            // inter-frame timing in the mesh is irregular, inflating
+            // spin-bit RTT by variable processing delays on both sides.
+            // Timestamp-echo in ReceiverReport provides accurate RTT.
+            let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, header.counter, now);
         }
 
         // Update address for roaming support

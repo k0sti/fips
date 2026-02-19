@@ -396,103 +396,166 @@ Orderly link teardown with reason code.
 | 0x07 | Timeout | Keepalive or stale detection timeout |
 | 0xFF | Other | Unspecified reason |
 
-## Session-Layer Message Types
+## Session-Layer Message Formats
 
-These messages are carried as the payload of a SessionDatagram (0x00).
+Session-layer messages are carried as the payload of a SessionDatagram (0x00).
+All FSP messages begin with a **4-byte common prefix** that identifies the
+protocol version, session lifecycle phase, per-packet flags, and payload length.
 
-### SessionSetup (0x00)
+### FSP Common Prefix (4 bytes)
+
+| Field | Size | Description |
+| ----- | ---- | ----------- |
+| version | 4 bits (high) | Protocol version. Currently 0x0 |
+| phase | 4 bits (low) | Session lifecycle phase (see table) |
+| flags | 1 byte | Per-packet signal flags (zero during handshake) |
+| payload_len | 2 bytes LE | Length of payload after phase-specific header |
+
+### FSP Phase Table
+
+| Phase | Type | Description |
+| ----- | ---- | ----------- |
+| 0x0 | Established | Post-handshake encrypted traffic or plaintext error signals |
+| 0x1 | Handshake msg1 | SessionSetup (Noise IK msg1) |
+| 0x2 | Handshake msg2 | SessionAck (Noise IK msg2) |
+
+### FSP Flags (Established Phase Only)
+
+| Bit | Name | Description |
+| --- | ---- | ----------- |
+| 0 | CP (coords present) | Source and destination coordinates follow the header in cleartext |
+| 1 | K (key epoch) | Selects active key during rekeying |
+| 2 | U (unencrypted) | Payload is plaintext (error signals) |
+| 3-7 | — | Reserved (must be zero) |
+
+Flags must be zero in handshake packets (phase 0x1 and 0x2).
+
+### FSP Encrypted Message (phase 0x0, U flag clear)
+
+Post-handshake encrypted data. The 12-byte cleartext header is used as AEAD
+AAD. Coordinates may appear in cleartext between the header and ciphertext
+when the CP flag is set.
+
+**Cleartext header** (12 bytes, used as AEAD AAD):
+
+| Field | Size | Description |
+| ----- | ---- | ----------- |
+| common prefix | 4 bytes | ver=0, phase=0, flags, payload_len |
+| counter | 8 bytes LE | Monotonic nonce, used as AEAD nonce and for replay detection |
+
+**Optional cleartext coordinates** (when CP flag is set):
+
+| Field | Size | Description |
+| ----- | ---- | ----------- |
+| src_coords_count | 2 bytes LE | Number of source coordinate entries |
+| src_coords | 16 x n bytes | Source's ancestry (NodeAddr, self -> root) |
+| dest_coords_count | 2 bytes LE | Number of dest coordinate entries |
+| dest_coords | 16 x m bytes | Destination's ancestry |
+
+Transit nodes parse the CP flag and extract coordinates without decryption.
+
+**Encrypted inner header** (6 bytes, first bytes of AEAD plaintext):
+
+| Field | Size | Description |
+| ----- | ---- | ----------- |
+| timestamp | 4 bytes LE | Session-relative milliseconds (u32) |
+| msg_type | 1 byte | Session-layer message type |
+| inner_flags | 1 byte | Bit 0: SP (spin bit for RTT measurement) |
+
+After the inner header, the remaining plaintext is the message-type-specific
+body.
+
+**Complete encrypted message**:
+
+```text
+┌─────────────────────────────────┬─────────────────┬───────────────────────────┐
+│ header (12 bytes, used as AAD)  │ [coords if CP]  │ ciphertext + AEAD tag     │
+│                                 │                 │ (inner_hdr + body) + 16   │
+└─────────────────────────────────┴─────────────────┴───────────────────────────┘
+```
+
+### FSP Session Message Types
+
+| Type | Message | Description |
+| ---- | ------- | ----------- |
+| 0x10 | Data | Application data (IPv6 payload via TUN) |
+| 0x11 | SenderReport | MMP sender-side metrics report |
+| 0x12 | ReceiverReport | MMP receiver-side metrics report |
+| 0x13 | PathMtuNotification | End-to-end path MTU echo |
+| 0x20 | CoordsRequired | Error: transit node lacks destination coordinates |
+| 0x21 | PathBroken | Error: greedy routing reached dead end |
+
+Message types 0x10-0x13 are carried inside the AEAD ciphertext (dispatched
+by the `msg_type` field in the encrypted inner header). Types 0x20-0x21 are
+plaintext error signals (U flag set, no encryption).
+
+### SessionSetup (phase 0x1)
 
 Establishes a session and warms transit coordinate caches.
+Encoded with FSP prefix: ver=0, phase=0x1, flags=0, payload_len.
+
+**Body** (after 4-byte FSP prefix):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x00 |
-| 1 | flags | 1 byte | Bit 0: REQUEST_ACK, Bit 1: BIDIRECTIONAL |
-| 2 | src_coords_count | 2 bytes LE | Number of source coordinate entries |
-| 4 | src_coords | 16 x n bytes | Source's ancestry (NodeAddr, self -> root) |
+| 0 | flags | 1 byte | Bit 0: REQUEST_ACK, Bit 1: BIDIRECTIONAL |
+| 1 | src_coords_count | 2 bytes LE | Number of source coordinate entries |
+| 3 | src_coords | 16 x n bytes | Source's ancestry (NodeAddr, self -> root) |
 | ... | dest_coords_count | 2 bytes LE | Number of dest coordinate entries |
 | ... | dest_coords | 16 x m bytes | Destination's ancestry |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
 | ... | handshake_payload | variable | Noise IK msg1 (82 bytes typical) |
 
-**Example** (depth-3 source, depth-4 destination):
-
-```text
-SessionDatagram header: 36 bytes
-SessionSetup payload: 1 + 1 + 2 + 48 + 2 + 64 + 2 + 82 = 202 bytes
-Total: 238 bytes
-```
-
-### SessionAck (0x01)
+### SessionAck (phase 0x2)
 
 Confirms session establishment, completes the Noise handshake.
+Encoded with FSP prefix: ver=0, phase=0x2, flags=0, payload_len.
+
+**Body** (after 4-byte FSP prefix):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x01 |
-| 1 | flags | 1 byte | Reserved |
-| 2 | src_coords_count | 2 bytes LE | Number of coordinate entries |
-| 4 | src_coords | 16 x n bytes | Acknowledger's ancestry (for cache warming) |
+| 0 | flags | 1 byte | Reserved |
+| 1 | src_coords_count | 2 bytes LE | Number of coordinate entries |
+| 3 | src_coords | 16 x n bytes | Acknowledger's ancestry (for cache warming) |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
 | ... | handshake_payload | variable | Noise IK msg2 (33 bytes typical) |
 
-### DataPacket (0x10)
+### Data (0x10)
 
-Encrypted application data with explicit replay protection counter.
-
-**Minimal header** (COORDS_PRESENT = 0):
-
-| Offset | Field | Size | Description |
-| ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x10 |
-| 1 | flags | 1 byte | Bit 0: COORDS_PRESENT |
-| 2 | counter | 8 bytes LE | Session encryption counter / replay nonce |
-| 10 | payload_length | 2 bytes LE | Length of encrypted payload |
-| 12 | payload | variable | Encrypted application data + 16-byte AEAD tag |
-
-**Header size**: 12 bytes (`DATA_HEADER_SIZE`)
-
-**With coordinates** (COORDS_PRESENT = 1):
-
-| Offset | Field | Size | Description |
-| ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x10 |
-| 1 | flags | 1 byte | 0x01 (COORDS_PRESENT) |
-| 2 | counter | 8 bytes LE | Session encryption counter |
-| 10 | payload_length | 2 bytes LE | Length of encrypted payload |
-| 12 | src_coords_count | 2 bytes LE | Source coordinate entries |
-| 14 | src_coords | 16 x n bytes | Source's ancestry |
-| ... | dest_coords_count | 2 bytes LE | Dest coordinate entries |
-| ... | dest_coords | 16 x m bytes | Destination's ancestry |
-| ... | payload | variable | Encrypted application data |
+Application data (typically IPv6 payload). This is the `msg_type` byte
+inside the encrypted inner header — there is no separate DataPacket struct.
+The body after the inner header is delivered directly to the TUN interface.
 
 ### CoordsRequired (0x20)
 
-Link-layer error signal — transit node lacks coordinates for destination.
-Plaintext (not end-to-end encrypted), generated by transit nodes.
+Plaintext error signal — transit node lacks coordinates for destination.
+Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
+
+**Body** (after 4-byte FSP prefix + 1-byte msg_type):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x20 |
-| 1 | flags | 1 byte | Reserved |
-| 2 | dest_addr | 16 bytes | NodeAddr we couldn't route to |
-| 18 | reporter | 16 bytes | NodeAddr of reporting router |
+| 0 | flags | 1 byte | Reserved |
+| 1 | dest_addr | 16 bytes | NodeAddr we couldn't route to |
+| 17 | reporter | 16 bytes | NodeAddr of reporting router |
 
-**Payload**: 34 bytes. Wrapped in SessionDatagram: 70 bytes total.
+**Body size**: 33 bytes. Total with prefix + msg_type: 38 bytes.
 
 ### PathBroken (0x21)
 
-Link-layer error signal — greedy routing reached a dead end. Plaintext,
-generated by transit nodes.
+Plaintext error signal — greedy routing reached a dead end.
+Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
+
+**Body** (after 4-byte FSP prefix + 1-byte msg_type):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x21 |
-| 1 | flags | 1 byte | Reserved |
-| 2 | dest_addr | 16 bytes | Unreachable NodeAddr |
-| 18 | reporter | 16 bytes | NodeAddr of reporting router |
-| 34 | last_coords_count | 2 bytes LE | Number of stale coordinate entries |
-| 36 | last_known_coords | 16 x n bytes | Stale coordinates that failed |
+| 0 | flags | 1 byte | Reserved |
+| 1 | dest_addr | 16 bytes | Unreachable NodeAddr |
+| 17 | reporter | 16 bytes | NodeAddr of reporting router |
+| 33 | last_coords_count | 2 bytes LE | Number of stale coordinate entries |
+| 35 | last_known_coords | 16 x n bytes | Stale coordinates that failed |
 
 ## Encapsulation Walkthrough
 
@@ -507,19 +570,19 @@ Layer 4: Application data
     1024 bytes
 
 Layer 3: Session encryption (FSP)
-    DataPacket header (12 bytes) + encrypted payload (1024) + AEAD tag (16)
-    = 1052 bytes
+    FSP header (12 bytes) + AEAD(inner_hdr (6) + payload (1024)) + AEAD tag (16)
+    = 1058 bytes
 
 Layer 2: SessionDatagram envelope (FLP routing)
-    msg_type (1) + ttl (1) + path_mtu (2) + src_addr (16) + dest_addr (16) + payload (1052)
-    = 1088 bytes
+    msg_type (1) + ttl (1) + path_mtu (2) + src_addr (16) + dest_addr (16) + payload (1058)
+    = 1094 bytes
 
 Layer 1: Link encryption (FLP per-hop)
-    outer header (16) + encrypted(inner_hdr (5) + datagram (1088)) + AEAD tag (16)
-    = 1125 bytes
+    outer header (16) + encrypted(inner_hdr (5) + datagram (1094)) + AEAD tag (16)
+    = 1131 bytes
 
 Layer 0: Transport
-    UDP datagram containing 1125 bytes
+    UDP datagram containing 1131 bytes
 ```
 
 ### Overhead Budget
@@ -528,11 +591,12 @@ Layer 0: Transport
 | ----- | -------- | --------- |
 | Link encryption | 37 bytes | 16 outer header (AAD) + 5 inner header + 16 AEAD tag |
 | SessionDatagram | 36 bytes | 1 type + 1 ttl + 2 path_mtu + 16 src + 16 dest |
-| DataPacket header | 12 bytes | 1 type + 1 flags + 8 counter + 2 length |
+| FSP header | 12 bytes | 4 prefix + 8 counter |
+| FSP inner header | 6 bytes | 4 timestamp + 1 msg_type + 1 inner_flags (inside AEAD) |
 | Session AEAD tag | 16 bytes | Poly1305 tag on session-encrypted payload |
-| **Minimal total** | **101 bytes** | |
+| **Minimal total** | **107 bytes** | |
 | Coordinates (if present) | ~43 bytes | Varies with tree depth |
-| **Worst case** | **144 bytes** | `FIPS_OVERHEAD` constant |
+| **Worst case** | **150 bytes** | `FIPS_OVERHEAD` constant |
 
 ### At Each Transit Node
 
@@ -581,20 +645,23 @@ endpoint session keys).
 | ------- | ------------ | ----- |
 | SessionSetup | ~200 bytes | Depth-dependent |
 | SessionAck | ~80 bytes | Depth-dependent |
-| DataPacket (minimal) | 12 + payload bytes | Steady state |
-| DataPacket (with coords) | 12 + ~130 + payload bytes | Warmup/recovery |
-| CoordsRequired | 34 bytes | Fixed |
-| PathBroken | 36 + 16n bytes | Includes stale coords |
+| Data (minimal) | 12 + 6 + payload + 16 bytes | Steady state |
+| Data (with coords) | 12 + ~130 + 6 + payload + 16 bytes | Warmup/recovery |
+| SenderReport | 12 + 6 + 46 + 16 bytes | MMP metrics |
+| ReceiverReport | 12 + 6 + 66 + 16 bytes | MMP metrics |
+| PathMtuNotification | 12 + 6 + 2 + 16 bytes | MTU signal |
+| CoordsRequired | 38 bytes | Fixed (prefix + msg_type + body) |
+| PathBroken | 35 + 16n bytes | Includes stale coords |
 
 ### Complete Packet Sizes (link + session)
 
 | Scenario | Wire Size | Notes |
 | -------- | --------- | ----- |
 | Encrypted frame minimum | 37 bytes | Empty body |
-| SessionDatagram + DataPacket (minimal) | 37 + 36 + 12 + payload + 16 | 101 + payload |
-| SessionDatagram + DataPacket (with coords) | ~144 + payload | Worst case |
+| SessionDatagram + Data (minimal) | 37 + 36 + 12 + 6 + payload + 16 | 107 + payload |
+| SessionDatagram + Data (with coords) | ~150 + payload | Worst case |
 | SessionDatagram + SessionSetup | ~275 bytes | Depth-3, both dirs |
-| SessionDatagram + CoordsRequired | 37 + 36 + 34 = 107 bytes | Including link overhead |
+| SessionDatagram + CoordsRequired | 37 + 36 + 38 = 111 bytes | Including link overhead |
 
 ## References
 

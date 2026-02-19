@@ -60,6 +60,7 @@ fn test_session_entry_new_initiating() {
         identity_b.pubkey_full(),
         EndToEndState::Initiating(handshake),
         1000,
+        true,
     );
 
     assert!(entry.state().is_initiating());
@@ -86,6 +87,7 @@ fn test_session_entry_touch() {
         identity_b.pubkey_full(),
         EndToEndState::Initiating(handshake),
         1000,
+        true,
     );
 
     entry.touch(2000);
@@ -111,6 +113,7 @@ fn test_session_table_operations() {
         identity_b.pubkey_full(),
         EndToEndState::Initiating(handshake),
         1000,
+        true,
     );
 
     node.sessions.insert(dest_addr, entry);
@@ -223,10 +226,10 @@ async fn test_session_direct_peer_data_transfer() {
         .await
         .expect("send_session_data failed");
 
-    // Process packets: DataPacket arrives at Node 1
+    // Process packets: encrypted data arrives at Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
     let count = process_available_packets(&mut nodes).await;
-    assert!(count > 0, "Expected DataPacket to arrive");
+    assert!(count > 0, "Expected encrypted data to arrive");
 
     // Node 1's session should now be Established (was Responding, transitions on first data)
     assert!(nodes[1]
@@ -958,7 +961,7 @@ async fn test_tun_outbound_established_session() {
 
     nodes[0].node.handle_tun_outbound(ipv6_packet.clone()).await;
 
-    // Process packets: encrypted DataPacket → Node 1
+    // Process packets: encrypted data → Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await;
 
@@ -1176,6 +1179,7 @@ fn test_purge_idle_sessions_removes_expired() {
         remote.pubkey_full(),
         EndToEndState::Established(session),
         1000, // created at t=1000ms
+        true,
     );
 
     node.sessions.insert(remote_addr, entry);
@@ -1201,6 +1205,7 @@ fn test_purge_idle_sessions_keeps_active() {
         remote.pubkey_full(),
         EndToEndState::Established(session),
         1000,
+        true,
     );
 
     // Touch at t=80s — recent activity
@@ -1232,6 +1237,7 @@ fn test_purge_idle_sessions_ignores_initiating() {
         remote.pubkey_full(),
         EndToEndState::Initiating(handshake),
         1000,
+        true,
     );
 
     node.sessions.insert(remote_addr, entry);
@@ -1255,6 +1261,7 @@ fn test_purge_idle_sessions_cleans_pending_packets() {
         remote.pubkey_full(),
         EndToEndState::Established(session),
         1000,
+        true,
     );
 
     node.sessions.insert(remote_addr, entry);
@@ -1288,6 +1295,7 @@ fn test_purge_idle_sessions_disabled_when_zero() {
         remote.pubkey_full(),
         EndToEndState::Established(session),
         1000,
+        true,
     );
 
     node.sessions.insert(remote_addr, entry);
@@ -1320,6 +1328,7 @@ fn test_coords_warmup_counter_default_zero_on_new() {
         identity_b.pubkey_full(),
         EndToEndState::Initiating(handshake),
         1000,
+        true,
     );
 
     assert_eq!(entry.coords_warmup_remaining(), 0,
@@ -1338,6 +1347,7 @@ fn test_coords_warmup_counter_set_and_get() {
         remote.pubkey_full(),
         EndToEndState::Established(session),
         1000,
+        true,
     );
 
     assert_eq!(entry.coords_warmup_remaining(), 0);
@@ -1361,6 +1371,7 @@ fn test_coords_warmup_counter_decrement() {
         remote.pubkey_full(),
         EndToEndState::Established(session),
         1000,
+        true,
     );
 
     entry.set_coords_warmup_remaining(3);
