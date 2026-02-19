@@ -148,7 +148,8 @@ Controls end-to-end session behavior and packet queuing.
 | `node.session.pending_packets_per_dest` | usize | `16` | Queue depth per destination during session establishment |
 | `node.session.pending_max_destinations` | usize | `256` | Max destinations with pending packets |
 | `node.session.idle_timeout_secs` | u64 | `90` | Idle session timeout; established sessions with no application data for this duration are removed. MMP reports (SenderReport, ReceiverReport, PathMtuNotification) do not count as activity |
-| `node.session.coords_warmup_packets` | u8 | `5` | Number of initial data packets per session that include the CP flag for transit cache warmup; also the reset count on CoordsRequired receipt |
+| `node.session.coords_warmup_packets` | u8 | `5` | Number of initial data packets per session that include the CP flag for transit cache warmup; also the reset count on CoordsRequired/PathBroken receipt |
+| `node.session.coords_response_interval_ms` | u64 | `2000` | Minimum interval (ms) between standalone CoordsWarmup responses to CoordsRequired/PathBroken signals per destination |
 
 The anti-replay window size (2048 packets) is a compile-time constant and not
 configurable.
@@ -327,6 +328,7 @@ node:
     pending_max_destinations: 256
     idle_timeout_secs: 90
     coords_warmup_packets: 5
+    coords_response_interval_ms: 2000
   mmp:
     mode: full                       # full | lightweight | minimal
     log_interval_secs: 30

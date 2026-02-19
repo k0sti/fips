@@ -338,17 +338,19 @@ After the handshake completes, the entire forward and reverse paths have
 cached coordinates for both endpoints. Subsequent data packets use minimal
 headers (no coordinates) and route efficiently through the warmed caches.
 
-## CP (Coords Present) Warmup
+## Hybrid Coordinate Warmup (CP + CoordsWarmup)
 
-The CP flag in the FSP common prefix provides a secondary cache-warming
-mechanism that complements SessionSetup. See
-[fips-session-layer.md](fips-session-layer.md) for the warmup-then-reactive
-strategy.
+The CP flag in the FSP common prefix and the standalone CoordsWarmup message
+(0x14) together provide a hybrid cache-warming mechanism that complements
+SessionSetup. See [fips-session-layer.md](fips-session-layer.md) for the
+full warmup strategy.
 
 Transit nodes parse the CP flag from the FSP header and extract source and
 destination coordinates from the cleartext section between the header and
 ciphertext — no decryption needed. This is the same caching operation
-performed for SessionSetup coordinates.
+performed for SessionSetup coordinates. CoordsWarmup messages use the same
+CP-flag format and are handled identically by transit nodes via the existing
+`try_warm_coord_cache()` path.
 
 ## Error Recovery
 
@@ -361,15 +363,22 @@ corrective action.
 coordinates for the destination. It cannot make a forwarding decision.
 
 **Transit node action**:
+
 1. Create a new SessionDatagram addressed back to the original source,
    carrying a CoordsRequired payload identifying the unreachable destination
 2. Route the error via `find_next_hop(src_addr)`
 3. If the source is also unreachable, drop silently (no cascading errors)
 
 **Source recovery**:
-1. Initiate discovery (LookupRequest flood) for the destination
-2. Reset CP warmup counter — subsequent data packets include coordinates
-3. When discovery completes, warmup counter resets again (covers timing gap)
+
+1. Immediately send a standalone CoordsWarmup (0x14) message to re-warm
+   transit caches along the path (rate-limited: at most one per destination
+   per configurable interval, default 2s)
+2. Reset CP warmup counter — subsequent data packets piggyback coordinates
+   when possible, or trigger additional CoordsWarmup messages when
+   piggybacking would exceed the transport MTU
+3. Initiate discovery (LookupRequest flood) for the destination
+4. When discovery completes, warmup counter resets again (covers timing gap)
 
 The crypto session remains active throughout — only routing state is
 refreshed.
@@ -384,15 +393,24 @@ tree distance metric). The cached coordinates may be stale.
 source.
 
 **Source recovery**:
-1. Remove stale coordinates from cache
-2. Initiate discovery for the destination
-3. Reset CP warmup counter
+
+1. Immediately send a standalone CoordsWarmup (0x14) message (rate-limited,
+   same per-destination interval as CoordsRequired response)
+2. Remove stale coordinates from cache
+3. Initiate discovery for the destination
+4. Reset CP warmup counter
 
 ### Error Signal Rate Limiting
 
 Both error types are rate-limited at transit nodes: maximum one error per
 destination per 100ms. This prevents storms during topology changes when many
 packets to the same destination hit the same routing failure simultaneously.
+
+At the source side, CoordsWarmup responses to CoordsRequired/PathBroken are
+independently rate-limited: at most one standalone CoordsWarmup per destination
+per `coords_response_interval_ms` (default 2000ms, configurable). This
+prevents amplification where a burst of error signals would generate a
+corresponding burst of warmup messages.
 
 Error signals (CoordsRequired, PathBroken) are handled asynchronously outside
 the packet receive path, allowing the RX loop to continue processing without
@@ -554,7 +572,7 @@ recovery).
 | Flush coord cache on parent change | **Implemented** |
 | LookupRequest/LookupResponse discovery | **Implemented** |
 | SessionSetup self-bootstrapping | **Implemented** |
-| CP warmup-then-reactive | **Implemented** |
+| Hybrid coordinate warmup (CP + CoordsWarmup) | **Implemented** |
 | CoordsRequired recovery | **Implemented** |
 | PathBroken recovery | **Implemented** |
 | Error signal rate limiting | **Implemented** |

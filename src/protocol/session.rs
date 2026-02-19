@@ -34,6 +34,8 @@ pub enum SessionMessageType {
     ReceiverReport = 0x12,
     /// Path MTU notification (discovered path MTU).
     PathMtuNotification = 0x13,
+    /// Standalone coordinate cache warming (empty body, coords in CP flag).
+    CoordsWarmup = 0x14,
 
     // Link-layer error signals (0x20-0x2F) — plaintext, from transit routers
     /// Router cache miss — needs coordinates (link-layer error signal).
@@ -52,6 +54,7 @@ impl SessionMessageType {
             0x11 => Some(SessionMessageType::SenderReport),
             0x12 => Some(SessionMessageType::ReceiverReport),
             0x13 => Some(SessionMessageType::PathMtuNotification),
+            0x14 => Some(SessionMessageType::CoordsWarmup),
             0x20 => Some(SessionMessageType::CoordsRequired),
             0x21 => Some(SessionMessageType::PathBroken),
             _ => None,
@@ -73,6 +76,7 @@ impl fmt::Display for SessionMessageType {
             SessionMessageType::SenderReport => "SenderReport",
             SessionMessageType::ReceiverReport => "ReceiverReport",
             SessionMessageType::PathMtuNotification => "PathMtuNotification",
+            SessionMessageType::CoordsWarmup => "CoordsWarmup",
             SessionMessageType::CoordsRequired => "CoordsRequired",
             SessionMessageType::PathBroken => "PathBroken",
         };

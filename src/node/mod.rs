@@ -319,6 +319,8 @@ pub struct Node {
     icmp_rate_limiter: IcmpRateLimiter,
     /// Rate limiter for routing error signals (CoordsRequired / PathBroken).
     routing_error_rate_limiter: RoutingErrorRateLimiter,
+    /// Rate limiter for source-side CoordsRequired/PathBroken responses.
+    coords_response_rate_limiter: RoutingErrorRateLimiter,
 
     // === Connection Retry ===
     /// Retry state for peers whose outbound connections have failed.
@@ -373,6 +375,7 @@ impl Node {
         let max_connections = config.node.limits.max_connections;
         let max_peers = config.node.limits.max_peers;
         let max_links = config.node.limits.max_links;
+        let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
 
         Ok(Self {
             identity,
@@ -413,6 +416,9 @@ impl Node {
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
+            coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
+                std::time::Duration::from_millis(coords_response_interval_ms),
+            ),
             retry_pending: HashMap::new(),
             peer_aliases: HashMap::new(),
         })
@@ -450,6 +456,7 @@ impl Node {
         let max_connections = config.node.limits.max_connections;
         let max_peers = config.node.limits.max_peers;
         let max_links = config.node.limits.max_links;
+        let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
 
         Self {
             identity,
@@ -490,6 +497,9 @@ impl Node {
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
+            coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
+                std::time::Duration::from_millis(coords_response_interval_ms),
+            ),
             retry_pending: HashMap::new(),
             peer_aliases: HashMap::new(),
         }

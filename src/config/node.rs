@@ -233,6 +233,11 @@ pub struct SessionConfig {
     /// Also used as the reset count on CoordsRequired receipt.
     #[serde(default = "SessionConfig::default_coords_warmup_packets")]
     pub coords_warmup_packets: u8,
+    /// Minimum interval (ms) between standalone CoordsWarmup responses to
+    /// CoordsRequired/PathBroken signals, per destination
+    /// (`node.session.coords_response_interval_ms`).
+    #[serde(default = "SessionConfig::default_coords_response_interval_ms")]
+    pub coords_response_interval_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -243,6 +248,7 @@ impl Default for SessionConfig {
             pending_max_destinations: 256,
             idle_timeout_secs: 90,
             coords_warmup_packets: 5,
+            coords_response_interval_ms: 2000,
         }
     }
 }
@@ -253,6 +259,7 @@ impl SessionConfig {
     fn default_pending_max_destinations() -> usize { 256 }
     fn default_idle_timeout_secs() -> u64 { 90 }
     fn default_coords_warmup_packets() -> u8 { 5 }
+    fn default_coords_response_interval_ms() -> u64 { 2000 }
 }
 
 /// Session-layer Metrics Measurement Protocol (`node.session_mmp.*`).

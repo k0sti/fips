@@ -251,6 +251,11 @@ impl Node {
             Some(SessionMessageType::PathMtuNotification) => {
                 self.handle_session_path_mtu_notification(src_addr, rest);
             }
+            Some(SessionMessageType::CoordsWarmup) => {
+                // Standalone coordinate warming — coords already extracted
+                // from CP flag by transit nodes. No action needed at endpoint.
+                trace!(src = %self.peer_display_name(src_addr), "CoordsWarmup received");
+            }
             _ => {
                 debug!(src = %self.peer_display_name(src_addr), msg_type, "Unknown session message type, dropping");
             }
@@ -586,8 +591,9 @@ impl Node {
     /// Handle a CoordsRequired error signal from a transit router.
     ///
     /// The router couldn't route our packet because it lacks cached
-    /// coordinates for the destination. Trigger discovery to populate
-    /// the route cache so subsequent routing attempts succeed.
+    /// coordinates for the destination. Send a standalone CoordsWarmup
+    /// immediately (rate-limited), trigger discovery, and reset the
+    /// warmup counter for subsequent data packets.
     async fn handle_coords_required(&mut self, inner: &[u8]) {
         let msg = match CoordsRequired::decode(inner) {
             Ok(m) => m,
@@ -600,12 +606,26 @@ impl Node {
         debug!(
             dest = %msg.dest_addr,
             reporter = %msg.reporter,
-            "CoordsRequired: transit router needs coordinates, initiating discovery"
+            "CoordsRequired: transit router needs coordinates"
         );
+
+        // Send standalone CoordsWarmup immediately (rate-limited)
+        if self.coords_response_rate_limiter.should_send(&msg.dest_addr) {
+            if let Some(entry) = self.sessions.get(&msg.dest_addr)
+                && entry.is_established()
+                && let Err(e) = self.send_coords_warmup(&msg.dest_addr).await
+            {
+                debug!(dest = %msg.dest_addr, error = %e,
+                    "Failed to send CoordsWarmup in response to CoordsRequired");
+            }
+        } else {
+            trace!(dest = %msg.dest_addr,
+                "CoordsRequired response rate-limited, skipping standalone CoordsWarmup");
+        }
 
         self.maybe_initiate_lookup(&msg.dest_addr).await;
 
-        // Reset coords warmup counter so the next N packets include
+        // Reset coords warmup counter so the next N packets also include
         // COORDS_PRESENT, re-warming transit caches along the path.
         if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
             let n = self.config.node.session.coords_warmup_packets;
@@ -621,8 +641,8 @@ impl Node {
     /// Handle a PathBroken error signal from a transit router.
     ///
     /// The router has coordinates but still can't route to the destination.
-    /// Invalidate cached coordinates, trigger re-discovery, and reset the
-    /// COORDS_PRESENT warmup counter so the new path gets warmed.
+    /// Send a standalone CoordsWarmup immediately (rate-limited), invalidate
+    /// cached coordinates, trigger re-discovery, and reset the warmup counter.
     async fn handle_path_broken(&mut self, inner: &[u8]) {
         let msg = match PathBroken::decode(inner) {
             Ok(m) => m,
@@ -637,6 +657,20 @@ impl Node {
             reporter = %msg.reporter,
             "PathBroken: transit router reports routing failure"
         );
+
+        // Send standalone CoordsWarmup immediately (rate-limited)
+        if self.coords_response_rate_limiter.should_send(&msg.dest_addr) {
+            if let Some(entry) = self.sessions.get(&msg.dest_addr)
+                && entry.is_established()
+                && let Err(e) = self.send_coords_warmup(&msg.dest_addr).await
+            {
+                debug!(dest = %msg.dest_addr, error = %e,
+                    "Failed to send CoordsWarmup in response to PathBroken");
+            }
+        } else {
+            trace!(dest = %msg.dest_addr,
+                "PathBroken response rate-limited, skipping standalone CoordsWarmup");
+        }
 
         // Invalidate stale cached coordinates
         self.coord_cache.remove(&msg.dest_addr);
@@ -721,37 +755,29 @@ impl Node {
         plaintext: &[u8],
     ) -> Result<(), NodeError> {
         let now_ms = Self::now_ms();
-        let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
+
+        // First borrow: read session metadata (NLL releases before coord decision)
+        let entry = self.sessions.get(dest_addr).ok_or_else(|| NodeError::SendFailed {
             node_addr: *dest_addr,
             reason: "no session".into(),
         })?;
-
-        // Check warmup counter and get session timestamp
         let wants_coords = entry.coords_warmup_remaining() > 0;
         let timestamp = entry.session_timestamp(now_ms);
         let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
+        if !entry.is_established() {
+            return Err(NodeError::SendFailed {
+                node_addr: *dest_addr,
+                reason: "session not established".into(),
+            });
+        }
 
-        let session = match entry.state_mut() {
-            EndToEndState::Established(s) => s,
-            _ => {
-                return Err(NodeError::SendFailed {
-                    node_addr: *dest_addr,
-                    reason: "session not established".into(),
-                });
-            }
-        };
-
-        // Get counter before encrypting (encrypt will increment it)
-        let counter = session.current_send_counter();
-
-        // FSP inner header: [timestamp:4 LE][msg_type:1][inner_flags:1] + plaintext
+        // Build inner plaintext (doesn't depend on counter)
         let msg_type = SessionMessageType::DataPacket.to_byte(); // 0x10
         let inner_flags = FspInnerFlags { spin_bit }.to_byte();
         let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, plaintext);
 
         // Determine whether coords fit within transport MTU.
-        // Total wire size: FIPS_OVERHEAD (106) + coords_size + plaintext.len()
-        // The transport MTU is the UDP payload budget available for the FLP frame.
+        // If not, send standalone CoordsWarmup before the data packet.
         let (include_coords, my_coords, dest_coords) = if wants_coords {
             let src = self.tree_state.my_coords().clone();
             let dst = self.get_dest_coords(dest_addr);
@@ -760,29 +786,28 @@ impl Node {
             if total_wire <= self.transport_mtu() as usize {
                 (true, Some(src), Some(dst))
             } else {
-                trace!("CP flag skipped: {} bytes with coords exceeds transport MTU {}",
-                    total_wire, self.transport_mtu());
+                // Coords don't fit piggybacked — send standalone CoordsWarmup first
+                if let Err(e) = self.send_coords_warmup(dest_addr).await {
+                    debug!(dest = %self.peer_display_name(dest_addr), error = %e,
+                        "Failed to send standalone CoordsWarmup before data packet");
+                }
                 (false, None, None)
             }
         } else {
             (false, None, None)
         };
 
-        // Decrement warmup counter only if we actually include coords
-        if include_coords
+        // Decrement warmup counter if we sent coords (piggybacked or standalone)
+        if wants_coords
             && let Some(entry) = self.sessions.get_mut(dest_addr)
         {
             entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
         }
 
-        // Build FSP flags (CP flag only if coords will be included)
+        // Build FSP flags (CP flag only if coords will be piggybacked)
         let flags = if include_coords { FSP_FLAG_CP } else { 0 };
 
-        // Build 12-byte FSP header (used as AAD for AEAD)
-        let payload_len = inner_plaintext.len() as u16;
-        let header = build_fsp_header(counter, flags, payload_len);
-
-        // Re-borrow session for encryption
+        // Borrow session for counter + encryption (after potential standalone send)
         let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
             node_addr: *dest_addr,
             reason: "no session".into(),
@@ -796,6 +821,11 @@ impl Node {
                 });
             }
         };
+        let counter = session.current_send_counter();
+
+        // Build 12-byte FSP header (used as AAD for AEAD)
+        let payload_len = inner_plaintext.len() as u16;
+        let header = build_fsp_header(counter, flags, payload_len);
 
         // Encrypt with AAD binding to the FSP header
         let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| {
@@ -907,6 +937,89 @@ impl Node {
             mmp.sender.record_sent(counter, timestamp, ciphertext.len());
         }
 
+        Ok(())
+    }
+
+    /// Send a standalone CoordsWarmup message to warm transit node caches.
+    ///
+    /// Constructs an encrypted FSP message with CP flag set and
+    /// msg_type=CoordsWarmup. Transit nodes extract the cleartext
+    /// coordinates via `try_warm_coord_cache()` (same as CP-flagged data
+    /// packets). The encrypted inner payload is the 6-byte inner header
+    /// with no application data.
+    async fn send_coords_warmup(
+        &mut self,
+        dest_addr: &NodeAddr,
+    ) -> Result<(), NodeError> {
+        let now_ms = Self::now_ms();
+
+        let my_coords = self.tree_state.my_coords().clone();
+        let dest_coords = self.get_dest_coords(dest_addr);
+
+        // Read session metadata
+        let entry = self.sessions.get(dest_addr).ok_or_else(|| NodeError::SendFailed {
+            node_addr: *dest_addr,
+            reason: "no session".into(),
+        })?;
+        let timestamp = entry.session_timestamp(now_ms);
+        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
+
+        // Get mutable access for encryption
+        let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
+            node_addr: *dest_addr,
+            reason: "no session".into(),
+        })?;
+        let session = match entry.state_mut() {
+            EndToEndState::Established(s) => s,
+            _ => {
+                return Err(NodeError::SendFailed {
+                    node_addr: *dest_addr,
+                    reason: "session not established".into(),
+                });
+            }
+        };
+
+        let counter = session.current_send_counter();
+
+        // FSP inner header only, no body payload
+        let msg_type = SessionMessageType::CoordsWarmup.to_byte();
+        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+        let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, &[]);
+
+        // Build FSP header with CP flag
+        let payload_len = inner_plaintext.len() as u16;
+        let header = build_fsp_header(counter, FSP_FLAG_CP, payload_len);
+
+        // Encrypt with AAD
+        let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| {
+            NodeError::SendFailed {
+                node_addr: *dest_addr,
+                reason: format!("session encrypt failed: {}", e),
+            }
+        })?;
+
+        // Assemble: header(12) + coords + ciphertext
+        let coords_size = coords_wire_size(&my_coords) + coords_wire_size(&dest_coords);
+        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + coords_size + ciphertext.len());
+        fsp_payload.extend_from_slice(&header);
+        encode_coords(&my_coords, &mut fsp_payload);
+        encode_coords(&dest_coords, &mut fsp_payload);
+        fsp_payload.extend_from_slice(&ciphertext);
+
+        let my_addr = *self.node_addr();
+        let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
+            .with_ttl(self.config.node.session.default_ttl);
+
+        self.send_session_datagram(&mut datagram).await?;
+
+        // Record in MMP (infrastructure traffic — no idle timer touch)
+        if let Some(entry) = self.sessions.get_mut(dest_addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            mmp.sender.record_sent(counter, timestamp, ciphertext.len());
+        }
+
+        debug!(dest = %self.peer_display_name(dest_addr), "Sent standalone CoordsWarmup");
         Ok(())
     }
 

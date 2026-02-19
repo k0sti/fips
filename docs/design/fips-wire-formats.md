@@ -526,10 +526,11 @@ body.
 | 0x11 | SenderReport | MMP sender-side metrics report |
 | 0x12 | ReceiverReport | MMP receiver-side metrics report |
 | 0x13 | PathMtuNotification | End-to-end path MTU echo |
+| 0x14 | CoordsWarmup | Standalone coordinate cache warming |
 | 0x20 | CoordsRequired | Error: transit node lacks destination coordinates |
 | 0x21 | PathBroken | Error: greedy routing reached dead end |
 
-Message types 0x10-0x13 are carried inside the AEAD ciphertext (dispatched
+Message types 0x10-0x14 are carried inside the AEAD ciphertext (dispatched
 by the `msg_type` field in the encrypted inner header). Types 0x20-0x21 are
 plaintext error signals (U flag set, no encryption).
 
@@ -585,6 +586,34 @@ Sent by the destination to report the observed forward-path MTU.
 | 0 | path_mtu | 2 | u16 LE — minimum MTU observed along the forward path |
 
 **Total body: 2 bytes** (plus FSP common prefix + encrypted header + AEAD tag).
+
+### CoordsWarmup (0x14)
+
+Standalone coordinate cache warming message. Sent when piggybacking coordinates
+via the CP flag on a data packet would exceed the transport MTU, or as an
+immediate response to CoordsRequired/PathBroken signals (rate-limited).
+
+CoordsWarmup is an encrypted FSP message with the CP flag set and an empty
+body. Transit nodes extract coordinates via the existing CP-flag parsing
+path — no transit-side changes required.
+
+**Wire format**:
+
+```text
+FSP header (12 bytes, AAD): ver=0, phase=0, flags=CP, counter, payload_len
+Cleartext coords: src_coords + dst_coords (same encoding as CP flag)
+AEAD ciphertext: inner_header(6) + Poly1305 tag(16) = 22 bytes
+
+Total FSP payload: 12 + coords + 22
+```
+
+The cleartext coords section uses the same variable-length encoding as any
+CP-flagged message: `src_coords_count(2) + src_coords(16×n) +
+dest_coords_count(2) + dest_coords(16×m)`.
+
+**Typical size** (depth-3 tree): 12 + (2+64+2+64) + 22 = **166 bytes** FSP
+payload. With SessionDatagram + link overhead: 166 + 36 + 37 = **239 bytes**
+on the wire.
 
 ### CoordsRequired (0x20)
 
@@ -707,6 +736,7 @@ endpoint session keys).
 | SenderReport | 12 + 6 + 46 + 16 bytes | MMP metrics |
 | ReceiverReport | 12 + 6 + 66 + 16 bytes | MMP metrics |
 | PathMtuNotification | 12 + 6 + 2 + 16 bytes | MTU signal |
+| CoordsWarmup | 12 + coords + 6 + 16 bytes | Standalone warmup (empty body) |
 | CoordsRequired | 38 bytes | Fixed (prefix + msg_type + body) |
 | PathBroken | 35 + 16n bytes | Includes stale coords |
 

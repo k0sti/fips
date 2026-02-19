@@ -32,6 +32,15 @@ impl RoutingErrorRateLimiter {
         }
     }
 
+    /// Create a rate limiter with a custom minimum interval.
+    pub fn with_interval(min_interval: Duration) -> Self {
+        Self {
+            last_sent: HashMap::new(),
+            min_interval,
+            max_age: Duration::from_secs(10),
+        }
+    }
+
     /// Check if we should send a routing error for this destination.
     ///
     /// Returns true if enough time has passed since the last error for
@@ -134,5 +143,20 @@ mod tests {
 
         limiter.cleanup(Instant::now());
         assert_eq!(limiter.len(), 1);
+    }
+
+    #[test]
+    fn test_with_interval_custom_rate() {
+        let mut limiter = RoutingErrorRateLimiter::with_interval(Duration::from_millis(500));
+        assert!(limiter.should_send(&addr(1)));
+        assert!(!limiter.should_send(&addr(1)));
+
+        // Still rate-limited after 200ms (would pass with default 100ms)
+        thread::sleep(Duration::from_millis(200));
+        assert!(!limiter.should_send(&addr(1)));
+
+        // Allowed after 500ms total
+        thread::sleep(Duration::from_millis(350));
+        assert!(limiter.should_send(&addr(1)));
     }
 }
