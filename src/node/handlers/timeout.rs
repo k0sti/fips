@@ -109,7 +109,7 @@ impl Node {
             debug!(
                 dest = %addr,
                 idle_secs = timeout_ms / 1000,
-                "Idle session removed"
+                "Idle session removed (no application data)"
             );
         }
     }

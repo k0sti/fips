@@ -54,7 +54,9 @@ pub(crate) struct SessionEntry {
     /// When the session was created (Unix milliseconds).
     #[cfg_attr(not(test), allow(dead_code))]
     created_at: u64,
-    /// Last activity timestamp (Unix milliseconds).
+    /// Last application data activity timestamp (Unix milliseconds).
+    /// Only updated for DataPacket send/receive and session establishment.
+    /// MMP reports do not update this field. Used for idle session timeout.
     last_activity: u64,
     /// When the session transitioned to Established (Unix milliseconds).
     /// Used to compute session-relative timestamps for the FSP inner header.
@@ -116,7 +118,10 @@ impl SessionEntry {
         self.state.take()
     }
 
-    /// Update the last activity timestamp.
+    /// Update the last application data activity timestamp.
+    ///
+    /// Only call for DataPacket send/receive and session establishment,
+    /// not for MMP reports. Used by the idle session timeout.
     pub(crate) fn touch(&mut self, now_ms: u64) {
         self.last_activity = now_ms;
     }

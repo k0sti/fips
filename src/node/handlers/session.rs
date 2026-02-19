@@ -189,7 +189,6 @@ impl Node {
             }
         };
 
-        entry.touch(Self::now_ms());
         self.sessions.insert(*src_addr, entry);
 
         // Strip FSP inner header (6 bytes)
@@ -254,6 +253,14 @@ impl Node {
             _ => {
                 debug!(src = %src_addr, msg_type, "Unknown session message type, dropping");
             }
+        }
+
+        // Only application data resets the idle timer — MMP reports
+        // (SenderReport, ReceiverReport, PathMtuNotification) do not.
+        if msg_type == SessionMessageType::DataPacket.to_byte()
+            && let Some(entry) = self.sessions.get_mut(src_addr)
+        {
+            entry.touch(Self::now_ms());
         }
 
         // Flush any pending outbound packets (e.g., simultaneous initiation
@@ -854,12 +861,11 @@ impl Node {
 
         self.send_session_datagram(&mut datagram).await?;
 
-        // Record in MMP sender state and touch
-        if let Some(entry) = self.sessions.get_mut(dest_addr) {
-            if let Some(mmp) = entry.mmp_mut() {
-                mmp.sender.record_sent(counter, timestamp, ciphertext.len());
-            }
-            entry.touch(now_ms);
+        // Record in MMP sender state (no touch — MMP reports don't reset idle timer)
+        if let Some(entry) = self.sessions.get_mut(dest_addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            mmp.sender.record_sent(counter, timestamp, ciphertext.len());
         }
 
         Ok(())

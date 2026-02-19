@@ -1307,6 +1307,36 @@ fn test_purge_idle_sessions_disabled_when_zero() {
     assert_eq!(node.session_count(), 1, "Sessions should not be purged when idle timeout is disabled");
 }
 
+#[test]
+fn test_purge_idle_sessions_mmp_activity_does_not_prevent_purge() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000, // created at t=1s
+        true,
+    );
+
+    // Do NOT call entry.touch() — simulates a session where only MMP
+    // reports have flowed (MMP no longer calls touch). last_activity
+    // remains at creation time (1000ms).
+    node.sessions.insert(remote_addr, entry);
+
+    // Purge at t=92s — 91s since creation, exceeds 90s idle timeout.
+    // Even though MMP reports would have been flowing, they no longer
+    // reset the idle timer.
+    let now_ms = 92_000;
+    node.purge_idle_sessions(now_ms);
+
+    assert_eq!(node.session_count(), 0,
+        "Session with MMP-only activity should be purged");
+}
+
 // ============================================================================
 // Unit tests: COORDS_PRESENT warmup counter
 // ============================================================================

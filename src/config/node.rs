@@ -224,7 +224,8 @@ pub struct SessionConfig {
     #[serde(default = "SessionConfig::default_pending_max_destinations")]
     pub pending_max_destinations: usize,
     /// Idle session timeout in seconds (`node.session.idle_timeout_secs`).
-    /// Established sessions with no activity for this duration are removed.
+    /// Established sessions with no application data for this duration are
+    /// removed. MMP reports do not count as activity for this timer.
     #[serde(default = "SessionConfig::default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     /// Number of initial data packets per session that include COORDS_PRESENT
