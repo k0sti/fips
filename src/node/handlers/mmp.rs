@@ -186,73 +186,56 @@ impl Node {
         }
     }
 
-    /// Emit periodic MMP metrics for a peer at info and debug levels.
+    /// Emit periodic MMP metrics for a peer.
     fn log_mmp_metrics(peer_name: &str, mmp: &crate::mmp::MmpPeerState) {
         let m = &mmp.metrics;
 
-        let rtt_str = match m.srtt_ms() {
-            Some(rtt) => format!("{:.1}ms", rtt),
-            None => "n/a".to_string(),
+        let rtt_str = if m.rtt_trend.initialized() {
+            format!("{:.1}ms", m.rtt_trend.long() / 1000.0)
+        } else {
+            "n/a".to_string()
         };
-        let loss_pct = m.loss_rate() * 100.0;
-        let tx_pkts = mmp.sender.cumulative_packets_sent();
-        let rx_pkts = mmp.receiver.cumulative_packets_recv();
+        let loss_str = if m.loss_trend.initialized() {
+            format!("{:.1}%", m.loss_trend.long() * 100.0)
+        } else {
+            "n/a".to_string()
+        };
+        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
 
-        let goodput_bps = m.goodput_bps();
-        let goodput_str = format_throughput(goodput_bps);
-
-        // Info-level: concise summary
         info!(
             peer = %peer_name,
             rtt = %rtt_str,
-            loss = format_args!("{:.1}%", loss_pct),
-            goodput = %goodput_str,
-            tx_pkts = tx_pkts,
-            rx_pkts = rx_pkts,
+            loss = %loss_str,
+            jitter = format_args!("{:.1}ms", jitter_ms),
+            goodput = %format_throughput(m.goodput_bps()),
+            tx_pkts = mmp.sender.cumulative_packets_sent(),
+            rx_pkts = mmp.receiver.cumulative_packets_recv(),
             "MMP link metrics"
-        );
-
-        // Debug-level: extended details
-        debug!(
-            peer = %peer_name,
-            jitter_us = mmp.receiver.jitter_us(),
-            reorder = mmp.receiver.cumulative_packets_recv(),
-            rtt_trend = format_args!("{}", if m.rtt_trend.initialized() {
-                format!("short={:.1} long={:.1}", m.rtt_trend.short(), m.rtt_trend.long())
-            } else {
-                "n/a".to_string()
-            }),
-            loss_trend = format_args!("{}", if m.loss_trend.initialized() {
-                format!("short={:.4} long={:.4}", m.loss_trend.short(), m.loss_trend.long())
-            } else {
-                "n/a".to_string()
-            }),
-            delivery_fwd = format_args!("{:.3}", m.delivery_ratio_forward),
-            delivery_rev = format_args!("{:.3}", m.delivery_ratio_reverse),
-            mode = %mmp.mode(),
-            "MMP link metrics (detail)"
         );
     }
 
     /// Emit a teardown log summarizing lifetime MMP metrics for a removed peer.
     pub(in crate::node) fn log_mmp_teardown(peer_name: &str, mmp: &crate::mmp::MmpPeerState) {
         let m = &mmp.metrics;
+        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
 
         let rtt_str = match m.srtt_ms() {
             Some(rtt) => format!("{:.1}ms", rtt),
-            None => "n/a".to_string(),
+            None => "n/a".to_string()
         };
+        let loss_str = format!("{:.1}%", m.loss_rate() * 100.0);
 
         info!(
             peer = %peer_name,
             rtt = %rtt_str,
-            loss = format_args!("{:.1}%", m.loss_rate() * 100.0),
+            loss = %loss_str,
+            jitter = format_args!("{:.1}ms", jitter_ms),
             etx = format_args!("{:.2}", m.etx),
+            goodput = %format_throughput(m.goodput_bps()),
             tx_pkts = mmp.sender.cumulative_packets_sent(),
             tx_bytes = mmp.sender.cumulative_bytes_sent(),
             rx_pkts = mmp.receiver.cumulative_packets_recv(),
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
-            jitter_us = mmp.receiver.jitter_us(),
             "MMP link teardown"
         );
     }
@@ -342,74 +325,59 @@ impl Node {
         }
     }
 
-    /// Emit periodic session MMP metrics at info and debug levels.
+    /// Emit periodic session MMP metrics.
     fn log_session_mmp_metrics(session_name: &str, mmp: &MmpSessionState) {
         let m = &mmp.metrics;
 
-        let rtt_str = match m.srtt_ms() {
-            Some(rtt) => format!("{:.1}ms", rtt),
-            None => "n/a".to_string(),
+        let rtt_str = if m.rtt_trend.initialized() {
+            format!("{:.1}ms", m.rtt_trend.long() / 1000.0)
+        } else {
+            "n/a".to_string()
         };
-        let loss_pct = m.loss_rate() * 100.0;
-        let tx_pkts = mmp.sender.cumulative_packets_sent();
-        let rx_pkts = mmp.receiver.cumulative_packets_recv();
-        let goodput_str = format_throughput(m.goodput_bps());
-        let send_mtu = mmp.path_mtu.current_mtu();
-        let observed_mtu = mmp.path_mtu.last_observed_mtu();
+        let loss_str = if m.loss_trend.initialized() {
+            format!("{:.1}%", m.loss_trend.long() * 100.0)
+        } else {
+            "n/a".to_string()
+        };
+        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
 
         info!(
             session = %session_name,
             rtt = %rtt_str,
-            loss = format_args!("{:.1}%", loss_pct),
-            goodput = %goodput_str,
-            send_mtu,
-            observed_mtu,
-            tx_pkts,
-            rx_pkts,
+            loss = %loss_str,
+            jitter = format_args!("{:.1}ms", jitter_ms),
+            goodput = %format_throughput(m.goodput_bps()),
+            mtu = mmp.path_mtu.last_observed_mtu(),
+            tx_pkts = mmp.sender.cumulative_packets_sent(),
+            rx_pkts = mmp.receiver.cumulative_packets_recv(),
             "MMP session metrics"
-        );
-
-        debug!(
-            session = %session_name,
-            jitter_us = mmp.receiver.jitter_us(),
-            rtt_trend = format_args!("{}", if m.rtt_trend.initialized() {
-                format!("short={:.1} long={:.1}", m.rtt_trend.short(), m.rtt_trend.long())
-            } else {
-                "n/a".to_string()
-            }),
-            loss_trend = format_args!("{}", if m.loss_trend.initialized() {
-                format!("short={:.4} long={:.4}", m.loss_trend.short(), m.loss_trend.long())
-            } else {
-                "n/a".to_string()
-            }),
-            delivery_fwd = format_args!("{:.3}", m.delivery_ratio_forward),
-            delivery_rev = format_args!("{:.3}", m.delivery_ratio_reverse),
-            mode = %mmp.mode(),
-            "MMP session metrics (detail)"
         );
     }
 
     /// Emit a teardown log summarizing lifetime session MMP metrics.
     pub(in crate::node) fn log_session_mmp_teardown(session_name: &str, mmp: &MmpSessionState) {
         let m = &mmp.metrics;
+        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
 
         let rtt_str = match m.srtt_ms() {
             Some(rtt) => format!("{:.1}ms", rtt),
             None => "n/a".to_string(),
         };
+        let loss_str = format!("{:.1}%", m.loss_rate() * 100.0);
 
         info!(
             session = %session_name,
             rtt = %rtt_str,
-            loss = format_args!("{:.1}%", m.loss_rate() * 100.0),
+            loss = %loss_str,
+            jitter = format_args!("{:.1}ms", jitter_ms),
             etx = format_args!("{:.2}", m.etx),
+            goodput = %format_throughput(m.goodput_bps()),
             send_mtu = mmp.path_mtu.current_mtu(),
             observed_mtu = mmp.path_mtu.last_observed_mtu(),
             tx_pkts = mmp.sender.cumulative_packets_sent(),
             tx_bytes = mmp.sender.cumulative_bytes_sent(),
             rx_pkts = mmp.receiver.cumulative_packets_recv(),
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
-            jitter_us = mmp.receiver.jitter_us(),
             "MMP session teardown"
         );
     }
