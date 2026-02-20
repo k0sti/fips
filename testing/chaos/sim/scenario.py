@@ -1,0 +1,270 @@
+"""Scenario YAML loading and validation."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+
+import yaml
+
+
+@dataclass
+class Range:
+    """A min/max range for stochastic parameters."""
+
+    min: float
+    max: float
+
+    def validate(self, name: str):
+        if self.min > self.max:
+            raise ValueError(f"{name}: min ({self.min}) > max ({self.max})")
+        if self.min < 0:
+            raise ValueError(f"{name}: min ({self.min}) must be >= 0")
+
+
+@dataclass
+class TopologyConfig:
+    num_nodes: int = 10
+    algorithm: str = "random_geometric"
+    params: dict = field(default_factory=dict)
+    ensure_connected: bool = True
+    subnet: str = "172.20.0.0/24"
+    ip_start: int = 10
+
+
+@dataclass
+class NetemPolicy:
+    delay_ms: tuple[float, float] = (0, 0)
+    jitter_ms: tuple[float, float] = (0, 0)
+    loss_pct: tuple[float, float] = (0, 0)
+    duplicate_pct: tuple[float, float] = (0, 0)
+    reorder_pct: tuple[float, float] = (0, 0)
+    corrupt_pct: tuple[float, float] = (0, 0)
+
+
+@dataclass
+class NetemMutationConfig:
+    interval_secs: Range = field(default_factory=lambda: Range(15, 30))
+    fraction: float = 0.3
+    policies: dict[str, NetemPolicy] = field(default_factory=dict)
+
+
+@dataclass
+class NetemConfig:
+    enabled: bool = False
+    default_policy: NetemPolicy = field(default_factory=NetemPolicy)
+    mutation: NetemMutationConfig = field(default_factory=NetemMutationConfig)
+
+
+@dataclass
+class LinkFlapsConfig:
+    enabled: bool = False
+    interval_secs: Range = field(default_factory=lambda: Range(20, 60))
+    max_down_links: int = 2
+    down_duration_secs: Range = field(default_factory=lambda: Range(10, 30))
+    protect_connectivity: bool = True
+
+
+@dataclass
+class TrafficConfig:
+    enabled: bool = False
+    max_concurrent: int = 3
+    interval_secs: Range = field(default_factory=lambda: Range(10, 30))
+    duration_secs: Range = field(default_factory=lambda: Range(5, 15))
+    parallel_streams: int = 4
+
+
+@dataclass
+class NodeChurnConfig:
+    enabled: bool = False
+    interval_secs: Range = field(default_factory=lambda: Range(60, 180))
+    max_down_nodes: int = 1
+    down_duration_secs: Range = field(default_factory=lambda: Range(30, 90))
+    protect_connectivity: bool = True
+
+
+@dataclass
+class BandwidthConfig:
+    """Per-link bandwidth pacing via HTB rate limiting.
+
+    When enabled, each link is randomly assigned a rate from the tiers list.
+    # TODO: Add structured bandwidth assignment (e.g., per-node roles,
+    # asymmetric uplink/downlink, tiered by topology distance, or
+    # time-varying bandwidth mutations similar to netem mutation).
+    """
+
+    enabled: bool = False
+    tiers_mbps: list[int] = field(default_factory=lambda: [1, 10, 100, 1000])
+
+
+@dataclass
+class LoggingConfig:
+    rust_log: str = "info"
+    output_dir: str = "./sim-results"
+
+
+@dataclass
+class Scenario:
+    name: str = "unnamed"
+    seed: int = 42
+    duration_secs: int = 120
+    topology: TopologyConfig = field(default_factory=TopologyConfig)
+    netem: NetemConfig = field(default_factory=NetemConfig)
+    link_flaps: LinkFlapsConfig = field(default_factory=LinkFlapsConfig)
+    traffic: TrafficConfig = field(default_factory=TrafficConfig)
+    node_churn: NodeChurnConfig = field(default_factory=NodeChurnConfig)
+    bandwidth: BandwidthConfig = field(default_factory=BandwidthConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+
+def _parse_range(data, name: str) -> Range:
+    """Parse a {min, max} dict into a Range."""
+    if isinstance(data, dict):
+        return Range(min=float(data["min"]), max=float(data["max"]))
+    raise ValueError(f"{name}: expected {{min, max}} dict, got {type(data).__name__}")
+
+
+def _parse_netem_policy(data: dict) -> NetemPolicy:
+    """Parse a netem policy from a dict with [min, max] lists or {min, max} dicts."""
+    policy = NetemPolicy()
+    for attr in (
+        "delay_ms",
+        "jitter_ms",
+        "loss_pct",
+        "duplicate_pct",
+        "reorder_pct",
+        "corrupt_pct",
+    ):
+        if attr in data:
+            val = data[attr]
+            if isinstance(val, list) and len(val) == 2:
+                setattr(policy, attr, (float(val[0]), float(val[1])))
+            elif isinstance(val, dict):
+                setattr(policy, attr, (float(val["min"]), float(val["max"])))
+            else:
+                raise ValueError(f"netem policy {attr}: expected [min, max] or {{min, max}}")
+    return policy
+
+
+def load_scenario(path: str) -> Scenario:
+    """Load and validate a scenario from a YAML file."""
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+
+    s = Scenario()
+
+    # Scenario section
+    sc = raw.get("scenario", {})
+    s.name = sc.get("name", os.path.splitext(os.path.basename(path))[0])
+    s.seed = int(sc.get("seed", 42))
+    s.duration_secs = int(sc.get("duration_secs", 120))
+
+    # Topology section
+    tc = raw.get("topology", {})
+    s.topology.num_nodes = int(tc.get("num_nodes", 10))
+    s.topology.algorithm = tc.get("algorithm", "random_geometric")
+    s.topology.params = tc.get("params", {})
+    s.topology.ensure_connected = tc.get("ensure_connected", True)
+    s.topology.subnet = tc.get("subnet", "172.20.0.0/24")
+    s.topology.ip_start = int(tc.get("ip_start", 10))
+
+    # Netem section
+    nc = raw.get("netem", {})
+    s.netem.enabled = nc.get("enabled", False)
+    if "default_policy" in nc:
+        s.netem.default_policy = _parse_netem_policy(nc["default_policy"])
+    if "mutation" in nc:
+        mc = nc["mutation"]
+        s.netem.mutation.interval_secs = _parse_range(
+            mc.get("interval_secs", {"min": 15, "max": 30}), "netem.mutation.interval_secs"
+        )
+        s.netem.mutation.fraction = float(mc.get("fraction", 0.3))
+        if "policies" in mc:
+            s.netem.mutation.policies = {
+                name: _parse_netem_policy(pdata)
+                for name, pdata in mc["policies"].items()
+            }
+
+    # Link flaps section
+    lf = raw.get("link_flaps", {})
+    s.link_flaps.enabled = lf.get("enabled", False)
+    if "interval_secs" in lf:
+        s.link_flaps.interval_secs = _parse_range(lf["interval_secs"], "link_flaps.interval_secs")
+    s.link_flaps.max_down_links = int(lf.get("max_down_links", 2))
+    if "down_duration_secs" in lf:
+        s.link_flaps.down_duration_secs = _parse_range(
+            lf["down_duration_secs"], "link_flaps.down_duration_secs"
+        )
+    s.link_flaps.protect_connectivity = lf.get("protect_connectivity", True)
+
+    # Traffic section
+    tf = raw.get("traffic", {})
+    s.traffic.enabled = tf.get("enabled", False)
+    s.traffic.max_concurrent = int(tf.get("max_concurrent", 3))
+    if "interval_secs" in tf:
+        s.traffic.interval_secs = _parse_range(tf["interval_secs"], "traffic.interval_secs")
+    if "duration_secs" in tf:
+        s.traffic.duration_secs = _parse_range(tf["duration_secs"], "traffic.duration_secs")
+    s.traffic.parallel_streams = int(tf.get("parallel_streams", 4))
+
+    # Node churn section
+    nc2 = raw.get("node_churn", {})
+    s.node_churn.enabled = nc2.get("enabled", False)
+    if "interval_secs" in nc2:
+        s.node_churn.interval_secs = _parse_range(nc2["interval_secs"], "node_churn.interval_secs")
+    s.node_churn.max_down_nodes = int(nc2.get("max_down_nodes", 1))
+    if "down_duration_secs" in nc2:
+        s.node_churn.down_duration_secs = _parse_range(
+            nc2["down_duration_secs"], "node_churn.down_duration_secs"
+        )
+    s.node_churn.protect_connectivity = nc2.get("protect_connectivity", True)
+
+    # Bandwidth section
+    bw = raw.get("bandwidth", {})
+    s.bandwidth.enabled = bw.get("enabled", False)
+    if "tiers_mbps" in bw:
+        tiers = bw["tiers_mbps"]
+        if not isinstance(tiers, list) or not tiers:
+            raise ValueError("bandwidth.tiers_mbps must be a non-empty list")
+        s.bandwidth.tiers_mbps = [int(t) for t in tiers]
+
+    # Logging section
+    lg = raw.get("logging", {})
+    s.logging.rust_log = lg.get("rust_log", "info")
+    s.logging.output_dir = lg.get("output_dir", "./sim-results")
+
+    # Validation
+    _validate(s)
+
+    return s
+
+
+def _validate(s: Scenario):
+    """Validate scenario constraints."""
+    if s.topology.num_nodes < 2:
+        raise ValueError("topology.num_nodes must be >= 2")
+    if s.topology.num_nodes > 250:
+        raise ValueError("topology.num_nodes must be <= 250 (subnet limit)")
+    if s.topology.algorithm not in ("random_geometric", "erdos_renyi", "chain"):
+        raise ValueError(f"Unknown topology algorithm: {s.topology.algorithm}")
+    if s.duration_secs < 1:
+        raise ValueError("duration_secs must be >= 1")
+
+    # Validate ranges
+    if s.netem.enabled and s.netem.mutation.policies:
+        s.netem.mutation.interval_secs.validate("netem.mutation.interval_secs")
+    if s.link_flaps.enabled:
+        s.link_flaps.interval_secs.validate("link_flaps.interval_secs")
+        s.link_flaps.down_duration_secs.validate("link_flaps.down_duration_secs")
+    if s.traffic.enabled:
+        s.traffic.interval_secs.validate("traffic.interval_secs")
+        s.traffic.duration_secs.validate("traffic.duration_secs")
+    if s.node_churn.enabled:
+        s.node_churn.interval_secs.validate("node_churn.interval_secs")
+        s.node_churn.down_duration_secs.validate("node_churn.down_duration_secs")
+        if s.node_churn.max_down_nodes >= s.topology.num_nodes:
+            raise ValueError("node_churn.max_down_nodes must be < topology.num_nodes")
+    if s.bandwidth.enabled:
+        for tier in s.bandwidth.tiers_mbps:
+            if tier <= 0:
+                raise ValueError(f"bandwidth.tiers_mbps: all values must be > 0, got {tier}")

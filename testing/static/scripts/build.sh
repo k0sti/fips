@@ -17,7 +17,7 @@ MESH_NAME="${2:-}"
 PROJECT_ROOT="$(cd "$DOCKER_DIR/../.." && pwd)"
 if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
     echo "Error: Cannot find Cargo.toml at $PROJECT_ROOT" >&2
-    echo "Expected layout: <project-root>/examples/docker-network/scripts/build.sh" >&2
+    echo "Expected layout: <project-root>/testing/static/scripts/build.sh" >&2
     exit 1
 fi
 
@@ -66,6 +66,6 @@ echo "Generating node configurations from templates..."
 "$SCRIPT_DIR/generate-configs.sh" "$TOPOLOGY" $MESH_NAME
 echo ""
 echo "Building Docker images..."
-docker compose --profile "$TOPOLOGY" build
+docker compose -f "$DOCKER_DIR/docker-compose.yml" --profile "$TOPOLOGY" build
 echo ""
-echo "Ready: docker compose --profile $TOPOLOGY up -d"
+echo "Ready: docker compose -f testing/static/docker-compose.yml --profile $TOPOLOGY up -d"

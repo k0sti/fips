@@ -1,10 +1,11 @@
-# Docker Network Test Harness
+# Static Docker Network Test Harness
 
-Multi-node integration test for FIPS using Docker containers. Multiple
-topologies are provided: a sparse mesh (5 nodes, 6 links), a linear chain
-(5 nodes, 4 links), and a mesh with a public external node. All exercise the
-full FIPS stack including TUN devices, DNS resolution, peer link encryption,
-spanning tree construction, and discovery-driven multi-hop routing.
+Multi-node integration test for FIPS using Docker containers with fixed
+topologies. Multiple topologies are provided: a sparse mesh (5 nodes, 6
+links), a linear chain (5 nodes, 4 links), and a mesh with a public external
+node. All exercise the full FIPS stack including TUN devices, DNS resolution,
+peer link encryption, spanning tree construction, and discovery-driven
+multi-hop routing.
 
 ## Prerequisites
 
@@ -17,25 +18,25 @@ spanning tree construction, and discovery-driven multi-hop routing.
 Build the binary and generate configs:
 
 ```bash
-./scripts/build.sh
+./testing/static/scripts/build.sh
 ```
 
 Start the mesh (default topology):
 
 ```bash
-docker compose up -d
-./scripts/ping-test.sh mesh      # 20/20 expected
-./scripts/iperf-test.sh mesh     # bandwidth test
-docker compose down
+docker compose -f testing/static/docker-compose.yml up -d
+./testing/static/scripts/ping-test.sh mesh      # 20/20 expected
+./testing/static/scripts/iperf-test.sh mesh     # bandwidth test
+docker compose -f testing/static/docker-compose.yml down
 ```
 
 The mesh profile is activated by default via `.env`. To use a different
 topology, specify the profile explicitly:
 
 ```bash
-docker compose --profile chain up -d
-./scripts/ping-test.sh chain
-docker compose --profile chain down
+docker compose -f testing/static/docker-compose.yml --profile chain up -d
+./testing/static/scripts/ping-test.sh chain
+docker compose -f testing/static/docker-compose.yml --profile chain down
 ```
 
 ## Topologies
@@ -45,7 +46,7 @@ docker compose --profile chain down
 ![Mesh Topology](docker-mesh-topology.svg)
 
 Five nodes with 6 bidirectional UDP links forming a sparse, fully connected
-graph. Not all nodes are direct peers — non-adjacent pairs require
+graph. Not all nodes are direct peers -- non-adjacent pairs require
 discovery-driven multi-hop routing to establish end-to-end sessions.
 
 The spanning tree is rooted at node A, which has the lexicographically
@@ -57,26 +58,26 @@ covering both direct-peer and multi-hop paths.
 
 | Link | Type |
 |------|------|
-| A — D | tree edge (D's parent is A) |
-| A — E | tree edge (E's parent is A) |
-| C — D | tree edge (C's parent is D) |
-| B — C | tree edge (B's parent is C) |
-| D — E | non-tree link |
-| C — E | non-tree link |
+| A -- D | tree edge (D's parent is A) |
+| A -- E | tree edge (E's parent is A) |
+| C -- D | tree edge (C's parent is D) |
+| B -- C | tree edge (B's parent is C) |
+| D -- E | non-tree link |
+| C -- E | non-tree link |
 
 ### Chain
 
 ![Chain Topology](docker-chain-topology.svg)
 
-Five nodes in a linear chain: A — B — C — D — E. Each node peers only with
+Five nodes in a linear chain: A -- B -- C -- D -- E. Each node peers only with
 its immediate neighbors. Multi-hop communication (e.g., A to E) requires the
 discovery protocol to find routes through intermediate nodes.
 
 The ping test covers:
 
-- Adjacent hops: A→B, B→C (1 hop each)
-- Multi-hop: A→C (2 hops), A→D (3 hops), A→E (4 hops)
-- Reverse: E→A (4 hops)
+- Adjacent hops: A->B, B->C (1 hop each)
+- Multi-hop: A->C (2 hops), A->D (3 hops), A->E (4 hops)
+- Reverse: E->A (4 hops)
 
 ### Mesh-Public
 
@@ -84,7 +85,7 @@ Same five Docker nodes as the mesh topology, plus an external public node
 (`pub`) at a remote IP. Nodes A, B, and C peer with the public node. This
 topology is for testing mixed local/remote mesh operation.
 
-External nodes are not managed by Docker — only their identity and address
+External nodes are not managed by Docker -- only their identity and address
 appear in the topology file so that Docker nodes can peer with them.
 
 ## Configuration Management
@@ -92,29 +93,34 @@ appear in the topology file so that Docker nodes can peer with them.
 ### File Structure
 
 ```text
-configs/
-├── node.template.yaml              # Template for all node configs
-└── topologies/
-    ├── mesh.yaml                   # Mesh topology definition
-    ├── chain.yaml                  # Chain topology definition
-    └── mesh-public.yaml            # Mesh + external public node
-
-generated-configs/                   # Auto-generated (gitignored)
-├── npubs.env                       # NPUB_A=..., NPUB_B=..., etc.
-├── mesh/
-│   ├── node-a.yaml ... node-e.yaml
-├── mesh-public/
-│   ├── node-a.yaml ... node-e.yaml
-└── chain/
-    ├── node-a.yaml ... node-e.yaml
-
-scripts/
-├── build.sh                        # Build binary + generate configs
-├── generate-configs.sh             # Generate node configs from topology
-├── derive-keys.py                  # Deterministic nsec/npub derivation
-├── ping-test.sh                    # Connectivity test
-├── iperf-test.sh                   # Bandwidth test
-└── netem.sh                        # Network impairment
+testing/static/
+├── Dockerfile                          # Container image definition
+├── docker-compose.yml                  # Service definitions for all topologies
+├── resolv.conf                         # DNS config pointing to FIPS resolver
+├── .env                                # Default compose profile
+├── configs/
+│   ├── node.template.yaml              # Template for all node configs
+│   └── topologies/
+│       ├── mesh.yaml                   # Mesh topology definition
+│       ├── chain.yaml                  # Chain topology definition
+│       └── mesh-public.yaml            # Mesh + external public node
+├── generated-configs/                  # Auto-generated (gitignored)
+│   ├── npubs.env                       # NPUB_A=..., NPUB_B=..., etc.
+│   ├── mesh/
+│   │   ├── node-a.yaml ... node-e.yaml
+│   ├── mesh-public/
+│   │   ├── node-a.yaml ... node-e.yaml
+│   └── chain/
+│       ├── node-a.yaml ... node-e.yaml
+├── scripts/
+│   ├── build.sh                        # Build binary + generate configs
+│   ├── generate-configs.sh             # Generate node configs from topology
+│   ├── derive-keys.py                  # Deterministic nsec/npub derivation
+│   ├── ping-test.sh                    # Connectivity test
+│   ├── iperf-test.sh                   # Bandwidth test
+│   └── netem.sh                        # Network impairment
+├── docker-mesh-topology.svg            # Mesh topology diagram
+└── docker-chain-topology.svg           # Chain topology diagram
 ```
 
 ### Topology Files
@@ -144,7 +150,7 @@ in peer blocks and the npubs environment file.
 ### Generating Configs
 
 ```bash
-./scripts/generate-configs.sh <topology> [mesh-name]
+./testing/static/scripts/generate-configs.sh <topology> [mesh-name]
 ```
 
 This reads the topology definition and generates:
@@ -164,7 +170,7 @@ automatically after compiling.
    `mesh.yaml`
 2. Add corresponding service definitions to `docker-compose.yml` with
    `profiles: ["<name>"]`
-3. Run `./scripts/generate-configs.sh <name>` to generate configs
+3. Run `./testing/static/scripts/generate-configs.sh <name>` to generate configs
 
 ## Deterministic Mesh Identity Derivation
 
@@ -174,11 +180,11 @@ each mesh needs unique node identities to avoid key conflicts. The optional
 
 ```bash
 # Build with derived identities
-./scripts/build.sh mesh my-mesh-1
+./testing/static/scripts/build.sh mesh my-mesh-1
 
 # Or generate configs directly
-./scripts/generate-configs.sh mesh my-mesh-1
-./scripts/generate-configs.sh mesh-public my-mesh-1
+./testing/static/scripts/generate-configs.sh mesh my-mesh-1
+./testing/static/scripts/generate-configs.sh mesh-public my-mesh-1
 ```
 
 ### How It Works
@@ -204,7 +210,7 @@ with no external dependencies (pure Python stdlib: hashlib for SHA-256,
 manual secp256k1 scalar multiplication, and BIP-173 bech32 encoding):
 
 ```bash
-$ ./scripts/derive-keys.py my-mesh-1 a
+$ ./testing/static/scripts/derive-keys.py my-mesh-1 a
 nsec=<64-char-hex>
 npub=npub1...
 ```
@@ -234,8 +240,8 @@ This file is:
 ## Performance Testing
 
 ```bash
-./scripts/iperf-test.sh [mesh|chain]
-./scripts/iperf-test.sh mesh --live   # show live iperf3 output
+./testing/static/scripts/iperf-test.sh [mesh|chain]
+./testing/static/scripts/iperf-test.sh mesh --live   # show live iperf3 output
 ```
 
 Runs iperf3 with:
@@ -250,7 +256,7 @@ The `netem.sh` script simulates adverse network conditions using `tc`/`netem`
 on all running containers:
 
 ```bash
-./scripts/netem.sh [mesh|chain] <apply|remove|status> [options]
+./testing/static/scripts/netem.sh [mesh|chain] <apply|remove|status> [options]
 ```
 
 ### Options
@@ -277,16 +283,16 @@ on all running containers:
 
 ```bash
 # Apply 50ms delay with 5% packet loss
-./scripts/netem.sh mesh apply --delay 50 --loss 5
+./testing/static/scripts/netem.sh mesh apply --delay 50 --loss 5
 
 # Use a preset
-./scripts/netem.sh chain apply --preset congested
+./testing/static/scripts/netem.sh chain apply --preset congested
 
 # Check current rules
-./scripts/netem.sh mesh status
+./testing/static/scripts/netem.sh mesh status
 
 # Remove all impairment
-./scripts/netem.sh mesh remove
+./testing/static/scripts/netem.sh mesh remove
 ```
 
 Rules are applied to egress on each container's `eth0` interface. With all
@@ -336,7 +342,7 @@ docker exec fips-node-b iperf3 -c $NPUB_A.fips
 Force a clean rebuild:
 
 ```bash
-docker compose build --no-cache
+docker compose -f testing/static/docker-compose.yml build --no-cache
 ```
 
 **Check node logs**:
@@ -356,7 +362,7 @@ docker exec fips-node-a dig AAAA <npub>.fips @127.0.0.1
 the binary inside the container:
 
 ```bash
-md5sum examples/docker-network/fips
+md5sum testing/static/fips
 docker exec fips-node-a md5sum /usr/local/bin/fips
 ```
 
@@ -365,5 +371,5 @@ convergence wait in `ping-test.sh` may be insufficient. Edit the `sleep`
 value at the top of the script.
 
 **Missing npubs.env**: If test scripts fail with "npubs.env not found", run
-`./scripts/generate-configs.sh mesh` (or your topology) first, or use
-`./scripts/build.sh` which generates configs automatically.
+`./testing/static/scripts/generate-configs.sh mesh` (or your topology) first,
+or use `./testing/static/scripts/build.sh` which generates configs automatically.
