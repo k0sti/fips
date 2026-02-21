@@ -129,6 +129,50 @@ handshake completes successfully, it replaces the old session. This handles
 legitimate reconnection (network change, process restart, NAT rebinding)
 without disrupting ongoing traffic until the new session is confirmed.
 
+### Auto-Reconnect
+
+When MMP's liveness detection removes a peer (dead timeout exceeded), FLP
+automatically re-initiates the connection if the peer is configured for it.
+The auto-reconnect path:
+
+1. `check_link_heartbeats()` detects the dead peer and calls
+   `remove_active_peer()`, tearing down the link and triggering tree/bloom
+   reconvergence
+2. `schedule_reconnect()` checks whether the peer is in the auto-connect list
+   with `auto_reconnect: true` (the default)
+3. If eligible, the peer is fed into the retry system with unlimited retries
+   and exponential backoff (same base interval and max backoff as startup
+   retries, configured via `node.retry.*`)
+4. On each retry tick, a fresh Noise IK handshake is initiated toward the
+   peer's configured transport addresses
+
+Auto-reconnect only applies to peers in the static peer list with
+`connect_policy: auto_connect`. Inbound-only peers (those not in the local
+config) are not reconnected — the owning node (the one with the outbound
+config) is responsible for re-establishing the link.
+
+### Handshake Message Retry
+
+Both link-layer (Noise IK msg1/msg2) and session-layer (SessionSetup/
+SessionAck) handshakes use message-level retry with exponential backoff
+within the handshake timeout window. This handles packet loss on the
+underlying transport without waiting for the full handshake timeout to
+expire.
+
+Configuration (under `node.rate_limit.*`):
+
+- `handshake_resend_interval_ms` (default 1000): initial resend interval
+- `handshake_resend_backoff` (default 2.0): backoff multiplier per resend
+- `handshake_max_resends` (default 5): max resends per handshake attempt
+
+With defaults, resends occur at 1s, 2s, 4s, 8s, 16s — all within the 30s
+handshake timeout. Under 19% per-attempt loss (10% bidirectional), the
+probability of all 6 attempts (initial + 5 resends) failing is ~0.005%.
+
+Session-layer resends wrap the stored payload in a fresh SessionDatagram so
+routing adapts to topology changes between resends. Responder idempotency:
+duplicate msg1/SessionSetup triggers resend of the stored msg2/SessionAck.
+
 ## Link Encryption
 
 All traffic between authenticated peers is encrypted. Every packet on a link
@@ -284,21 +328,32 @@ stopped.
 
 ## Liveness Detection
 
-FLP detects link liveness through timeout-based mechanisms. There are no
-dedicated keepalive or ping/pong messages. Liveness is inferred from:
+FLP detects link liveness through a combination of explicit heartbeats and
+traffic observation.
 
-- **Data traffic**: Any successfully decrypted packet confirms the peer is
-  alive
-- **Gossip messages**: TreeAnnounce and FilterAnnounce messages sent
-  periodically as part of normal mesh operation serve as implicit heartbeats
+### Heartbeat
 
-When no traffic is received for the configured timeout period, FLP marks the
-link as stale. If the stale state persists, the link is torn down.
+A Heartbeat message (0x51) is sent to each active peer every
+`node.heartbeat_interval_secs` (default 10s). The heartbeat is a minimal
+encrypted frame with no payload beyond the standard inner header (timestamp +
+message type). Any successfully decrypted frame — data, gossip, MMP report,
+or heartbeat — resets the peer's last-receive timestamp tracked by the MMP
+receiver.
 
-The two-state liveness model:
-- **Connected → Stale**: No traffic received for threshold duration
-- **Stale → Connected**: Valid traffic received (peer is alive again)
-- **Stale → Disconnected**: Timeout exceeded, link torn down
+### Dead Timeout
+
+When no traffic (of any kind) is received from a peer for
+`node.link_dead_timeout_secs` (default 30s), the peer is declared dead and
+removed via `remove_active_peer()`. This triggers the full teardown cascade:
+spanning tree parent reselection (if the dead peer was the parent),
+TreeAnnounce propagation, coordinate cache flush, and bloom filter recompute.
+
+If the dead peer is eligible for auto-reconnect (see [Auto-Reconnect]
+(#auto-reconnect)), reconnection is scheduled immediately after removal.
+
+The heartbeat is independent of MMP — it is needed because idle links in
+Lightweight MMP mode have no guaranteed periodic traffic (gossip is
+event-driven, and MMP reports require at least one side running Full mode).
 
 ## Link Message Types
 
@@ -314,6 +369,7 @@ FLP defines eight message types carried inside encrypted frames:
 | 0x01 | SenderReport | MMP sender-side metrics report |
 | 0x02 | ReceiverReport | MMP receiver-side metrics report |
 | 0x50 | Disconnect | Orderly link teardown with reason code |
+| 0x51 | Heartbeat | Link liveness probe |
 
 Additionally, handshake messages (phase 0x1 msg1, phase 0x2 msg2) are sent
 unencrypted before the link session is established.
@@ -444,8 +500,10 @@ an attacker sends invalid packets to elicit responses.
 | Roaming (address-follows-crypto) | **Implemented** |
 | Rate limiting (token bucket) | **Implemented** |
 | Disconnect with reason codes | **Implemented** |
-| Liveness detection (timeout-based) | **Implemented** |
+| Heartbeat liveness detection | **Implemented** |
 | Reconnection handling | **Implemented** |
+| Auto-reconnect after link-dead removal | **Implemented** |
+| Handshake message retry (link + session layer) | **Implemented** |
 | Common prefix framing | **Implemented** |
 | AAD binding on encrypted frames | **Implemented** |
 | Inner header timestamps | **Implemented** |

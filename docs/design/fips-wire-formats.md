@@ -135,7 +135,7 @@ Minimum frame: 37 bytes (empty body)
 | 0x30 | LookupRequest | Coordinate discovery request |
 | 0x31 | LookupResponse | Coordinate discovery response |
 | 0x50 | Disconnect | Orderly link teardown |
-| 0x51 | Keepalive | Keepalive probe (reserved) |
+| 0x51 | Heartbeat | Link liveness probe |
 
 ### Noise IK Message 1 (phase 0x1)
 
@@ -393,7 +393,7 @@ Orderly link teardown with reason code.
 | 0x04 | ResourceExhaustion | Memory or connection limit |
 | 0x05 | SecurityViolation | Authentication or policy violation |
 | 0x06 | ConfigurationChange | Peer removed from configuration |
-| 0x07 | Timeout | Keepalive or stale detection timeout |
+| 0x07 | Timeout | Heartbeat liveness timeout |
 | 0xFF | Other | Unspecified reason |
 
 ### SenderReport (0x01)

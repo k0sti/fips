@@ -118,6 +118,15 @@ logging:
 When `ensure_connected` is true (default), the generator retries up to
 50 times to produce a connected graph.
 
+### Directed Outbound Configs
+
+The config generator assigns each edge to exactly one node for outbound
+connection using a BFS spanning tree rooted at the lowest node ID. Tree
+edges are assigned parent-to-child; non-tree edges are assigned from the
+lower node ID to the higher. This eliminates the dual-connect race
+condition where both sides initiate simultaneously, and creates a clear
+"owning side" for each link — relevant for auto-reconnect testing.
+
 ## Output
 
 Results written to `sim-results/` (configurable via
@@ -125,6 +134,7 @@ Results written to `sim-results/` (configurable via
 
 - `analysis.txt` -- Summary: panics, errors, sessions, metrics
 - `metadata.txt` -- Seed, node count, edges, adjacency list
+- `runner.log` -- Orchestration events (topology, netem, churn, traffic) with timestamps
 - `fips-node-nXX.log` -- Per-node log output
 
 Exit code 0 on success, 2 if panics detected.

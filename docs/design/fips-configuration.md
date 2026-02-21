@@ -68,6 +68,8 @@ handle infrastructure concerns only.
 | `node.leaf_only` | bool | `false` | Leaf-only mode: node does not forward traffic or participate in routing |
 | `node.tick_interval_secs` | u64 | `1` | Periodic maintenance tick interval (retry checks, timeout cleanup, tree refresh) |
 | `node.base_rtt_ms` | u64 | `100` | Initial RTT estimate for new links before measurements converge |
+| `node.heartbeat_interval_secs` | u64 | `10` | Heartbeat send interval per peer for liveness detection |
+| `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed |
 
 ### Resource Limits (`node.limits.*`)
 
@@ -89,6 +91,9 @@ Handshake rate limiting protects against DoS on the Noise IK handshake path.
 | `node.rate_limit.handshake_burst` | u32 | `100` | Token bucket burst capacity |
 | `node.rate_limit.handshake_rate` | f64 | `10.0` | Tokens per second refill rate |
 | `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout |
+| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial handshake message resend interval |
+| `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults) |
+| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt |
 
 ### Retry / Backoff (`node.retry.*`)
 
@@ -99,6 +104,10 @@ Connection retry with exponential backoff.
 | `node.retry.max_retries` | u32 | `5` | Max connection retry attempts |
 | `node.retry.base_interval_secs` | u64 | `5` | Base backoff interval |
 | `node.retry.max_backoff_secs` | u64 | `300` | Cap on exponential backoff (5 minutes) |
+
+Auto-reconnect (triggered by MMP link-dead removal) uses the same backoff
+parameters but bypasses `max_retries`, retrying indefinitely. See
+`peers[].auto_reconnect` below.
 
 ### Cache Parameters (`node.cache.*`)
 
@@ -235,6 +244,7 @@ Static peer list. Each entry defines a peer to connect to.
 | `peers[].addresses[].addr` | string | *(required)* | Transport address (e.g., `"10.0.0.2:4000"`) |
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
+| `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
 
 ## Minimal Example
 
@@ -296,6 +306,8 @@ node:
   leaf_only: false
   tick_interval_secs: 1
   base_rtt_ms: 100
+  heartbeat_interval_secs: 10
+  link_dead_timeout_secs: 30
   limits:
     max_connections: 256
     max_peers: 128
@@ -305,6 +317,9 @@ node:
     handshake_burst: 100
     handshake_rate: 10.0
     handshake_timeout_secs: 30
+    handshake_resend_interval_ms: 1000
+    handshake_resend_backoff: 2.0
+    handshake_max_resends: 5
   retry:
     max_retries: 5
     base_interval_secs: 5
@@ -360,5 +375,13 @@ transports:
     recv_buf_size: 2097152           # 2 MB (kernel doubles to 4 MB actual)
     send_buf_size: 2097152           # 2 MB
 
-peers: []
+peers:                               # static peer list
+  # - npub: "npub1..."
+  #   alias: "node-b"
+  #   addresses:
+  #     - transport: udp
+  #       addr: "10.0.0.2:4000"
+  #       priority: 100
+  #   connect_policy: auto_connect
+  #   auto_reconnect: true           # reconnect after link-dead removal
 ```
