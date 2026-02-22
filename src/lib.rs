@@ -1,4 +1,4 @@
-//! FIPS: Federated Interoperable Peering System
+//! FIPS: Free Internetworking Peering System
 //!
 //! A distributed, decentralized network routing protocol for mesh nodes
 //! connecting over arbitrary transports.
