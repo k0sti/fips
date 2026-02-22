@@ -208,9 +208,14 @@ impl Node {
 
     /// Generate and send a LookupResponse when we are the target.
     ///
-    /// Signs a proof using our identity and routes the response toward
-    /// the origin. The first hop uses find_next_hop; subsequent hops use
-    /// reverse-path forwarding via recent_requests.
+    /// Signs a proof using our identity and routes the response back
+    /// toward the origin via reverse-path forwarding. The first hop
+    /// uses the `recent_requests` entry (which records who sent us the
+    /// request), ensuring the response follows the same path the
+    /// request took. This is critical because greedy tree routing
+    /// might send the response to a peer that never forwarded the
+    /// request and thus has no `recent_requests` entry, causing the
+    /// response to be discarded.
     async fn send_lookup_response(&mut self, request: &LookupRequest) {
         let our_coords = self.tree_state().my_coords().clone();
 
@@ -225,18 +230,20 @@ impl Node {
             proof,
         );
 
-        // Route toward origin
-        let next_hop_addr = match self.find_next_hop(&request.origin) {
-            Some(peer) => *peer.node_addr(),
-            None => {
-                // Origin might be our direct peer that sent us the request
-                // Check if origin == the peer we received from
-                if let Some(recent) = self.recent_requests.get(&request.request_id) {
-                    recent.from_peer
-                } else {
+        // Route toward origin via reverse path. The recent_requests entry
+        // was recorded before we got here (line 49-51), so from_peer is
+        // the node that forwarded the request to us — the correct first
+        // hop for the response's reverse path.
+        let next_hop_addr = if let Some(recent) = self.recent_requests.get(&request.request_id) {
+            recent.from_peer
+        } else {
+            // Fallback: try greedy tree routing toward origin
+            match self.find_next_hop(&request.origin) {
+                Some(peer) => *peer.node_addr(),
+                None => {
                     debug!(
                         origin = %self.peer_display_name(&request.origin),
-                        "Cannot route LookupResponse: no path to origin"
+                        "Cannot route LookupResponse: no reverse path or tree route to origin"
                     );
                     return;
                 }

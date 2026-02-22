@@ -539,7 +539,7 @@ async fn test_request_dedup_convergent_paths() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Flaky: occasional lookup failures in large meshes (~99.8% success rate)
+#[ignore] // Long-running (~2 min): run explicitly with --ignored
 async fn test_discovery_100_nodes() {
     // Set up a 100-node random topology (same seed as other 100-node tests).
     // Each node initiates lookups to a sample of other nodes in batches,
@@ -666,10 +666,24 @@ async fn test_discovery_100_nodes() {
         total_cached as f64 / NUM_NODES as f64
     );
 
+    // Detailed diagnostics for failures (to aid future debugging)
     if !failed_pairs.is_empty() {
-        eprintln!("  First {} failures:", failed_pairs.len());
+        eprintln!("  --- Failure Diagnostics ({} failures) ---", failed_pairs.len());
         for &(src, dst) in &failed_pairs {
-            eprintln!("    node {} -> node {}", src, dst);
+            let src_coords = nodes[src].node.tree_state().my_coords().clone();
+            let dst_coords = nodes[dst].node.tree_state().my_coords().clone();
+            let tree_dist = src_coords.distance_to(&dst_coords);
+            let reverse_cached = nodes[dst].node.coord_cache().contains(&all_addrs[src], now_ms);
+            let src_peers = nodes[src].node.peers.len();
+            let dst_peers = nodes[dst].node.peers.len();
+
+            eprintln!(
+                "    node {} -> node {}: tree_dist={} src_depth={} dst_depth={} \
+                 src_peers={} dst_peers={} reverse_cached={}",
+                src, dst, tree_dist,
+                src_coords.depth(), dst_coords.depth(),
+                src_peers, dst_peers, reverse_cached
+            );
         }
     }
 
