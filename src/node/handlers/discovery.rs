@@ -92,14 +92,14 @@ impl Node {
     /// Processing steps:
     /// 1. Decode and validate
     /// 2. Check recent_requests to determine if we originated or are forwarding
-    /// 3. If originator: verify proof signature, then cache target_coords in coord_cache
-    /// 4. If transit: reverse-path forward to from_peer
+    /// 3. If originator: verify proof signature, then cache target_coords and path_mtu in coord_cache
+    /// 4. If transit: apply path_mtu min(outgoing_link_mtu), reverse-path forward to from_peer
     pub(in crate::node) async fn handle_lookup_response(
         &mut self,
         from: &NodeAddr,
         payload: &[u8],
     ) {
-        let response = match LookupResponse::decode(payload) {
+        let mut response = match LookupResponse::decode(payload) {
             Ok(resp) => resp,
             Err(e) => {
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupResponse");
@@ -114,10 +114,23 @@ impl Node {
             // Transit node: reverse-path forward
             let from_peer = recent.from_peer;
 
+            // Apply path_mtu min() from the outgoing link's transport MTU
+            if let Some(peer) = self.peers.get(&from_peer)
+                && let Some(tid) = peer.transport_id()
+                && let Some(transport) = self.transports.get(&tid)
+            {
+                if let Some(addr) = peer.current_addr() {
+                    response.path_mtu = response.path_mtu.min(transport.link_mtu(addr));
+                } else {
+                    response.path_mtu = response.path_mtu.min(transport.mtu());
+                }
+            }
+
             debug!(
                 request_id = response.request_id,
                 target = %self.peer_display_name(&response.target),
                 next_hop = %self.peer_display_name(&from_peer),
+                path_mtu = response.path_mtu,
                 "Reverse-path forwarding LookupResponse"
             );
 
@@ -132,6 +145,7 @@ impl Node {
         } else {
             // We originated this request — verify proof before caching
             let target = response.target;
+            let path_mtu = response.path_mtu;
 
             // Look up the target's public key from identity_cache
             let mut prefix = [0u8; 15];
@@ -169,13 +183,15 @@ impl Node {
                 request_id = response.request_id,
                 target = %self.peer_display_name(&target),
                 depth = response.target_coords.depth(),
+                path_mtu = path_mtu,
                 "Received LookupResponse, proof verified, caching route"
             );
 
-            self.coord_cache.insert(
+            self.coord_cache.insert_with_path_mtu(
                 target,
                 response.target_coords,
                 now_ms,
+                path_mtu,
             );
 
             // Clean up pending lookup tracking
@@ -321,7 +337,7 @@ impl Node {
     pub(in crate::node) async fn initiate_lookup(&mut self, target: &NodeAddr, ttl: u8) {
         let origin = *self.node_addr();
         let origin_coords = self.tree_state().my_coords().clone();
-        let mut request = LookupRequest::generate(*target, origin, origin_coords, ttl);
+        let mut request = LookupRequest::generate(*target, origin, origin_coords, ttl, 0);
 
         // Add ourselves to the visited filter so forwarding nodes
         // won't send the request back to us

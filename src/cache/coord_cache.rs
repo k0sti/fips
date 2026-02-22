@@ -79,6 +79,32 @@ impl CoordCache {
         self.entries.insert(addr, entry);
     }
 
+    /// Insert or update a cache entry with path MTU information.
+    ///
+    /// Used by discovery response handling to store the discovered path MTU
+    /// alongside the target's coordinates.
+    pub fn insert_with_path_mtu(
+        &mut self,
+        addr: NodeAddr,
+        coords: TreeCoordinate,
+        current_time_ms: u64,
+        path_mtu: u16,
+    ) {
+        if let Some(entry) = self.entries.get_mut(&addr) {
+            entry.update(coords, current_time_ms, self.default_ttl_ms);
+            entry.set_path_mtu(path_mtu);
+            return;
+        }
+
+        if self.entries.len() >= self.max_entries {
+            self.evict_one(current_time_ms);
+        }
+
+        let mut entry = CacheEntry::new(coords, current_time_ms, self.default_ttl_ms);
+        entry.set_path_mtu(path_mtu);
+        self.entries.insert(addr, entry);
+    }
+
     /// Insert with a custom TTL.
     pub fn insert_with_ttl(
         &mut self,

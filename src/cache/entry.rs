@@ -13,6 +13,12 @@ pub struct CacheEntry {
     last_used: u64,
     /// When this entry expires (Unix milliseconds).
     expires_at: u64,
+    /// Path MTU discovered during lookup (if available).
+    ///
+    /// Set from the `LookupResponse.path_mtu` field when a discovery
+    /// response is cached. `None` when populated from SessionSetup or
+    /// other sources that don't carry path MTU information.
+    path_mtu: Option<u16>,
 }
 
 impl CacheEntry {
@@ -23,6 +29,7 @@ impl CacheEntry {
             created_at: current_time_ms,
             last_used: current_time_ms,
             expires_at: current_time_ms.saturating_add(ttl_ms),
+            path_mtu: None,
         }
     }
 
@@ -44,6 +51,16 @@ impl CacheEntry {
     /// Get the expiry timestamp.
     pub fn expires_at(&self) -> u64 {
         self.expires_at
+    }
+
+    /// Get the path MTU discovered during lookup, if available.
+    pub fn path_mtu(&self) -> Option<u16> {
+        self.path_mtu
+    }
+
+    /// Set the path MTU discovered during lookup.
+    pub fn set_path_mtu(&mut self, mtu: u16) {
+        self.path_mtu = Some(mtu);
     }
 
     /// Check if this entry has expired.

@@ -23,6 +23,9 @@ pub struct LookupRequest {
     pub origin_coords: TreeCoordinate,
     /// Remaining propagation hops.
     pub ttl: u8,
+    /// Minimum transport MTU the origin requires for a viable route.
+    /// 0 means no requirement.
+    pub min_mtu: u16,
     /// Visited nodes filter (loop prevention).
     pub visited: BloomFilter,
 }
@@ -35,6 +38,7 @@ impl LookupRequest {
         origin: NodeAddr,
         origin_coords: TreeCoordinate,
         ttl: u8,
+        min_mtu: u16,
     ) -> Self {
         // Small filter for visited tracking
         let visited = BloomFilter::with_params(256 * 8, 5).expect("valid params");
@@ -44,6 +48,7 @@ impl LookupRequest {
             origin,
             origin_coords,
             ttl,
+            min_mtu,
             visited,
         }
     }
@@ -54,10 +59,11 @@ impl LookupRequest {
         origin: NodeAddr,
         origin_coords: TreeCoordinate,
         ttl: u8,
+        min_mtu: u16,
     ) -> Self {
         use rand::Rng;
         let request_id = rand::thread_rng().r#gen();
-        Self::new(request_id, target, origin, origin_coords, ttl)
+        Self::new(request_id, target, origin, origin_coords, ttl, min_mtu)
     }
 
     /// Decrement TTL and add self to visited.
@@ -84,18 +90,19 @@ impl LookupRequest {
 
     /// Encode as wire format (includes msg_type byte).
     ///
-    /// Format: `[0x30][request_id:8][target:16][origin:16][ttl:1]`
+    /// Format: `[0x30][request_id:8][target:16][origin:16][ttl:1][min_mtu:2]`
     ///         `[origin_coords_cnt:2][origin_coords:16×n]`
     ///         `[visited_hash_cnt:1][visited_bits:256]`
     pub fn encode(&self) -> Vec<u8> {
         let visited_bytes = self.visited.as_bytes();
-        let mut buf = Vec::with_capacity(44 + self.origin_coords.depth() * 16 + 1 + visited_bytes.len());
+        let mut buf = Vec::with_capacity(46 + self.origin_coords.depth() * 16 + 1 + visited_bytes.len());
 
         buf.push(0x30); // msg_type
         buf.extend_from_slice(&self.request_id.to_le_bytes());
         buf.extend_from_slice(self.target.as_bytes());
         buf.extend_from_slice(self.origin.as_bytes());
         buf.push(self.ttl);
+        buf.extend_from_slice(&self.min_mtu.to_le_bytes());
         encode_coords(&self.origin_coords, &mut buf);
         buf.push(self.visited.hash_count());
         buf.extend_from_slice(visited_bytes);
@@ -105,11 +112,11 @@ impl LookupRequest {
 
     /// Decode from wire format (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        // Minimum: request_id(8) + target(16) + origin(16) + ttl(1)
-        //          + coords_count(2) + hash_count(1) = 44 bytes
-        if payload.len() < 44 {
+        // Minimum: request_id(8) + target(16) + origin(16) + ttl(1) + min_mtu(2)
+        //          + coords_count(2) + hash_count(1) = 46 bytes
+        if payload.len() < 46 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 44,
+                expected: 46,
                 got: payload.len(),
             });
         }
@@ -135,6 +142,13 @@ impl LookupRequest {
 
         let ttl = payload[pos];
         pos += 1;
+
+        let min_mtu = u16::from_le_bytes(
+            payload[pos..pos + 2]
+                .try_into()
+                .map_err(|_| ProtocolError::Malformed("bad min_mtu".into()))?,
+        );
+        pos += 2;
 
         let (origin_coords, consumed) = decode_coords(&payload[pos..])?;
         pos += consumed;
@@ -162,6 +176,7 @@ impl LookupRequest {
             origin,
             origin_coords,
             ttl,
+            min_mtu,
             visited,
         })
     }
@@ -176,6 +191,12 @@ pub struct LookupResponse {
     pub request_id: u64,
     /// The target node.
     pub target: NodeAddr,
+    /// Minimum transport MTU along the response path.
+    ///
+    /// Initialized to `u16::MAX` by the target. Each transit node applies
+    /// `path_mtu = path_mtu.min(outgoing_link_mtu)` when forwarding.
+    /// NOT included in the proof signature (transit annotation).
+    pub path_mtu: u16,
     /// Target's coordinates in the tree.
     pub target_coords: TreeCoordinate,
     /// Proof that target authorized this response (signature over request).
@@ -184,6 +205,9 @@ pub struct LookupResponse {
 
 impl LookupResponse {
     /// Create a new lookup response.
+    ///
+    /// `path_mtu` is initialized to `u16::MAX` by the target; transit
+    /// nodes reduce it as they forward.
     pub fn new(
         request_id: u64,
         target: NodeAddr,
@@ -193,6 +217,7 @@ impl LookupResponse {
         Self {
             request_id,
             target,
+            path_mtu: u16::MAX,
             target_coords,
             proof,
         }
@@ -212,13 +237,14 @@ impl LookupResponse {
 
     /// Encode as wire format (includes msg_type byte).
     ///
-    /// Format: `[0x31][request_id:8][target:16][target_coords_cnt:2][target_coords:16×n][proof:64]`
+    /// Format: `[0x31][request_id:8][target:16][path_mtu:2][target_coords_cnt:2][target_coords:16×n][proof:64]`
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(91 + self.target_coords.depth() * 16);
+        let mut buf = Vec::with_capacity(93 + self.target_coords.depth() * 16);
 
         buf.push(0x31); // msg_type
         buf.extend_from_slice(&self.request_id.to_le_bytes());
         buf.extend_from_slice(self.target.as_bytes());
+        buf.extend_from_slice(&self.path_mtu.to_le_bytes());
         encode_coords(&self.target_coords, &mut buf);
         buf.extend_from_slice(self.proof.as_ref());
 
@@ -227,10 +253,10 @@ impl LookupResponse {
 
     /// Decode from wire format (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        // Minimum: request_id(8) + target(16) + coords_count(2) + proof(64) = 90
-        if payload.len() < 90 {
+        // Minimum: request_id(8) + target(16) + path_mtu(2) + coords_count(2) + proof(64) = 92
+        if payload.len() < 92 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 90,
+                expected: 92,
                 got: payload.len(),
             });
         }
@@ -249,6 +275,13 @@ impl LookupResponse {
         let target = NodeAddr::from_bytes(target_bytes);
         pos += 16;
 
+        let path_mtu = u16::from_le_bytes(
+            payload[pos..pos + 2]
+                .try_into()
+                .map_err(|_| ProtocolError::Malformed("bad path_mtu".into()))?,
+        );
+        pos += 2;
+
         let (target_coords, consumed) = decode_coords(&payload[pos..])?;
         pos += consumed;
 
@@ -264,6 +297,7 @@ impl LookupResponse {
         Ok(Self {
             request_id,
             target,
+            path_mtu,
             target_coords,
             proof,
         })
@@ -291,7 +325,7 @@ mod tests {
         let coords = make_coords(&[2, 0]);
         let forwarder = make_node_addr(3);
 
-        let mut request = LookupRequest::new(123, target, origin, coords, 5);
+        let mut request = LookupRequest::new(123, target, origin, coords, 5, 0);
 
         assert!(request.can_forward());
         assert!(!request.was_visited(&forwarder));
@@ -308,7 +342,7 @@ mod tests {
         let origin = make_node_addr(2);
         let coords = make_coords(&[2, 0]);
 
-        let mut request = LookupRequest::new(123, target, origin, coords, 1);
+        let mut request = LookupRequest::new(123, target, origin, coords, 1, 0);
 
         assert!(request.forward(&make_node_addr(3)));
         assert!(!request.can_forward());
@@ -321,8 +355,8 @@ mod tests {
         let origin = make_node_addr(2);
         let coords = make_coords(&[2, 0]);
 
-        let req1 = LookupRequest::generate(target, origin, coords.clone(), 5);
-        let req2 = LookupRequest::generate(target, origin, coords, 5);
+        let req1 = LookupRequest::generate(target, origin, coords.clone(), 5, 0);
+        let req2 = LookupRequest::generate(target, origin, coords, 5, 0);
 
         // Random IDs should differ
         assert_ne!(req1.request_id, req2.request_id);
@@ -350,7 +384,7 @@ mod tests {
         let origin = make_node_addr(20);
         let coords = make_coords(&[20, 0]);
 
-        let mut request = LookupRequest::new(12345, target, origin, coords.clone(), 8);
+        let mut request = LookupRequest::new(12345, target, origin, coords.clone(), 8, 1386);
         request.forward(&make_node_addr(30));
 
         let encoded = request.encode();
@@ -361,13 +395,28 @@ mod tests {
         assert_eq!(decoded.target, target);
         assert_eq!(decoded.origin, origin);
         assert_eq!(decoded.ttl, 7); // decremented by forward()
+        assert_eq!(decoded.min_mtu, 1386);
         assert!(decoded.was_visited(&make_node_addr(30)));
     }
 
     #[test]
     fn test_lookup_request_decode_too_short() {
         assert!(LookupRequest::decode(&[]).is_err());
-        assert!(LookupRequest::decode(&[0u8; 40]).is_err());
+        assert!(LookupRequest::decode(&[0u8; 42]).is_err());
+    }
+
+    #[test]
+    fn test_lookup_request_min_mtu_boundary_values() {
+        let target = make_node_addr(10);
+        let origin = make_node_addr(20);
+        let coords = make_coords(&[20, 0]);
+
+        for mtu_val in [0u16, 1386, u16::MAX] {
+            let request = LookupRequest::new(100, target, origin, coords.clone(), 5, mtu_val);
+            let encoded = request.encode();
+            let decoded = LookupRequest::decode(&encoded[1..]).unwrap();
+            assert_eq!(decoded.min_mtu, mtu_val);
+        }
     }
 
     #[test]
@@ -387,13 +436,54 @@ mod tests {
 
         let response = LookupResponse::new(999, target, coords.clone(), sig);
 
+        // Default path_mtu should be u16::MAX
+        assert_eq!(response.path_mtu, u16::MAX);
+
         let encoded = response.encode();
         assert_eq!(encoded[0], 0x31);
 
         let decoded = LookupResponse::decode(&encoded[1..]).unwrap();
         assert_eq!(decoded.request_id, 999);
         assert_eq!(decoded.target, target);
+        assert_eq!(decoded.path_mtu, u16::MAX);
         assert_eq!(decoded.proof, sig);
+    }
+
+    #[test]
+    fn test_lookup_response_path_mtu_roundtrip() {
+        use secp256k1::Secp256k1;
+
+        let target = make_node_addr(42);
+        let coords = make_coords(&[42, 1, 0]);
+
+        let secp = Secp256k1::new();
+        let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
+        let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
+        use sha2::Digest;
+        let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();
+        let sig = secp.sign_schnorr(&digest, &keypair);
+
+        for mtu_val in [0u16, 1280, 1386, 9000, u16::MAX] {
+            let mut response = LookupResponse::new(999, target, coords.clone(), sig);
+            response.path_mtu = mtu_val;
+
+            let encoded = response.encode();
+            let decoded = LookupResponse::decode(&encoded[1..]).unwrap();
+            assert_eq!(decoded.path_mtu, mtu_val);
+        }
+    }
+
+    #[test]
+    fn test_lookup_response_path_mtu_not_in_proof_bytes() {
+        // Verify that proof_bytes does NOT include path_mtu
+        let target = make_node_addr(42);
+        let coords = make_coords(&[42, 1, 0]);
+
+        let bytes = LookupResponse::proof_bytes(12345, &target, &coords);
+
+        // proof_bytes format: request_id(8) + target(16) + coords_encoding(2 + 3*16) = 74
+        // No path_mtu(2) in here
+        assert_eq!(bytes.len(), 74);
     }
 
     #[test]
