@@ -65,7 +65,7 @@ async fn test_two_node_handshake_udp() {
 
     // Start handshake (generates Noise IK msg1)
     let our_keypair_a = node_a.identity.keypair();
-    let noise_msg1 = conn_a.start_handshake(our_keypair_a, 1000).unwrap();
+    let noise_msg1 = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);
     conn_a.set_source_addr(remote_addr_b.clone());
@@ -303,7 +303,7 @@ async fn test_run_rx_loop_handshake() {
 
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let our_keypair_a = node_a.identity.keypair();
-    let noise_msg1 = conn_a.start_handshake(our_keypair_a, 1000).unwrap();
+    let noise_msg1 = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);
     conn_a.set_source_addr(remote_addr_b.clone());
@@ -488,7 +488,7 @@ async fn test_cross_connection_both_initiate() {
     let mut conn_a = PeerConnection::outbound(link_id_a_out, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let our_keypair_a = node_a.identity.keypair();
-    let noise_msg1_a = conn_a.start_handshake(our_keypair_a, 1000).unwrap();
+    let noise_msg1_a = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);
     conn_a.set_source_addr(remote_addr_b.clone());
@@ -509,7 +509,7 @@ async fn test_cross_connection_both_initiate() {
     let mut conn_b = PeerConnection::outbound(link_id_b_out, peer_a_identity, 1000);
     let our_index_b = node_b.index_allocator.allocate().unwrap();
     let our_keypair_b = node_b.identity.keypair();
-    let noise_msg1_b = conn_b.start_handshake(our_keypair_b, 1000).unwrap();
+    let noise_msg1_b = conn_b.start_handshake(our_keypair_b, node_b.startup_epoch, 1000).unwrap();
     conn_b.set_our_index(our_index_b);
     conn_b.set_transport_id(transport_id_b);
     conn_b.set_source_addr(remote_addr_a.clone());
@@ -611,7 +611,7 @@ async fn test_stale_connection_cleanup() {
     // Allocate session index and set transport info
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let _noise_msg1 = conn.start_handshake(our_keypair, past_time_ms).unwrap();
+    let _noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, past_time_ms).unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
@@ -665,7 +665,7 @@ async fn test_failed_connection_cleanup() {
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let _noise_msg1 = conn.start_handshake(our_keypair, now_ms).unwrap();
+    let _noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, now_ms).unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
@@ -710,7 +710,7 @@ async fn test_msg1_stored_for_resend() {
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let noise_msg1 = conn.start_handshake(our_keypair, now_ms).unwrap();
+    let noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, now_ms).unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
@@ -741,7 +741,7 @@ async fn test_resend_scheduling() {
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let noise_msg1 = conn.start_handshake(our_keypair, now_ms).unwrap();
+    let noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, now_ms).unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
@@ -827,7 +827,7 @@ async fn test_duplicate_msg2_dropped() {
     let sender_idx = SessionIndex::new(99);
 
     // Build a fake msg2 packet
-    let fake_noise_msg2 = vec![0u8; 33]; // Noise IK msg2 is 33 bytes
+    let fake_noise_msg2 = vec![0u8; 57]; // Noise IK msg2 is 57 bytes (33 ephem + 24 encrypted epoch)
     let wire_msg2 = build_msg2(sender_idx, receiver_idx, &fake_noise_msg2);
 
     let packet = ReceivedPacket {

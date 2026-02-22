@@ -33,6 +33,7 @@ use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_SP};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
+use rand::RngCore;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::thread::JoinHandle;
@@ -198,6 +199,10 @@ pub struct Node {
     /// This node's cryptographic identity.
     identity: Identity,
 
+    /// Random epoch generated at startup for peer restart detection.
+    /// Exchanged inside Noise handshake messages so peers can detect restarts.
+    startup_epoch: [u8; 8],
+
     // === Configuration ===
     /// Loaded configuration.
     config: Config,
@@ -342,6 +347,9 @@ impl Node {
         let node_addr = *identity.node_addr();
         let is_leaf_only = config.is_leaf_only();
 
+        let mut startup_epoch = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut startup_epoch);
+
         let mut bloom_state = if is_leaf_only {
             BloomState::leaf_only(node_addr)
         } else {
@@ -379,6 +387,7 @@ impl Node {
 
         Ok(Self {
             identity,
+            startup_epoch,
             config,
             state: NodeState::Created,
             is_leaf_only,
@@ -427,6 +436,10 @@ impl Node {
     /// Create a node with a specific identity.
     pub fn with_identity(identity: Identity, config: Config) -> Self {
         let node_addr = *identity.node_addr();
+
+        let mut startup_epoch = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut startup_epoch);
+
         let tun_state = if config.tun.enabled {
             TunState::Configured
         } else {
@@ -460,6 +473,7 @@ impl Node {
 
         Self {
             identity,
+            startup_epoch,
             config,
             state: NodeState::Created,
             is_leaf_only: false,

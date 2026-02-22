@@ -1160,6 +1160,14 @@ fn make_noise_session(
     );
     let mut responder = HandshakeState::new_responder(remote_identity.keypair());
 
+    // Set epochs for both sides (required for handshake message encryption)
+    let mut init_epoch = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut init_epoch);
+    initiator.set_local_epoch(init_epoch);
+    let mut resp_epoch = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut resp_epoch);
+    responder.set_local_epoch(resp_epoch);
+
     let msg1 = initiator.write_message_1().unwrap();
     responder.read_message_1(&msg1).unwrap();
     let msg2 = responder.write_message_2().unwrap();

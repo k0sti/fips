@@ -127,6 +127,10 @@ pub struct ActivePeer {
     /// When this peer was last seen (any activity, Unix milliseconds).
     last_seen: u64,
 
+    // === Epoch (Restart Detection) ===
+    /// Remote peer's startup epoch (from handshake). Used to detect restarts.
+    remote_epoch: Option<[u8; 8]>,
+
     // === MMP ===
     /// Per-peer MMP state (None for legacy peers without Noise sessions).
     mmp: Option<MmpPeerState>,
@@ -169,6 +173,7 @@ impl ActivePeer {
             link_stats: LinkStats::new(),
             authenticated_at,
             last_seen: authenticated_at,
+            remote_epoch: None,
             mmp: None,
             last_heartbeat_sent: None,
             handshake_msg2: None,
@@ -207,6 +212,7 @@ impl ActivePeer {
         link_stats: LinkStats,
         is_initiator: bool,
         mmp_config: &MmpConfig,
+        remote_epoch: Option<[u8; 8]>,
     ) -> Self {
         Self {
             identity,
@@ -230,6 +236,7 @@ impl ActivePeer {
             link_stats,
             authenticated_at,
             last_seen: authenticated_at,
+            remote_epoch,
             mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
             last_heartbeat_sent: None,
             handshake_msg2: None,
@@ -378,6 +385,13 @@ impl ActivePeer {
     /// Clear stored msg2 (no longer needed after handshake window).
     pub fn clear_handshake_msg2(&mut self) {
         self.handshake_msg2 = None;
+    }
+
+    // === Epoch Accessors ===
+
+    /// Get the remote peer's startup epoch (from handshake).
+    pub fn remote_epoch(&self) -> Option<[u8; 8]> {
+        self.remote_epoch
     }
 
     // === Tree Accessors ===

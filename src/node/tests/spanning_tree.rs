@@ -64,7 +64,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
 
     let our_index = initiator.node.index_allocator.allocate().unwrap();
     let our_keypair = initiator.node.identity().keypair();
-    let noise_msg1 = conn.start_handshake(our_keypair, 1000).unwrap();
+    let noise_msg1 = conn.start_handshake(our_keypair, initiator.node.startup_epoch, 1000).unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(responder_addr.clone());

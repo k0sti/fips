@@ -1,6 +1,7 @@
 use super::{
     CipherState, HandshakeProgress, HandshakeRole, NoiseError, NoiseSession,
-    HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, PROTOCOL_NAME, PUBKEY_SIZE,
+    EPOCH_ENCRYPTED_SIZE, EPOCH_SIZE, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE,
+    PROTOCOL_NAME, PUBKEY_SIZE,
 };
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -120,6 +121,10 @@ pub struct HandshakeState {
     remote_ephemeral: Option<PublicKey>,
     /// Secp256k1 context.
     secp: Secp256k1<secp256k1::All>,
+    /// Our startup epoch for restart detection.
+    local_epoch: Option<[u8; 8]>,
+    /// Remote peer's startup epoch (learned during handshake).
+    remote_epoch: Option<[u8; 8]>,
 }
 
 impl HandshakeState {
@@ -153,6 +158,8 @@ impl HandshakeState {
             remote_static: Some(remote_static),
             remote_ephemeral: None,
             secp,
+            local_epoch: None,
+            remote_epoch: None,
         };
 
         // Mix in pre-message: <- s (responder's static is known)
@@ -179,6 +186,8 @@ impl HandshakeState {
             remote_static: None, // Will learn from message 1
             remote_ephemeral: None,
             secp,
+            local_epoch: None,
+            remote_epoch: None,
         };
 
         // Mix in pre-message: <- s (our static, since we're responder)
@@ -207,6 +216,16 @@ impl HandshakeState {
     /// Get the remote static key (available after message 1 for responder).
     pub fn remote_static(&self) -> Option<&PublicKey> {
         self.remote_static.as_ref()
+    }
+
+    /// Set the local startup epoch for restart detection.
+    pub fn set_local_epoch(&mut self, epoch: [u8; 8]) {
+        self.local_epoch = Some(epoch);
+    }
+
+    /// Get the remote peer's startup epoch (available after processing their message).
+    pub fn remote_epoch(&self) -> Option<[u8; 8]> {
+        self.remote_epoch
     }
 
     /// Generate ephemeral keypair.
@@ -245,8 +264,9 @@ impl HandshakeState {
     /// Message 1 contains:
     /// - e: ephemeral public key (33 bytes)
     /// - encrypted s: our static public key encrypted (33 + 16 = 49 bytes)
+    /// - encrypted epoch: startup epoch for restart detection (8 + 16 = 24 bytes)
     ///
-    /// Total: 82 bytes
+    /// Total: 106 bytes
     pub fn write_message_1(&mut self) -> Result<Vec<u8>, NoiseError> {
         if self.role != HandshakeRole::Initiator {
             return Err(NoiseError::WrongState {
@@ -262,6 +282,7 @@ impl HandshakeState {
         }
 
         let remote_static = self.remote_static.expect("initiator must have remote static");
+        let epoch = self.local_epoch.expect("local epoch must be set before write_message_1");
 
         // Generate ephemeral keypair
         self.generate_ephemeral();
@@ -287,6 +308,11 @@ impl HandshakeState {
         let ss = self.ecdh(&self.static_keypair.secret_key(), &remote_static);
         self.symmetric.mix_key(&ss);
 
+        // -> epoch: encrypt startup epoch for restart detection
+        let encrypted_epoch = self.symmetric.encrypt_and_hash(&epoch)?;
+        debug_assert_eq!(encrypted_epoch.len(), EPOCH_ENCRYPTED_SIZE);
+        message.extend_from_slice(&encrypted_epoch);
+
         self.progress = HandshakeProgress::Message1Done;
 
         Ok(message)
@@ -294,7 +320,7 @@ impl HandshakeState {
 
     /// Read message 1 (responder only).
     ///
-    /// Processes the initiator's first message and learns their identity.
+    /// Processes the initiator's first message and learns their identity and epoch.
     pub fn read_message_1(&mut self, message: &[u8]) -> Result<(), NoiseError> {
         if self.role != HandshakeRole::Responder {
             return Err(NoiseError::WrongState {
@@ -327,7 +353,8 @@ impl HandshakeState {
         self.symmetric.mix_key(&es);
 
         // -> s: decrypt initiator's static
-        let encrypted_static = &message[PUBKEY_SIZE..];
+        let encrypted_static_end = PUBKEY_SIZE + PUBKEY_SIZE + super::TAG_SIZE;
+        let encrypted_static = &message[PUBKEY_SIZE..encrypted_static_end];
         let decrypted_static = self.symmetric.decrypt_and_hash(encrypted_static)?;
         let rs =
             PublicKey::from_slice(&decrypted_static).map_err(|_| NoiseError::InvalidPublicKey)?;
@@ -336,6 +363,15 @@ impl HandshakeState {
         // -> ss: DH(s, rs), mix into key
         let ss = self.ecdh(&self.static_keypair.secret_key(), &rs);
         self.symmetric.mix_key(&ss);
+
+        // -> epoch: decrypt initiator's startup epoch
+        let encrypted_epoch = &message[encrypted_static_end..];
+        debug_assert_eq!(encrypted_epoch.len(), EPOCH_ENCRYPTED_SIZE);
+        let decrypted_epoch = self.symmetric.decrypt_and_hash(encrypted_epoch)?;
+        debug_assert_eq!(decrypted_epoch.len(), EPOCH_SIZE);
+        let mut epoch = [0u8; EPOCH_SIZE];
+        epoch.copy_from_slice(&decrypted_epoch);
+        self.remote_epoch = Some(epoch);
 
         self.progress = HandshakeProgress::Message1Done;
 
@@ -346,8 +382,9 @@ impl HandshakeState {
     ///
     /// Message 2 contains:
     /// - e: ephemeral public key (33 bytes)
+    /// - encrypted epoch: startup epoch for restart detection (8 + 16 = 24 bytes)
     ///
-    /// Total: 33 bytes
+    /// Total: 57 bytes
     pub fn write_message_2(&mut self) -> Result<Vec<u8>, NoiseError> {
         if self.role != HandshakeRole::Responder {
             return Err(NoiseError::WrongState {
@@ -363,13 +400,17 @@ impl HandshakeState {
         }
 
         let re = self.remote_ephemeral.expect("should have remote ephemeral");
+        let epoch = self.local_epoch.expect("local epoch must be set before write_message_2");
 
         // Generate ephemeral keypair
         self.generate_ephemeral();
         let ephemeral = self.ephemeral_keypair.as_ref().unwrap();
         let e_pub = ephemeral.public_key().serialize();
 
+        let mut message = Vec::with_capacity(HANDSHAKE_MSG2_SIZE);
+
         // <- e: send ephemeral, mix into hash
+        message.extend_from_slice(&e_pub);
         self.symmetric.mix_hash(&e_pub);
 
         // <- ee: DH(e, re), mix into key
@@ -380,9 +421,14 @@ impl HandshakeState {
         let se = self.ecdh(&self.static_keypair.secret_key(), &re);
         self.symmetric.mix_key(&se);
 
+        // <- epoch: encrypt startup epoch for restart detection
+        let encrypted_epoch = self.symmetric.encrypt_and_hash(&epoch)?;
+        debug_assert_eq!(encrypted_epoch.len(), EPOCH_ENCRYPTED_SIZE);
+        message.extend_from_slice(&encrypted_epoch);
+
         self.progress = HandshakeProgress::Complete;
 
-        Ok(e_pub.to_vec())
+        Ok(message)
     }
 
     /// Read message 2 (initiator only).
@@ -409,9 +455,10 @@ impl HandshakeState {
         }
 
         // <- e: parse remote ephemeral, mix into hash
-        let re = PublicKey::from_slice(message).map_err(|_| NoiseError::InvalidPublicKey)?;
+        let e_pub = &message[..PUBKEY_SIZE];
+        let re = PublicKey::from_slice(e_pub).map_err(|_| NoiseError::InvalidPublicKey)?;
         self.remote_ephemeral = Some(re);
-        self.symmetric.mix_hash(message);
+        self.symmetric.mix_hash(e_pub);
 
         // <- ee: DH(e, re), mix into key
         let ephemeral = self.ephemeral_keypair.as_ref().unwrap();
@@ -423,6 +470,15 @@ impl HandshakeState {
         let rs = self.remote_static.expect("initiator has remote static");
         let se = self.ecdh(&ephemeral.secret_key(), &rs);
         self.symmetric.mix_key(&se);
+
+        // <- epoch: decrypt responder's startup epoch
+        let encrypted_epoch = &message[PUBKEY_SIZE..];
+        debug_assert_eq!(encrypted_epoch.len(), EPOCH_ENCRYPTED_SIZE);
+        let decrypted_epoch = self.symmetric.decrypt_and_hash(encrypted_epoch)?;
+        debug_assert_eq!(decrypted_epoch.len(), EPOCH_SIZE);
+        let mut epoch = [0u8; EPOCH_SIZE];
+        epoch.copy_from_slice(&decrypted_epoch);
+        self.remote_epoch = Some(epoch);
 
         self.progress = HandshakeProgress::Complete;
 
@@ -473,6 +529,8 @@ impl fmt::Debug for HandshakeState {
             .field("has_ephemeral", &self.ephemeral_keypair.is_some())
             .field("has_remote_static", &self.remote_static.is_some())
             .field("has_remote_ephemeral", &self.remote_ephemeral.is_some())
+            .field("has_local_epoch", &self.local_epoch.is_some())
+            .field("has_remote_epoch", &self.remote_epoch.is_some())
             .finish()
     }
 }

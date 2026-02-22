@@ -38,47 +38,64 @@ impl Node {
 
         // Check for existing connection from this address.
         //
-        // If we already have an *inbound* link from this address, this is a
-        // duplicate msg1 (our msg2 was probably lost). Resend msg2 if available.
+        // If we already have an *inbound* link from this address, this could be:
+        // 1. A duplicate msg1 (our msg2 was lost) — resend msg2
+        // 2. A restarted peer (different epoch) — tear down and reprocess
+        //
         // If we have an *outbound* link to this address (we initiated to them
         // AND they initiated to us), this is a cross-connection — allow it.
+        //
+        // Epoch-based restart detection: if the sender already has an inbound
+        // link AND is an active peer in self.peers, fall through to decrypt
+        // the msg1 and check the epoch. Otherwise, treat as duplicate.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
+        let mut possible_restart = false;
         if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key)
             && let Some(link) = self.links.get(&existing_link_id)
         {
             if link.direction() == LinkDirection::Inbound {
-                // Duplicate msg1 — try to resend stored msg2
-                let msg2_bytes = self.find_stored_msg2(existing_link_id);
-                if let Some(msg2) = msg2_bytes {
-                    if let Some(transport) = self.transports.get(&packet.transport_id) {
-                        match transport.send(&packet.remote_addr, &msg2).await {
-                            Ok(_) => debug!(
-                                remote_addr = %packet.remote_addr,
-                                "Resent msg2 for duplicate msg1"
-                            ),
-                            Err(e) => debug!(
-                                remote_addr = %packet.remote_addr,
-                                error = %e,
-                                "Failed to resend msg2"
-                            ),
-                        }
-                    }
+                // Check if this link belongs to an already-promoted active peer
+                let is_active_peer = self.peers.values()
+                    .any(|p| p.link_id() == existing_link_id);
+
+                if is_active_peer {
+                    // Possible restart — fall through to decrypt and check epoch
+                    possible_restart = true;
                 } else {
-                    debug!(
-                        remote_addr = %packet.remote_addr,
-                        "Duplicate msg1 but no stored msg2 to resend"
-                    );
+                    // Genuinely pending handshake — resend msg2
+                    let msg2_bytes = self.find_stored_msg2(existing_link_id);
+                    if let Some(msg2) = msg2_bytes {
+                        if let Some(transport) = self.transports.get(&packet.transport_id) {
+                            match transport.send(&packet.remote_addr, &msg2).await {
+                                Ok(_) => debug!(
+                                    remote_addr = %packet.remote_addr,
+                                    "Resent msg2 for duplicate msg1"
+                                ),
+                                Err(e) => debug!(
+                                    remote_addr = %packet.remote_addr,
+                                    error = %e,
+                                    "Failed to resend msg2"
+                                ),
+                            }
+                        }
+                    } else {
+                        debug!(
+                            remote_addr = %packet.remote_addr,
+                            "Duplicate msg1 but no stored msg2 to resend"
+                        );
+                    }
+                    self.msg1_rate_limiter.complete_handshake();
+                    return;
                 }
-                self.msg1_rate_limiter.complete_handshake();
-                return;
-            }
-            // Outbound link to this address — cross-connection, allow msg1
-            debug!(
-                transport_id = %packet.transport_id,
-                remote_addr = %packet.remote_addr,
-                existing_link_id = %existing_link_id,
-                "Cross-connection detected: have outbound, received inbound msg1"
+            } else {
+                // Outbound link to this address — cross-connection, allow msg1
+                debug!(
+                    transport_id = %packet.transport_id,
+                    remote_addr = %packet.remote_addr,
+                    existing_link_id = %existing_link_id,
+                    "Cross-connection detected: have outbound, received inbound msg1"
                 );
+            }
         }
 
         // === CRYPTO COST PAID HERE ===
@@ -92,7 +109,7 @@ impl Node {
 
         let our_keypair = self.identity.keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
-        let msg2_response = match conn.receive_handshake_init(our_keypair, noise_msg1, packet.timestamp_ms) {
+        let msg2_response = match conn.receive_handshake_init(our_keypair, self.startup_epoch, noise_msg1, packet.timestamp_ms) {
             Ok(m) => m,
             Err(e) => {
                 self.msg1_rate_limiter.complete_handshake();
@@ -113,6 +130,55 @@ impl Node {
                 return;
             }
         };
+
+        let peer_node_addr = *peer_identity.node_addr();
+
+        // Epoch-based restart detection and duplicate msg1 handling.
+        //
+        // If we fell through from the addr_to_link check above with
+        // possible_restart=true, we now have the decrypted epoch from msg1.
+        // Compare it against the stored epoch for this peer.
+        if possible_restart
+            && let Some(existing_peer) = self.peers.get(&peer_node_addr)
+        {
+            let new_epoch = conn.remote_epoch();
+            let existing_epoch = existing_peer.remote_epoch();
+
+            match (existing_epoch, new_epoch) {
+                (Some(existing), Some(new)) if existing != new => {
+                    // Epoch mismatch — peer restarted. Tear down stale session.
+                    info!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        "Peer restart detected (epoch mismatch), removing stale session"
+                    );
+                    self.remove_active_peer(&peer_node_addr);
+                    // Fall through to process as new connection
+                }
+                _ => {
+                    // Same epoch (or no epoch stored) — duplicate msg1 from
+                    // same session. Resend stored msg2.
+                    if let Some(msg2) = existing_peer.handshake_msg2().map(|m| m.to_vec())
+                        && let Some(transport) = self.transports.get(&packet.transport_id)
+                    {
+                        match transport.send(&packet.remote_addr, &msg2).await {
+                            Ok(_) => debug!(
+                                peer = %self.peer_display_name(&peer_node_addr),
+                                "Resent msg2 for duplicate msg1 (same epoch)"
+                            ),
+                            Err(e) => debug!(
+                                peer = %self.peer_display_name(&peer_node_addr),
+                                error = %e,
+                                "Failed to resend msg2"
+                            ),
+                        }
+                    }
+                    self.msg1_rate_limiter.complete_handshake();
+                    return;
+                }
+            }
+        }
+        // If possible_restart was true but peer is no longer in self.peers
+        // (removed by another path), fall through to process as new connection.
 
         // Note: we don't early-return if peer is already in self.peers here.
         // promote_connection handles cross-connection resolution via tie-breaker.
@@ -560,6 +626,7 @@ impl Node {
             }
         })?.clone();
         let link_stats = connection.link_stats().clone();
+        let remote_epoch = connection.remote_epoch();
 
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = connection.is_outbound();
@@ -601,6 +668,7 @@ impl Node {
                     link_stats,
                     is_outbound,
                     &self.config.node.mmp,
+                    remote_epoch,
                 );
                 new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 
@@ -683,6 +751,7 @@ impl Node {
                 link_stats,
                 is_outbound,
                 &self.config.node.mmp,
+                remote_epoch,
             );
             new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 

@@ -337,6 +337,7 @@ impl Node {
         // Create responder handshake and process msg1
         let our_keypair = self.identity.keypair();
         let mut handshake = HandshakeState::new_responder(our_keypair);
+        handshake.set_local_epoch(self.startup_epoch);
 
         if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
             debug!(error = %e, "Failed to process Noise IK msg1 in SessionSetup");
@@ -724,6 +725,7 @@ impl Node {
         // Create Noise IK initiator handshake
         let our_keypair = self.identity.keypair();
         let mut handshake = HandshakeState::new_initiator(our_keypair, dest_pubkey);
+        handshake.set_local_epoch(self.startup_epoch);
         let msg1 = handshake.write_message_1().map_err(|e| NodeError::SendFailed {
             node_addr: dest_addr,
             reason: format!("Noise msg1 generation failed: {}", e),

@@ -450,7 +450,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         PeerConnection::outbound(pending_link_id, peer_b_identity, pending_time_ms);
 
     let our_keypair = node.identity.keypair();
-    let _msg1 = pending_conn.start_handshake(our_keypair, pending_time_ms).unwrap();
+    let _msg1 = pending_conn.start_handshake(our_keypair, node.startup_epoch, pending_time_ms).unwrap();
 
     let pending_index = node.index_allocator.allocate().unwrap();
     pending_conn.set_our_index(pending_index);
@@ -491,14 +491,16 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
 
     let our_keypair = node.identity.keypair();
     let msg1 = completing_conn
-        .start_handshake(our_keypair, completing_time_ms)
+        .start_handshake(our_keypair, node.startup_epoch, completing_time_ms)
         .unwrap();
 
     // B responds
     let mut resp_conn = PeerConnection::inbound(LinkId::new(999), completing_time_ms);
     let peer_keypair = peer_b_full.keypair();
+    let mut resp_epoch = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut resp_epoch);
     let msg2 = resp_conn
-        .receive_handshake_init(peer_keypair, &msg1, completing_time_ms)
+        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, completing_time_ms)
         .unwrap();
 
     completing_conn

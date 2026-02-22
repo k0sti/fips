@@ -147,7 +147,7 @@ impl Node {
 
             // Start the Noise handshake and get message 1
             let our_keypair = self.identity.keypair();
-            let noise_msg1 = match connection.start_handshake(our_keypair, current_time_ms) {
+            let noise_msg1 = match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
                 Ok(msg) => msg,
                 Err(e) => {
                     warn!(

@@ -117,8 +117,12 @@ pub struct PeerConnection {
     /// Current source address (updated on packet receipt).
     source_addr: Option<TransportAddr>,
 
+    // === Epoch (Restart Detection) ===
+    /// Remote peer's startup epoch (learned from handshake).
+    remote_epoch: Option<[u8; 8]>,
+
     // === Handshake Resend ===
-    /// Wire-format msg1 bytes for resend (initiator only, 90 bytes).
+    /// Wire-format msg1 bytes for resend (initiator only).
     handshake_msg1: Option<Vec<u8>>,
 
     /// Wire-format msg2 bytes for resend (responder only).
@@ -156,6 +160,7 @@ impl PeerConnection {
             their_index: None,
             transport_id: None,
             source_addr: None,
+            remote_epoch: None,
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -183,6 +188,7 @@ impl PeerConnection {
             their_index: None,
             transport_id: None,
             source_addr: None,
+            remote_epoch: None,
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -214,6 +220,7 @@ impl PeerConnection {
             their_index: None,
             transport_id: Some(transport_id),
             source_addr: Some(source_addr),
+            remote_epoch: None,
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -340,6 +347,13 @@ impl PeerConnection {
         self.source_addr = Some(addr);
     }
 
+    // === Epoch Accessors ===
+
+    /// Get the remote peer's startup epoch (available after handshake).
+    pub fn remote_epoch(&self) -> Option<[u8; 8]> {
+        self.remote_epoch
+    }
+
     // === Handshake Resend ===
 
     /// Store the wire-format msg1 bytes for resend and schedule the first resend.
@@ -385,9 +399,11 @@ impl PeerConnection {
     /// Start the handshake as initiator and generate message 1.
     ///
     /// For outbound connections only. Returns the handshake message to send.
+    /// The epoch is our startup epoch, encrypted into msg1 for restart detection.
     pub fn start_handshake(
         &mut self,
         our_keypair: Keypair,
+        epoch: [u8; 8],
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
         if self.direction != LinkDirection::Outbound {
@@ -411,6 +427,7 @@ impl PeerConnection {
             .pubkey_full();
 
         let mut hs = noise::HandshakeState::new_initiator(our_keypair, remote_static);
+        hs.set_local_epoch(epoch);
         let msg1 = hs.write_message_1()?;
 
         self.noise_handshake = Some(hs);
@@ -423,9 +440,11 @@ impl PeerConnection {
     /// Initialize responder and process incoming message 1.
     ///
     /// For inbound connections only. Returns the handshake message 2 to send.
+    /// The epoch is our startup epoch, encrypted into msg2 for restart detection.
     pub fn receive_handshake_init(
         &mut self,
         our_keypair: Keypair,
+        epoch: [u8; 8],
         message: &[u8],
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
@@ -444,8 +463,9 @@ impl PeerConnection {
         }
 
         let mut hs = noise::HandshakeState::new_responder(our_keypair);
+        hs.set_local_epoch(epoch);
 
-        // Process message 1 (this reveals the initiator's identity)
+        // Process message 1 (this reveals the initiator's identity and epoch)
         hs.read_message_1(message)?;
 
         // Extract the discovered identity
@@ -453,6 +473,9 @@ impl PeerConnection {
             .remote_static()
             .expect("remote static available after msg1");
         self.expected_identity = Some(PeerIdentity::from_pubkey_full(remote_static));
+
+        // Capture remote epoch from msg1
+        self.remote_epoch = hs.remote_epoch();
 
         // Generate message 2
         let msg2 = hs.write_message_2()?;
@@ -487,6 +510,9 @@ impl PeerConnection {
             .expect("noise handshake must exist in SentMsg1 state");
 
         hs.read_message_2(message)?;
+
+        // Capture remote epoch from msg2
+        self.remote_epoch = hs.remote_epoch();
 
         let session = hs.into_session()?;
         self.noise_session = Some(session);
@@ -557,6 +583,7 @@ impl fmt::Debug for PeerConnection {
 mod tests {
     use super::*;
     use crate::Identity;
+    use rand::RngCore;
 
     fn make_peer_identity() -> PeerIdentity {
         let identity = Identity::generate();
@@ -566,6 +593,12 @@ mod tests {
     fn make_keypair() -> Keypair {
         let identity = Identity::generate();
         identity.keypair()
+    }
+
+    fn make_epoch() -> [u8; 8] {
+        let mut epoch = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut epoch);
+        epoch
     }
 
     #[test]
@@ -611,6 +644,8 @@ mod tests {
 
         let initiator_keypair = initiator_identity.keypair();
         let responder_keypair = responder_identity.keypair();
+        let initiator_epoch = make_epoch();
+        let responder_epoch = make_epoch();
 
         // Use from_pubkey_full to preserve parity for ECDH
         let responder_peer_id = PeerIdentity::from_pubkey_full(responder_identity.pubkey_full());
@@ -621,12 +656,12 @@ mod tests {
         let mut responder_conn = PeerConnection::inbound(LinkId::new(2), 1000);
 
         // Initiator starts handshake
-        let msg1 = initiator_conn.start_handshake(initiator_keypair, 1100).unwrap();
+        let msg1 = initiator_conn.start_handshake(initiator_keypair, initiator_epoch, 1100).unwrap();
         assert_eq!(initiator_conn.handshake_state(), HandshakeState::SentMsg1);
 
         // Responder processes msg1 and sends msg2
         let msg2 = responder_conn
-            .receive_handshake_init(responder_keypair, &msg1, 1200)
+            .receive_handshake_init(responder_keypair, responder_epoch, &msg1, 1200)
             .unwrap();
         assert_eq!(responder_conn.handshake_state(), HandshakeState::Complete);
 
@@ -634,9 +669,15 @@ mod tests {
         let discovered = responder_conn.expected_identity().unwrap();
         assert_eq!(discovered.pubkey(), initiator_identity.pubkey());
 
+        // Responder learned initiator's epoch
+        assert_eq!(responder_conn.remote_epoch(), Some(initiator_epoch));
+
         // Initiator completes handshake
         initiator_conn.complete_handshake(&msg2, 1300).unwrap();
         assert_eq!(initiator_conn.handshake_state(), HandshakeState::Complete);
+
+        // Initiator learned responder's epoch
+        assert_eq!(initiator_conn.remote_epoch(), Some(responder_epoch));
 
         // Both have sessions
         assert!(initiator_conn.has_session());
@@ -683,11 +724,11 @@ mod tests {
         // Outbound can't receive_handshake_init
         let mut outbound = PeerConnection::outbound(LinkId::new(1), identity, 1000);
         assert!(outbound
-            .receive_handshake_init(keypair, &[0u8; 82], 1100)
+            .receive_handshake_init(keypair, make_epoch(), &[0u8; 106], 1100)
             .is_err());
 
         // Inbound can't start_handshake
         let mut inbound = PeerConnection::inbound(LinkId::new(2), 1000);
-        assert!(inbound.start_handshake(keypair, 1100).is_err());
+        assert!(inbound.start_handshake(keypair, make_epoch(), 1100).is_err());
     }
 }

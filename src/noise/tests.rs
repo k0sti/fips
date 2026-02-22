@@ -1,4 +1,5 @@
 use super::*;
+use rand::RngCore;
 use secp256k1::Parity;
 
 fn generate_keypair() -> secp256k1::Keypair {
@@ -8,17 +9,27 @@ fn generate_keypair() -> secp256k1::Keypair {
     secp256k1::Keypair::from_secret_key(&secp, &secret_key)
 }
 
+fn generate_epoch() -> [u8; 8] {
+    let mut epoch = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut epoch);
+    epoch
+}
+
 #[test]
 fn test_full_handshake() {
     let initiator_keypair = generate_keypair();
     let responder_keypair = generate_keypair();
+    let initiator_epoch = generate_epoch();
+    let responder_epoch = generate_epoch();
 
     let responder_pub = responder_keypair.public_key();
 
     // Initiator knows responder's static key
     // Responder does NOT know initiator's static key (IK pattern)
     let mut initiator = HandshakeState::new_initiator(initiator_keypair, responder_pub);
+    initiator.set_local_epoch(initiator_epoch);
     let mut responder = HandshakeState::new_responder(responder_keypair);
+    responder.set_local_epoch(responder_epoch);
 
     assert_eq!(initiator.role(), HandshakeRole::Initiator);
     assert_eq!(responder.role(), HandshakeRole::Responder);
@@ -39,6 +50,9 @@ fn test_full_handshake() {
         &initiator_keypair.public_key()
     );
 
+    // Responder learned initiator's epoch
+    assert_eq!(responder.remote_epoch(), Some(initiator_epoch));
+
     // Message 2: Responder -> Initiator
     let msg2 = responder.write_message_2().unwrap();
     assert_eq!(msg2.len(), HANDSHAKE_MSG2_SIZE);
@@ -48,6 +62,9 @@ fn test_full_handshake() {
     // Both should be complete
     assert!(initiator.is_complete());
     assert!(responder.is_complete());
+
+    // Initiator learned responder's epoch
+    assert_eq!(initiator.remote_epoch(), Some(responder_epoch));
 
     // Handshake hashes should match
     assert_eq!(initiator.handshake_hash(), responder.handshake_hash());
@@ -77,7 +94,9 @@ fn test_multiple_messages() {
 
     let mut initiator =
         HandshakeState::new_initiator(initiator_keypair, responder_keypair.public_key());
+    initiator.set_local_epoch(generate_epoch());
     let mut responder = HandshakeState::new_responder(responder_keypair);
+    responder.set_local_epoch(generate_epoch());
 
     let msg1 = initiator.write_message_1().unwrap();
     responder.read_message_1(&msg1).unwrap();
@@ -105,6 +124,7 @@ fn test_wrong_role_errors() {
     let keypair2 = generate_keypair();
 
     let mut initiator = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    initiator.set_local_epoch(generate_epoch());
 
     // Initiator can't read message 1
     assert!(initiator
@@ -119,6 +139,7 @@ fn test_wrong_role_errors() {
 fn test_invalid_pubkey_in_msg1() {
     let keypair = generate_keypair();
     let mut responder = HandshakeState::new_responder(keypair);
+    responder.set_local_epoch(generate_epoch());
 
     // Invalid pubkey bytes (first 33 bytes are zero)
     let invalid_msg = [0u8; HANDSHAKE_MSG1_SIZE];
@@ -133,7 +154,9 @@ fn test_decryption_failure_wrong_key() {
 
     // Session between 1 and 2
     let mut init1 = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    init1.set_local_epoch(generate_epoch());
     let mut resp1 = HandshakeState::new_responder(keypair2);
+    resp1.set_local_epoch(generate_epoch());
 
     let msg1 = init1.write_message_1().unwrap();
     resp1.read_message_1(&msg1).unwrap();
@@ -144,7 +167,9 @@ fn test_decryption_failure_wrong_key() {
 
     // Session between 1 and 3
     let mut init2 = HandshakeState::new_initiator(keypair1, keypair3.public_key());
+    init2.set_local_epoch(generate_epoch());
     let mut resp2 = HandshakeState::new_responder(keypair3);
+    resp2.set_local_epoch(generate_epoch());
 
     let msg1 = init2.write_message_1().unwrap();
     resp2.read_message_1(&msg1).unwrap();
@@ -178,7 +203,9 @@ fn test_session_remote_static() {
     let keypair2 = generate_keypair();
 
     let mut init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    init.set_local_epoch(generate_epoch());
     let mut resp = HandshakeState::new_responder(keypair2);
+    resp.set_local_epoch(generate_epoch());
 
     let msg1 = init.write_message_1().unwrap();
     resp.read_message_1(&msg1).unwrap();
@@ -196,8 +223,10 @@ fn test_session_remote_static() {
 #[test]
 fn test_message_sizes() {
     // Verify our size constants are correct
-    assert_eq!(HANDSHAKE_MSG1_SIZE, 33 + 33 + 16); // e + encrypted_s
-    assert_eq!(HANDSHAKE_MSG2_SIZE, 33); // e only
+    assert_eq!(EPOCH_SIZE, 8);
+    assert_eq!(EPOCH_ENCRYPTED_SIZE, 8 + 16); // epoch + AEAD tag
+    assert_eq!(HANDSHAKE_MSG1_SIZE, 33 + 33 + 16 + 24); // e + encrypted_s + encrypted_epoch
+    assert_eq!(HANDSHAKE_MSG2_SIZE, 33 + 24); // e + encrypted_epoch
 }
 
 #[test]
@@ -207,12 +236,14 @@ fn test_responder_identity_discovery() {
     let responder_keypair = generate_keypair();
 
     let mut responder = HandshakeState::new_responder(responder_keypair);
+    responder.set_local_epoch(generate_epoch());
 
     // Before message 1: responder has no idea who's connecting
     assert!(responder.remote_static().is_none());
 
     let mut initiator =
         HandshakeState::new_initiator(initiator_keypair, responder_keypair.public_key());
+    initiator.set_local_epoch(generate_epoch());
     let msg1 = initiator.write_message_1().unwrap();
 
     // After processing message 1: responder knows initiator's identity
@@ -330,7 +361,9 @@ fn test_session_replay_protection() {
     let keypair2 = generate_keypair();
 
     let mut init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    init.set_local_epoch(generate_epoch());
     let mut resp = HandshakeState::new_responder(keypair2);
+    resp.set_local_epoch(generate_epoch());
 
     let msg1 = init.write_message_1().unwrap();
     resp.read_message_1(&msg1).unwrap();
@@ -394,7 +427,9 @@ fn test_handshake_with_odd_parity_responder() {
 
     // Handshake using assumed-even key (as production code does)
     let mut initiator = HandshakeState::new_initiator(kp_a, assumed_even_b);
+    initiator.set_local_epoch(generate_epoch());
     let mut responder = HandshakeState::new_responder(kp_b);
+    responder.set_local_epoch(generate_epoch());
 
     let msg1 = initiator.write_message_1().unwrap();
     responder.read_message_1(&msg1).unwrap();

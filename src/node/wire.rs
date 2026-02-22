@@ -11,11 +11,11 @@
 //!
 //! ## Packet Types
 //!
-//! | Phase | Type            | Size      | Description                    |
-//! |-------|-----------------|-----------|--------------------------------|
-//! | 0x0   | Encrypted frame | 32+ bytes | Post-handshake encrypted data  |
-//! | 0x1   | Noise IK msg1   | 90 bytes  | Handshake initiation           |
-//! | 0x2   | Noise IK msg2   | 45 bytes  | Handshake response             |
+//! | Phase | Type            | Size       | Description                    |
+//! |-------|-----------------|------------|--------------------------------|
+//! | 0x0   | Encrypted frame | 32+ bytes  | Post-handshake encrypted data  |
+//! | 0x1   | Noise IK msg1   | 114 bytes  | Handshake initiation           |
+//! | 0x2   | Noise IK msg2   | 69 bytes   | Handshake response             |
 
 use crate::utils::index::SessionIndex;
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, TAG_SIZE};
@@ -43,10 +43,10 @@ pub const COMMON_PREFIX_SIZE: usize = 4;
 pub const ESTABLISHED_HEADER_SIZE: usize = 16;
 
 /// Size of Noise IK message 1 wire packet: prefix + sender_idx + noise_msg1.
-pub const MSG1_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + HANDSHAKE_MSG1_SIZE; // 90 bytes
+pub const MSG1_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + HANDSHAKE_MSG1_SIZE; // 114 bytes
 
 /// Size of Noise IK message 2 wire packet: prefix + sender_idx + receiver_idx + noise_msg2.
-pub const MSG2_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + HANDSHAKE_MSG2_SIZE; // 45 bytes
+pub const MSG2_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + HANDSHAKE_MSG2_SIZE; // 69 bytes
 
 /// Minimum size for encrypted frame: header + tag (no plaintext).
 pub const ENCRYPTED_MIN_SIZE: usize = ESTABLISHED_HEADER_SIZE + TAG_SIZE; // 32 bytes
@@ -198,9 +198,9 @@ impl EncryptedHeader {
 
 /// Parsed Noise IK message 1 header (phase 0x1).
 ///
-/// Wire format (90 bytes):
+/// Wire format (114 bytes):
 /// ```text
-/// [0x01][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:82]
+/// [0x01][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:106]
 /// ```
 #[derive(Clone, Debug)]
 pub struct Msg1Header {
@@ -252,9 +252,9 @@ impl Msg1Header {
 
 /// Parsed Noise IK message 2 header (phase 0x2).
 ///
-/// Wire format (45 bytes):
+/// Wire format (69 bytes):
 /// ```text
-/// [0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:33]
+/// [0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:57]
 /// ```
 #[derive(Clone, Debug)]
 pub struct Msg2Header {
@@ -310,7 +310,7 @@ impl Msg2Header {
 
 /// Build a wire-format msg1 packet.
 ///
-/// Format: `[0x01][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:82]`
+/// Format: `[0x01][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:106]`
 pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
     debug_assert_eq!(noise_msg1.len(), HANDSHAKE_MSG1_SIZE);
 
@@ -327,7 +327,7 @@ pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
 
 /// Build a wire-format msg2 packet.
 ///
-/// Format: `[0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:33]`
+/// Format: `[0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:57]`
 pub fn build_msg2(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_msg2: &[u8]) -> Vec<u8> {
     debug_assert_eq!(noise_msg2.len(), HANDSHAKE_MSG2_SIZE);
 
@@ -542,8 +542,8 @@ mod tests {
 
     #[test]
     fn test_wire_sizes() {
-        assert_eq!(MSG1_WIRE_SIZE, 90);  // 4 + 4 + 82
-        assert_eq!(MSG2_WIRE_SIZE, 45);  // 4 + 4 + 4 + 33
+        assert_eq!(MSG1_WIRE_SIZE, 114);  // 4 + 4 + 106
+        assert_eq!(MSG2_WIRE_SIZE, 69);   // 4 + 4 + 4 + 57
         assert_eq!(ENCRYPTED_MIN_SIZE, 32); // 16 + 16
         assert_eq!(COMMON_PREFIX_SIZE, 4);
         assert_eq!(ESTABLISHED_HEADER_SIZE, 16);
@@ -610,8 +610,8 @@ mod tests {
     fn test_payload_len_in_msg1() {
         let packet = build_msg1(SessionIndex::new(1), &[0u8; HANDSHAKE_MSG1_SIZE]);
         let prefix = CommonPrefix::parse(&packet).unwrap();
-        // payload_len = sender_idx(4) + noise_msg1(82) = 86
-        assert_eq!(prefix.payload_len, 86);
+        // payload_len = sender_idx(4) + noise_msg1(106) = 110
+        assert_eq!(prefix.payload_len, 110);
     }
 
     #[test]
@@ -622,7 +622,7 @@ mod tests {
             &[0u8; HANDSHAKE_MSG2_SIZE],
         );
         let prefix = CommonPrefix::parse(&packet).unwrap();
-        // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg2(33) = 41
-        assert_eq!(prefix.payload_len, 41);
+        // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg2(57) = 65
+        assert_eq!(prefix.payload_len, 65);
     }
 }

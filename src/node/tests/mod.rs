@@ -50,13 +50,15 @@ pub(super) fn make_completed_connection(
 
     // Run initiator side of handshake
     let our_keypair = node.identity.keypair();
-    let msg1 = conn.start_handshake(our_keypair, current_time_ms).unwrap();
+    let msg1 = conn.start_handshake(our_keypair, node.startup_epoch, current_time_ms).unwrap();
 
     // Run responder side to generate msg2
     let mut resp_conn = PeerConnection::inbound(LinkId::new(999), current_time_ms);
     let peer_keypair = peer_identity_full.keypair();
+    let mut resp_epoch = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut resp_epoch);
     let msg2 = resp_conn
-        .receive_handshake_init(peer_keypair, &msg1, current_time_ms)
+        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, current_time_ms)
         .unwrap();
 
     // Complete initiator handshake
