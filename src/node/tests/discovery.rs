@@ -117,13 +117,18 @@ async fn test_response_decode_error() {
 async fn test_response_originator_caches_route() {
     let mut node = make_node();
     let from = make_node_addr(0xAA);
-    let target = make_node_addr(0xBB);
+
+    // Use the target identity's actual node_addr for consistency
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
     let root = make_node_addr(0xF0);
     let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
 
-    // Create a valid response with a real proof signature
-    let proof_data = LookupResponse::proof_bytes(555, &target);
-    let target_identity = Identity::generate();
+    // Register target identity in cache so verification can find it
+    node.register_identity(target, target_identity.pubkey_full());
+
+    // Create a valid response with a real proof signature (includes coords)
+    let proof_data = LookupResponse::proof_bytes(555, &target, &coords);
     let proof = target_identity.sign(&proof_data);
 
     let response = LookupResponse::new(555, target, coords.clone(), proof);
@@ -151,7 +156,8 @@ async fn test_response_transit_needs_recent_request() {
     let root = make_node_addr(0xF0);
     let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
 
-    let proof_data = LookupResponse::proof_bytes(444, &target);
+    // Transit nodes don't verify proofs, so any valid signature suffices
+    let proof_data = LookupResponse::proof_bytes(444, &target, &coords);
     let target_identity = Identity::generate();
     let proof = target_identity.sign(&proof_data);
 
@@ -178,6 +184,151 @@ async fn test_response_transit_needs_recent_request() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     assert!(!node.coord_cache().contains(&target, now_ms2));
+}
+
+// ============================================================================
+// Unit Tests — LookupResponse Proof Verification
+// ============================================================================
+
+#[tokio::test]
+async fn test_response_proof_verification_success() {
+    // Verify that a properly signed response is accepted and cached
+    // when the origin has the target's pubkey in identity_cache.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    // Register target in identity_cache
+    node.register_identity(target, target_identity.pubkey_full());
+
+    // Sign with correct proof_bytes (including coords)
+    let proof_data = LookupResponse::proof_bytes(700, &target, &coords);
+    let proof = target_identity.sign(&proof_data);
+
+    let response = LookupResponse::new(700, target, coords.clone(), proof);
+    let payload = &response.encode()[1..];
+
+    node.handle_lookup_response(&from, payload).await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(
+        node.coord_cache().contains(&target, now_ms),
+        "Valid proof should result in cached coords"
+    );
+    assert_eq!(node.coord_cache().get(&target, now_ms).unwrap(), &coords);
+}
+
+#[tokio::test]
+async fn test_response_proof_verification_failure() {
+    // Verify that a response with a bad signature is discarded.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    // Register target in identity_cache
+    node.register_identity(target, target_identity.pubkey_full());
+
+    // Sign with a DIFFERENT identity (wrong key)
+    let wrong_identity = Identity::generate();
+    let proof_data = LookupResponse::proof_bytes(701, &target, &coords);
+    let proof = wrong_identity.sign(&proof_data);
+
+    let response = LookupResponse::new(701, target, coords, proof);
+    let payload = &response.encode()[1..];
+
+    node.handle_lookup_response(&from, payload).await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(
+        !node.coord_cache().contains(&target, now_ms),
+        "Bad signature should NOT result in cached coords"
+    );
+}
+
+#[tokio::test]
+async fn test_response_identity_cache_miss() {
+    // Verify that a response is discarded when the origin lacks the
+    // target's pubkey in identity_cache (should never happen in practice).
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    // Do NOT register target in identity_cache
+
+    let proof_data = LookupResponse::proof_bytes(702, &target, &coords);
+    let proof = target_identity.sign(&proof_data);
+
+    let response = LookupResponse::new(702, target, coords, proof);
+    let payload = &response.encode()[1..];
+
+    node.handle_lookup_response(&from, payload).await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(
+        !node.coord_cache().contains(&target, now_ms),
+        "identity_cache miss should discard the response"
+    );
+}
+
+#[tokio::test]
+async fn test_response_coord_substitution_detected() {
+    // Verify that if the proof was signed with correct coords but
+    // different coords are placed in the response, verification fails.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let root = make_node_addr(0xF0);
+    let real_coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+    let fake_coords = TreeCoordinate::from_addrs(vec![
+        target,
+        make_node_addr(0xEE),
+        root,
+    ]).unwrap();
+
+    // Register target in identity_cache
+    node.register_identity(target, target_identity.pubkey_full());
+
+    // Sign proof with real coords
+    let proof_data = LookupResponse::proof_bytes(703, &target, &real_coords);
+    let proof = target_identity.sign(&proof_data);
+
+    // But construct the response with FAKE coords
+    let response = LookupResponse::new(703, target, fake_coords, proof);
+    let payload = &response.encode()[1..];
+
+    node.handle_lookup_response(&from, payload).await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(
+        !node.coord_cache().contains(&target, now_ms),
+        "Substituted coords should be detected and response discarded"
+    );
 }
 
 // ============================================================================
@@ -304,6 +455,11 @@ async fn test_request_three_node_chain() {
     let mut nodes = run_tree_test(3, &edges, false).await;
 
     let node2_addr = *nodes[2].node.node_addr();
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+
+    // Pre-populate node0's identity_cache with node2's identity
+    // (in production, DNS resolution or prior handshake would do this)
+    nodes[0].node.register_identity(node2_addr, node2_pubkey);
 
     // Node0 initiates lookup (doesn't record in recent_requests)
     nodes[0].node.initiate_lookup(&node2_addr, 8).await;
@@ -396,11 +552,27 @@ async fn test_discovery_100_nodes() {
     let mut nodes = run_tree_test(NUM_NODES, &edges, false).await;
     verify_tree_convergence(&nodes);
 
-    // Collect all node addresses for lookup targets
+    // Collect all node addresses and public keys for lookup targets
     let all_addrs: Vec<NodeAddr> = nodes
         .iter()
         .map(|tn| *tn.node.node_addr())
         .collect();
+    let all_pubkeys: Vec<secp256k1::PublicKey> = nodes
+        .iter()
+        .map(|tn| tn.node.identity().pubkey_full())
+        .collect();
+
+    // Pre-populate identity caches: each source needs the target's pubkey
+    // for proof verification. In production, DNS resolution populates this
+    // before lookups are initiated.
+    for (src, node) in nodes.iter_mut().enumerate() {
+        for dst in (0..NUM_NODES).step_by(10) {
+            if src == dst {
+                continue;
+            }
+            node.node.register_identity(all_addrs[dst], all_pubkeys[dst]);
+        }
+    }
 
     // Each node looks up every 10th other node (~10 targets per node).
     // Build the full list of (src, dst) pairs.

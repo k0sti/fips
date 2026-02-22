@@ -6,8 +6,8 @@
 
 use crate::node::{Node, RecentRequest};
 use crate::protocol::{LookupRequest, LookupResponse};
-use crate::NodeAddr;
-use tracing::{debug, trace};
+use crate::{NodeAddr, PeerIdentity};
+use tracing::{debug, error, trace, warn};
 
 impl Node {
     /// Handle an incoming LookupRequest from a peer.
@@ -92,7 +92,7 @@ impl Node {
     /// Processing steps:
     /// 1. Decode and validate
     /// 2. Check recent_requests to determine if we originated or are forwarding
-    /// 3. If originator: cache target_coords in coord_cache
+    /// 3. If originator: verify proof signature, then cache target_coords in coord_cache
     /// 4. If transit: reverse-path forward to from_peer
     pub(in crate::node) async fn handle_lookup_response(
         &mut self,
@@ -130,15 +130,48 @@ impl Node {
                 );
             }
         } else {
-            // We originated this request — cache the discovered coordinates
+            // We originated this request — verify proof before caching
+            let target = response.target;
+
+            // Look up the target's public key from identity_cache
+            let mut prefix = [0u8; 15];
+            prefix.copy_from_slice(&target.as_bytes()[0..15]);
+            let target_pubkey = match self.lookup_by_fips_prefix(&prefix) {
+                Some((_addr, pubkey)) => pubkey,
+                None => {
+                    error!(
+                        request_id = response.request_id,
+                        target = %self.peer_display_name(&target),
+                        "identity_cache miss for lookup target — this is a bug"
+                    );
+                    return;
+                }
+            };
+
+            // Verify the proof signature
+            let (xonly, _parity) = target_pubkey.x_only_public_key();
+            let peer_id = PeerIdentity::from_pubkey(xonly);
+            let proof_data = LookupResponse::proof_bytes(
+                response.request_id,
+                &target,
+                &response.target_coords,
+            );
+            if !peer_id.verify(&proof_data, &response.proof) {
+                warn!(
+                    request_id = response.request_id,
+                    target = %self.peer_display_name(&target),
+                    "LookupResponse proof verification failed, discarding"
+                );
+                return;
+            }
+
             debug!(
                 request_id = response.request_id,
-                target = %self.peer_display_name(&response.target),
+                target = %self.peer_display_name(&target),
                 depth = response.target_coords.depth(),
-                "Received LookupResponse, caching route"
+                "Received LookupResponse, proof verified, caching route"
             );
 
-            let target = response.target;
             self.coord_cache.insert(
                 target,
                 response.target_coords,
@@ -182,7 +215,7 @@ impl Node {
         let our_coords = self.tree_state().my_coords().clone();
 
         // Sign proof: Identity::sign hashes with SHA-256 internally
-        let proof_data = LookupResponse::proof_bytes(request.request_id, &request.target);
+        let proof_data = LookupResponse::proof_bytes(request.request_id, &request.target, &our_coords);
         let proof = self.identity().sign(&proof_data);
 
         let response = LookupResponse::new(

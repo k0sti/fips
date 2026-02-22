@@ -200,11 +200,13 @@ impl LookupResponse {
 
     /// Get the bytes that should be signed as proof.
     ///
-    /// Format: request_id (8) || target (16)
-    pub fn proof_bytes(request_id: u64, target: &NodeAddr) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(24);
+    /// Format: request_id (8) || target (16) || coords_encoding (2 + 16×n)
+    pub fn proof_bytes(request_id: u64, target: &NodeAddr, target_coords: &TreeCoordinate) -> Vec<u8> {
+        let coord_size = 2 + target_coords.entries().len() * 16;
+        let mut bytes = Vec::with_capacity(24 + coord_size);
         bytes.extend_from_slice(&request_id.to_le_bytes());
         bytes.extend_from_slice(target.as_bytes());
+        encode_coords(target_coords, &mut bytes);
         bytes
     }
 
@@ -329,11 +331,17 @@ mod tests {
     #[test]
     fn test_lookup_response_proof_bytes() {
         let target = make_node_addr(42);
-        let bytes = LookupResponse::proof_bytes(12345, &target);
+        let coords = make_coords(&[42, 1, 0]);
+        let bytes = LookupResponse::proof_bytes(12345, &target, &coords);
 
-        assert_eq!(bytes.len(), 24); // 8 + 16
+        // 8 (request_id) + 16 (target) + 2 (count) + 3*16 (coords) = 74
+        assert_eq!(bytes.len(), 74);
         assert_eq!(&bytes[0..8], &12345u64.to_le_bytes());
         assert_eq!(&bytes[8..24], target.as_bytes());
+
+        // Verify coordinate encoding is present
+        let count = u16::from_le_bytes([bytes[24], bytes[25]]);
+        assert_eq!(count, 3); // 3 entries in coords
     }
 
     #[test]
@@ -372,7 +380,7 @@ mod tests {
         // Create a dummy signature for testing
         let secp = Secp256k1::new();
         let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
-        let proof_data = LookupResponse::proof_bytes(999, &target);
+        let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
         use sha2::Digest;
         let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();
         let sig = secp.sign_schnorr(&digest, &keypair);
