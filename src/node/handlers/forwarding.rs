@@ -64,7 +64,11 @@ impl Node {
             && let Some(tid) = peer.transport_id()
             && let Some(transport) = self.transports.get(&tid)
         {
-            datagram.path_mtu = datagram.path_mtu.min(transport.mtu());
+            if let Some(addr) = peer.current_addr() {
+                datagram.path_mtu = datagram.path_mtu.min(transport.link_mtu(addr));
+            } else {
+                datagram.path_mtu = datagram.path_mtu.min(transport.mtu());
+            }
         }
 
         // Forward: re-encode (includes 0x00 type byte) and send
