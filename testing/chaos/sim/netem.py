@@ -17,7 +17,7 @@ import random
 from dataclasses import dataclass, field
 
 from .docker_exec import docker_exec_quiet, is_container_running
-from .scenario import BandwidthConfig, NetemConfig, NetemPolicy
+from .scenario import BandwidthConfig, LinkPolicyOverride, NetemConfig, NetemPolicy
 from .topology import SimTopology
 
 log = logging.getLogger(__name__)
@@ -91,11 +91,40 @@ class NetemManager:
                 rate = rng.choice(bandwidth.tiers_mbps)
                 self._edge_rates[(a, b)] = rate
                 self._edge_rates[(b, a)] = rate
+        # Per-edge policy overrides: canonical "nXX-nYY" -> NetemPolicy
+        # Build a set of canonical edge strings for validation
+        topo_edge_strs = {"-".join(sorted([a, b])) for a, b in topology.edges}
+        self._edge_overrides: dict[str, NetemPolicy] = {}
+        for override in config.link_policies:
+            policy = override.policy
+            if policy is None and override.policy_name:
+                policy = config.mutation.policies.get(override.policy_name)
+            if policy is None:
+                continue
+            for edge_str in override.edges:
+                if edge_str not in topo_edge_strs:
+                    log.warning(
+                        "link_policy edge %s not in topology — override ignored",
+                        edge_str,
+                    )
+                self._edge_overrides[edge_str] = policy
+        if self._edge_overrides:
+            log.info(
+                "Per-link policy overrides: %d edges",
+                len(self._edge_overrides),
+            )
 
     def _htb_rate(self, node_id: str, peer_id: str) -> str:
         """Return the HTB rate string for a link direction."""
         rate = self._edge_rates.get((node_id, peer_id), 0)
         return f"{rate}mbit" if rate > 0 else "1gbit"
+
+    def _policy_for_edge(self, node_a: str, node_b: str) -> NetemPolicy:
+        """Return the netem policy for an edge, checking overrides first."""
+        canonical = "-".join(sorted([node_a, node_b]))
+        if canonical in self._edge_overrides:
+            return self._edge_overrides[canonical]
+        return self.config.default_policy
 
     def setup_initial(self):
         """Set up HTB qdiscs and initial netem on all containers."""
@@ -128,8 +157,9 @@ class NetemManager:
                 class_id = f"1:{idx}"
                 netem_handle = f"{idx + 10}:"
 
-                # Sample initial params from default policy
-                params = self._sample_policy(self.config.default_policy)
+                # Sample initial params (per-edge override or default policy)
+                policy = self._policy_for_edge(node_id, peer_id)
+                params = self._sample_policy(policy)
 
                 rate = self._htb_rate(node_id, peer_id)
                 rate_mbit = self._edge_rates.get((node_id, peer_id), 0)

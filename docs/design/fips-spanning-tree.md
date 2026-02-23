@@ -35,28 +35,46 @@ reconverge to a single tree.
 ## Parent Selection
 
 Each node selects a single parent from among its direct peers. Parent
-selection follows these rules:
+selection uses cost-weighted depth to balance tree depth against link
+quality.
 
 ### Selection Criteria
 
 1. **Find the smallest root** visible across all peers' TreeAnnounce messages
-2. Among peers that can reach that root, prefer the one offering the
-   **shallowest depth** (shortest path to root)
-3. Apply the **depth improvement threshold**: switching parents requires the
-   proposed parent to offer a path at least 1 hop shallower than the current
-   parent (when the root is the same)
+2. Compute **effective depth** for each candidate peer:
+   `effective_depth = peer.depth + link_cost`, where
+   `link_cost = etx * (1.0 + srtt_ms / 100.0)` using locally measured MMP
+   metrics. When MMP metrics have not yet converged, `link_cost` defaults to
+   1.0, preserving pure depth-based behavior as a graceful fallback.
+3. Apply **hysteresis**: switch parents only when the best candidate's
+   effective depth is significantly better than the current parent's:
+   `best_eff_depth < current_eff_depth * (1.0 - parent_hysteresis)`
+   (default `parent_hysteresis = 0.2`, requiring 20% improvement)
 
-### Immediate Switch Triggers
+### Mandatory Switch Triggers
 
-Three conditions bypass the depth threshold and trigger immediate parent
-reselection:
+Two conditions bypass both hysteresis and the hold-down timer, triggering
+immediate parent reselection:
 
 1. **Parent loss**: Current parent is no longer in the peer set (link
    broken, peer disconnected)
 2. **Better root**: A peer advertises a smaller root than the current
-   tree's root — always switch regardless of depth
-3. **Depth improvement**: Same root, but the proposed parent offers depth
-   at least `PARENT_SWITCH_THRESHOLD` (1 hop) better than the current parent
+   tree's root — always switch regardless of effective depth
+
+### Stability Mechanisms
+
+- **Hold-down timer** (`hold_down_secs`, default 30s): After any parent
+  switch, non-mandatory re-evaluation is suppressed to allow MMP metrics
+  to stabilize on the new link. Mandatory switches (parent loss, root
+  change) bypass the hold-down.
+- **Periodic re-evaluation** (`reeval_interval_secs`, default 60s):
+  Re-evaluates parent selection using current MMP link costs, independent
+  of TreeAnnounce traffic. This catches link degradation after the tree
+  has stabilized and TreeAnnounce gossip has stopped.
+- **Local-only metrics**: Link costs use only locally measured MMP data
+  (ETX and SRTT). No cumulative path costs are propagated and no wire
+  format changes are required. This avoids the trust problems inherent
+  in self-reported cost metrics in a permissionless network.
 
 ### After Parent Change
 
@@ -228,7 +246,9 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| PARENT_SWITCH_THRESHOLD | 1 hop | Minimum depth improvement for same-root switch |
+| PARENT_HYSTERESIS | 0.2 (20%) | Fractional improvement in effective depth required for same-root switch |
+| HOLD_DOWN_SECS | 30s | Suppress non-mandatory re-evaluation after parent switch |
+| REEVAL_INTERVAL_SECS | 60s | Periodic cost-based parent re-evaluation interval |
 | ANNOUNCE_MIN_INTERVAL | 500ms | Minimum between announcements to same peer |
 | ROOT_TIMEOUT | 60 min | Root declaration considered stale (not yet enforced; heartbeat cascading covers common case) |
 | TREE_ENTRY_TTL | 5–10 min | Individual entry expiration |
@@ -238,7 +258,9 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | Feature | Status |
 | ------- | ------ |
 | Root election (smallest node_addr) | **Implemented** |
-| Parent selection with depth threshold | **Implemented** |
+| Cost-based parent selection with hysteresis | **Implemented** |
+| Hold-down timer after parent change | **Implemented** |
+| Periodic cost-based parent re-evaluation | **Implemented** |
 | Coordinate computation | **Implemented** |
 | TreeAnnounce gossip | **Implemented** |
 | Signature verification (outer) | **Implemented** |
@@ -247,7 +269,6 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | Coord cache flush on parent change | **Implemented** |
 | Root timeout enforcement | Planned |
 | Tree entry TTL enforcement | Planned |
-| Hold-down timer after parent change | Planned |
 | Per-ancestry-entry signatures | Future direction |
 
 ## References

@@ -410,9 +410,12 @@ MTU, and its own liveness tracking.
 ### Transport Quality and Path Selection
 
 Transport characteristics (latency, bandwidth, reliability) affect path
-quality but are not currently factored into routing decisions. The spanning
-tree parent selection uses a depth improvement threshold but does not
-consider transport quality. This is a potential area for future optimization.
+quality. The spanning tree parent selection factors in link quality through
+cost-based effective depth (`effective_depth = depth + link_cost`), where
+`link_cost` is derived from locally measured MMP metrics (ETX and SRTT).
+This allows the tree to prefer lower-latency, lower-loss links when the
+quality difference is significant. Link cost is not yet used in
+`find_next_hop()` candidate ranking for data forwarding.
 
 ## References
 

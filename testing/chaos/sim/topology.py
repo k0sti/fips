@@ -130,6 +130,17 @@ def generate_topology(
     elif config.algorithm == "erdos_renyi":
         p = config.params.get("p", 0.3)
         edges = _generate_erdos_renyi(node_ids, p, rng)
+    elif config.algorithm == "explicit":
+        adjacency = config.params.get("adjacency")
+        if not adjacency:
+            raise ValueError("explicit topology requires params.adjacency")
+        edges = _generate_explicit(adjacency)
+        # Validate all referenced nodes exist
+        for a, b in edges:
+            if a not in nodes:
+                raise ValueError(f"explicit adjacency references unknown node {a}")
+            if b not in nodes:
+                raise ValueError(f"explicit adjacency references unknown node {b}")
     else:
         raise ValueError(f"Unknown algorithm: {config.algorithm}")
 
@@ -209,6 +220,21 @@ def _generate_erdos_renyi(
         for b in node_ids[i + 1 :]:
             if rng.random() < p:
                 edges.add(_make_edge(a, b))
+    return edges
+
+
+def _generate_explicit(adjacency: list) -> set[tuple[str, str]]:
+    """Build edges from an explicit adjacency list.
+
+    Each entry should be a 2-element list like ["n01", "n02"].
+    """
+    edges = set()
+    for i, pair in enumerate(adjacency):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError(
+                f"explicit adjacency[{i}]: expected [nodeA, nodeB], got {pair}"
+            )
+        edges.add(_make_edge(str(pair[0]), str(pair[1])))
     return edges
 
 

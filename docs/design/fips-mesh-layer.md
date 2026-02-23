@@ -405,8 +405,8 @@ work together to build and maintain the mesh, and
 ## Metrics Measurement Protocol (MMP)
 
 Each active peer link runs an instance of the Metrics Measurement Protocol,
-providing per-link quality metrics to the operator and (in future) to the
-routing layer for link-cost decisions.
+providing per-link quality metrics to the operator and to the spanning tree
+layer for cost-based parent selection.
 
 ### Metrics Tracked
 
@@ -422,8 +422,9 @@ fields in the FMP wire format:
 - **OWD trend** — One-way delay trend (µs/s, signed). Indicates congestion
   buildup before loss occurs.
 - **ETX** — Expected Transmission Count, computed from bidirectional delivery
-  ratios. Not yet wired into routing decisions (link cost is currently
-  constant).
+  ratios. Used in cost-based parent selection via
+  `link_cost = etx * (1.0 + srtt_ms / 100.0)`; not yet used in
+  `find_next_hop()` candidate ranking.
 - **Dual EWMA trends** — Short-term (α=1/4) and long-term (α=1/32) trend
   indicators for both RTT and loss, enabling change detection.
 

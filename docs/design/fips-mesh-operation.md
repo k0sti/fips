@@ -52,8 +52,8 @@ Nodes self-organize into a spanning tree through distributed parent selection:
    No election protocol — this is a consequence of each node independently
    preferring lower-addressed roots.
 2. **Parent selection**: Each node selects a single parent from among its
-   direct peers based on which offers the best path to root (considering
-   depth improvement threshold).
+   direct peers based on which offers the lowest effective depth (tree depth
+   weighted by local link cost).
 3. **Coordinate computation**: Once a node has a parent, its coordinate is
    computed from its ancestry path.
 
@@ -190,8 +190,9 @@ When bloom filters identify multiple candidate peers, they are ranked by a
 composite key:
 
 1. **link_cost** — Per-link quality metric. ETX is computed from bidirectional
-   delivery ratios in MMP metrics but is not yet wired into `find_next_hop()`
-   candidate ranking; link cost remains constant in the current implementation.
+   delivery ratios in MMP metrics and is used in cost-based parent selection
+   via `effective_depth = depth + link_cost`, but is not yet wired into
+   `find_next_hop()` candidate ranking.
 2. **tree_distance** — Coordinate-based distance to destination through this
    peer
 3. **node_addr** — Deterministic tie-breaker
@@ -621,7 +622,8 @@ recovery).
 | Discovery reverse-path routing | **Implemented** |
 | Error signal rate limiting | **Implemented** |
 | Leaf-only operation | Future direction |
-| Link cost metrics (ETX) | Future direction |
+| Link cost in parent selection (ETX) | **Implemented** |
+| Link cost in candidate ranking | Future direction |
 | Discovery path accumulation | Future direction |
 
 ## References

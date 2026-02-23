@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -11,6 +12,7 @@ import time
 
 from .compose import generate_compose
 from .config_gen import write_configs
+from .control import snapshot_all_mmp, snapshot_all_trees
 from .docker_exec import docker_compose
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
@@ -108,7 +110,7 @@ class SimRunner:
         config_dir = os.path.normpath(
             os.path.join(docker_network_dir, "generated-configs", "sim")
         )
-        write_configs(self.topology, config_dir)
+        write_configs(self.topology, config_dir, self.scenario.fips_overrides)
         log.info("Wrote node configs to %s", config_dir)
 
         # 3. Generate docker-compose.yml
@@ -153,6 +155,7 @@ class SimRunner:
         wait = max(10, n)  # Heuristic: ~1s per node, minimum 10s
         log.info("Waiting %ds for mesh convergence...", wait)
         self._sleep(wait)
+        self._take_snapshot("warmup")
 
     def _simulation_loop(self):
         """Main event loop driving stochastic behavior."""
@@ -233,10 +236,13 @@ class SimRunner:
                 log.info("Restoring downed links...")
                 self.link_mgr.restore_all()
 
-            # Restore stopped nodes (needed for log collection)
+            # Restore stopped nodes (needed for snapshots and log collection)
             if self.node_mgr:
                 log.info("Restoring stopped nodes...")
                 self.node_mgr.restore_all()
+
+            # Take final tree snapshot while nodes are still running
+            self._take_snapshot("final")
 
             # Collect logs before stopping containers
             container_names = [
@@ -272,6 +278,30 @@ class SimRunner:
             )
 
         return result
+
+    def _take_snapshot(self, label: str):
+        """Query all nodes via control socket and save tree/MMP snapshots."""
+        if not self.topology:
+            return
+        log.info("Taking %s snapshot...", label)
+        tree_snap = snapshot_all_trees(self.topology)
+        mmp_snap = snapshot_all_mmp(self.topology)
+
+        tree_path = os.path.join(self.output_dir, f"tree-snapshot-{label}.json")
+        mmp_path = os.path.join(self.output_dir, f"mmp-snapshot-{label}.json")
+        os.makedirs(self.output_dir, exist_ok=True)
+        with open(tree_path, "w") as f:
+            json.dump(tree_snap, f, indent=2)
+        with open(mmp_path, "w") as f:
+            json.dump(mmp_snap, f, indent=2)
+        log.info(
+            "Snapshot %s: %d/%d tree, %d/%d mmp responses",
+            label,
+            len(tree_snap),
+            len(self.topology.nodes),
+            len(mmp_snap),
+            len(self.topology.nodes),
+        )
 
     def _schedule_next(self, now: float, interval) -> float:
         """Schedule the next event using a Range interval."""

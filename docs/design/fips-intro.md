@@ -460,11 +460,13 @@ low-latency links converge quickly. Each metric carries both short-term and
 long-term exponentially weighted moving averages, enabling detection of
 quality changes against a stable baseline.
 
-MMP's primary role today is operator visibility — periodic log lines report
-per-link RTT, loss, jitter, and goodput. The metrics also provide the
-foundation for quality-aware routing: MMP computes an Expected Transmission
-Count (ETX) from bidirectional delivery ratios, which will feed into
-candidate ranking once link-cost routing is enabled.
+MMP serves dual roles: operator visibility and cost-based parent selection.
+Periodic log lines report per-link RTT, loss, jitter, and goodput. MMP
+computes an Expected Transmission Count (ETX) from bidirectional delivery
+ratios, which feeds into cost-based parent selection where each node
+evaluates `effective_depth = depth + link_cost` using
+`link_cost = etx * (1.0 + srtt_ms / 100.0)`. ETX is not yet used in
+`find_next_hop()` candidate ranking for data forwarding.
 
 See [fips-mesh-layer.md](fips-mesh-layer.md) for MMP operating modes, report
 scheduling, and the spin bit design.

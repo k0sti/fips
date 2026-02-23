@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
+
+import yaml
 
 from .topology import SimTopology
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base (override wins on conflicts)."""
+    result = deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
 
 # Path to the shared node config template
 _TEMPLATE_PATH = os.path.join(
@@ -41,7 +55,10 @@ def generate_peers_block(
 
 
 def generate_node_config(
-    topology: SimTopology, node_id: str, outbound_peers: list[str]
+    topology: SimTopology,
+    node_id: str,
+    outbound_peers: list[str],
+    fips_overrides: dict | None = None,
 ) -> str:
     """Generate a complete FIPS config YAML for one node."""
     template = _load_template()
@@ -54,6 +71,12 @@ def generate_node_config(
     config = config.replace("{{NPUB}}", node.npub)
     config = config.replace("{{NSEC}}", node.nsec)
     config = config.replace("{{PEERS}}", peers_yaml)
+
+    if fips_overrides:
+        parsed = yaml.safe_load(config)
+        merged = _deep_merge(parsed, fips_overrides)
+        config = yaml.dump(merged, default_flow_style=False, sort_keys=False)
+
     return config
 
 
@@ -67,13 +90,19 @@ def generate_npubs_env(topology: SimTopology) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_configs(topology: SimTopology, output_dir: str):
+def write_configs(
+    topology: SimTopology,
+    output_dir: str,
+    fips_overrides: dict | None = None,
+):
     """Write all node configs and npubs.env to the output directory."""
     os.makedirs(output_dir, exist_ok=True)
 
     outbound = topology.directed_outbound()
     for node_id in topology.nodes:
-        config = generate_node_config(topology, node_id, outbound[node_id])
+        config = generate_node_config(
+            topology, node_id, outbound[node_id], fips_overrides
+        )
         path = os.path.join(output_dir, f"{node_id}.yaml")
         with open(path, "w") as f:
             f.write(config)

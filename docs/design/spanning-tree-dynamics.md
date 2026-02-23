@@ -24,7 +24,7 @@ The protocol is based on Yggdrasil v0.5's CRDT gossip design.
 8. [Parent Selection](#8-parent-selection)
 9. [Steady State Behavior](#9-steady-state-behavior)
 10. [Worked Examples](#10-worked-examples)
-11. [Known Limitations (v1 Implementation)](#known-limitations-v1-implementation)
+11. [Known Limitations](#known-limitations)
 
 ---
 
@@ -380,8 +380,10 @@ Link B ←→ C fails:
 ### Reconvergence Dynamics
 
 **Stability threshold**: To prevent flapping, a node only changes parent when
-the improvement exceeds a threshold. In v1, this is a depth difference of at
-least `PARENT_SWITCH_THRESHOLD` (1 hop). See §8 for details.
+the improvement exceeds cost-based hysteresis (`parent_hysteresis`, default
+0.2 = 20% improvement required). A hold-down timer (`hold_down_secs`,
+default 30s) further suppresses non-mandatory re-evaluation after a switch.
+See §8 for details.
 
 **Sequence number advancement**: Each parent change increments the sequence
 number. Nodes observing rapid sequence increases can detect instability and
@@ -421,7 +423,7 @@ Nodes detect they're partitioned when:
 2. **Root unreachable**: No peer has path to current root
 
 **Detection via gossip staleness** (not currently implemented — see
-[Known Limitations](#known-limitations-v1-implementation)):
+[Known Limitations](#known-limitations)):
 
 In principle, nodes would also detect partitions through root entry staleness:
 if no fresh root announcements arrive within a timeout, the root is presumed
@@ -579,100 +581,114 @@ see traffic to consider the link alive.
 
 Parent selection determines tree structure and routing efficiency.
 
-### v1 Implementation: Depth-Only Selection
+### Cost-Based Selection with Effective Depth
 
-The current implementation uses tree depth as the sole selection metric, with a
-threshold to prevent thrashing between equivalent-depth paths.
+The implementation uses cost-weighted depth to balance tree depth against link
+quality. Each candidate parent is evaluated by its **effective depth** — the
+tree depth plus a local link cost penalty derived from MMP metrics.
 
-**Algorithm** (`TreeState::evaluate_parent()` in `tree.rs`):
+**Algorithm** (`TreeState::evaluate_parent()` in `tree/state.rs`):
 
 ```
-evaluate_parent():
+evaluate_parent(peer_costs: HashMap<NodeAddr, f64>):
     // 1. Find smallest root reachable through any peer
     smallest_root = min(peer.root for peer in peers_with_coords)
 
     if self == smallest_root and is_root:
         return None  // Already root, no change
 
-    // 2. Among peers reaching smallest_root, find shallowest
-    best_peer = min(
-        [p for p in peers if p.root == smallest_root],
-        key=lambda p: p.depth
-    )
-    proposed_depth = best_peer.depth + 1
+    // 2. Compute effective depth for each candidate
+    for each peer with peer.root == smallest_root:
+        link_cost = peer_costs.get(peer) or 1.0  // default optimistic
+        peer.effective_depth = peer.depth + link_cost
+
+    best_peer = min(candidates, key=effective_depth, tiebreak=node_addr)
 
     if best_peer == current_parent:
         return None  // Already using best
 
-    // 3. Always switch if parent is gone or root is changing
+    // 3. Mandatory switches — bypass hysteresis and hold-down
     if current_parent not in peers:
-        return best_peer  // Path broken
+        return best_peer  // Parent lost
     if current_root != smallest_root:
         return best_peer  // Better root found
 
-    // 4. For same root: require depth improvement ≥ threshold
-    current_depth = my_coords.depth()
-    if current_depth >= proposed_depth + PARENT_SWITCH_THRESHOLD:
+    // 4. Hold-down check — suppress non-mandatory switches
+    if last_parent_switch + hold_down > now:
+        return None  // Too soon after last switch
+
+    // 5. Hysteresis — require significant improvement
+    current_parent_eff = current_parent.depth + peer_costs.get(current_parent)
+    if best_eff_depth < current_parent_eff * (1.0 - parent_hysteresis):
         return best_peer
 
     return None  // Not enough improvement
 ```
 
-**Constants**:
+**Parameters**:
 
 ```
-PARENT_SWITCH_THRESHOLD = 1  // Minimum depth improvement to switch parents
+parent_hysteresis = 0.2    // 20% improvement required for same-root switch
+hold_down_secs = 30        // Suppress re-evaluation after parent switch
+reeval_interval_secs = 60  // Periodic re-evaluation independent of TreeAnnounce
 ```
 
-This means a proposed parent must offer a path at least 1 hop shallower than
-the current parent (under the same root) to trigger a switch. Root changes
-always trigger a switch regardless of depth.
-
-**What this means for tree structure**: The v1 algorithm produces minimum-depth
-trees, which minimizes coordinate path length and hop count for coordinate-based
-greedy routing. However, it does not account for link quality—a high-latency or
-lossy link at depth 1 is preferred over a fast link at depth 2.
-
-### v2 Planned: Cost Metrics
-
-The following cost-based parent selection is planned but not yet implemented.
-
-**Cost components**:
-
-- **Latency** (primary): `cost_latency = round_trip_time_ms`
-- **Packet loss** (reliability): `cost_loss = 1 / (1 - loss_rate)` —
-  transforms loss rate into multiplicative cost (10% loss → 1.11, 50% → 2.0)
-- **Bandwidth** (capacity): `cost_bandwidth = reference_bandwidth / actual_bandwidth`
-
-**Combined cost**: Weighted combination with application-tunable weights:
+**Link cost formula** (`ActivePeer::link_cost()` in `peer/active.rs`):
 
 ```
-effective_cost = w_latency * cost_latency
-               + w_loss * cost_loss
-               + w_bandwidth * cost_bandwidth
+link_cost = etx * (1.0 + srtt_ms / 100.0)
 ```
 
-**Path cost to root**: Recursive — each node advertises its cumulative cost,
-allowing neighbors to compute total path cost:
+Where ETX (Expected Transmission Count) comes from bidirectional MMP delivery
+ratios and SRTT (Smoothed Round-Trip Time) from MMP timestamp-echo. When MMP
+metrics have not yet converged, `link_cost` defaults to 1.0, preserving
+depth-only behavior as a graceful fallback.
 
-```
-path_cost(peer) = link_cost(self, peer) + peer.path_cost_to_root
-```
+**What this means for tree structure**: The algorithm can prefer a deeper parent
+with a better link over a shallower parent with a poor link, when the effective
+depth difference is significant enough to overcome hysteresis. For example, a
+fiber link at depth 2 (effective depth ≈ 3.01) beats a LoRa link at depth 1
+(effective depth ≈ 7.32 with 500ms RTT and 5% loss). In homogeneous networks
+where all links have similar quality, effective depth tracks tree depth closely
+and the algorithm produces minimum-depth trees as before.
 
-**Stability threshold**: Hysteresis with both absolute and relative components:
+**Periodic re-evaluation**: `evaluate_parent()` is event-driven — called on
+TreeAnnounce receipt or parent loss. After the tree stabilizes and TreeAnnounce
+traffic stops, link degradation goes undetected. The periodic re-evaluation
+timer (`reeval_interval_secs`) calls `evaluate_parent()` from the tick handler
+with current MMP link costs, independent of TreeAnnounce traffic.
 
-```
-stability_threshold = base_threshold + current_cost * relative_threshold
-```
+### Design Rationale: Local-Only Cost Metrics
 
-**Cost measurement**: Active probing (periodic RTT measurement), passive
-observation (inferred from protocol message timing), and exponential smoothing
-(`alpha = 0.1–0.3`) to balance responsiveness with stability.
+The original design considered cumulative path costs (OSPF-style, where each
+hop adds its link cost and the total is advertised in TreeAnnounce). This
+approach was rejected for three independent reasons:
 
-**Implementation prerequisites**: The cost-based algorithm requires changes to
-the TreeAnnounce wire format to carry path cost values, and a measurement
-subsystem for link quality metrics. See Section 10, Example 2 for how
-cost-based selection would affect tree structure in heterogeneous networks.
+1. **Unverifiable self-reporting**: In a permissionless network, a node can
+   claim any path cost. There is no mechanism for neighbors to verify that
+   the reported cumulative cost is truthful. A malicious node advertising
+   zero cost would attract traffic as a transit node.
+
+2. **No shared metric semantics**: Different links measure different things.
+   A LoRa link's 500ms RTT and a fiber link's 1ms RTT are both "round-trip
+   time" but represent fundamentally different physical constraints.
+   Accumulating them into a single path cost obscures per-hop information
+   that is more useful when evaluated locally.
+
+3. **Accumulation amplifies error**: Small measurement noise at each hop
+   compounds across the path. A 5-hop path accumulates 5x the measurement
+   error of a single hop, while providing no more actionable information
+   than the local link cost to each candidate parent.
+
+The local-only approach uses `link_cost = etx * (1.0 + srtt_ms / 100.0)`,
+where both components are locally measured via MMP. The RTT weighting
+addresses a blind spot in ETX alone: a clean-but-slow link (LoRa with 0%
+loss) gets ETX = 1.0, identical to fiber. The SRTT factor distinguishes them
+— a 500ms LoRa link gets cost ≈ 6.0 versus fiber at ≈ 1.01.
+
+No wire format changes are required. TreeAnnounce messages continue to carry
+depth (not cost), and each node independently evaluates its direct links
+using trusted local measurements.
 
 ---
 
@@ -874,48 +890,48 @@ Physical topology:
 node_addr ordering: B < A < D < E < C
 ```
 
-**Cost calculation** (using bandwidth as primary):
+**Local link costs** (using `link_cost = etx * (1.0 + srtt_ms / 100.0)`):
 
 ```
-Link costs (normalized to 1 Gbps = 1):
-A ═ B: cost = 1
-B ═ D: cost = 1
-D ═ E: cost = 1
-C — D: cost = 1000 (1 Mbps)
-A ~ C: cost = 100000 (9600 bps)
+Assumed MMP measurements after convergence:
+A ═ B: fiber, 1ms RTT, 0% loss  → link_cost = 1.0 * (1 + 1/100)     ≈ 1.01
+B ═ D: fiber, 1ms RTT, 0% loss  → link_cost = 1.0 * (1 + 1/100)     ≈ 1.01
+D ═ E: fiber, 1ms RTT, 0% loss  → link_cost = 1.0 * (1 + 1/100)     ≈ 1.01
+C — D: DSL, 20ms RTT, 2% loss   → link_cost = 1.04 * (1 + 20/100)   ≈ 1.25
+A ~ C: radio, 500ms RTT, 5% loss→ link_cost = 1.11 * (1 + 500/100)  ≈ 6.66
 ```
 
-**Tree formation with costs**:
+**Tree formation with effective depth**:
 
 ```
-Root = B (smallest node_addr)
+Root = B (smallest node_addr, depth 0)
 
-Parent selection:
-├── A: peers are B (cost 1), C (cost 100000)
-│   └── Selects B (much lower cost)
+Parent selection (each node evaluates effective_depth = peer.depth + link_cost):
+├── A: peers are B (depth 0, cost 1.01 → eff 1.01), C (depth ?, cost 6.66)
+│   └── Selects B (lowest effective depth)
 │
-├── D: peers are B (cost 1), C (cost 1000), E (cost 1)
-│   └── Selects B (direct, cost 1)
+├── D: peers are B (depth 0, cost 1.01 → eff 1.01),
+│      C (depth ?, cost 1.25), E (depth ?, cost 1.01)
+│   └── Selects B (direct, lowest effective depth)
 │
-├── E: peer is D
-│   └── Path to B: E → D → B, cost = 1 + 1 = 2
-│   └── Selects D
+├── E: peer is D (depth 1, cost 1.01 → eff 2.01)
+│   └── Selects D (only candidate)
 │
-└── C: peers are A (cost 100000), D (cost 1000)
-    └── Path through A: 100000 + 1 = 100001
-    └── Path through D: 1000 + 1 = 1001
-    └── Selects D (much lower cost despite higher local cost)
+└── C: peers are A (depth 1, cost 6.66 → eff 7.66),
+       D (depth 1, cost 1.25 → eff 2.25)
+    └── Selects D (eff 2.25 vs 7.66 — much lower)
 
 Resulting tree:
-        B (root)
+        B (root, depth 0)
        / \
-      A   D
+      A   D          (both depth 1)
           |\
-          E C
+          E C        (both depth 2)
 ```
 
-**Note**: C chooses D despite A being "closer" in hops, because total path
-cost through D is lower.
+**Note**: C chooses D despite both being at depth 1 — the DSL link to D
+(eff 2.25) far beats the radio link to A (eff 7.66). With local-only costs,
+each node evaluates only its direct link quality, not cumulative path cost.
 
 **Radio link failure**:
 
@@ -925,11 +941,10 @@ If A ~ C radio fails:
 └── C loses a potential backup path, but current tree unchanged
 
 If D — C DSL fails:
-├── C loses parent
+├── C loses parent (mandatory switch — bypasses hysteresis and hold-down)
 ├── C's only remaining peer is A (radio)
-├── C selects A as parent
-├── C's path to root: C → A → B (cost 100001)
-└── Tree reconverges with C as child of A
+├── C selects A as parent (eff depth = 1 + 6.66 = 7.66)
+└── Tree reconverges with C as child of A at depth 2
 ```
 
 ### Example 3: Network Partition and Healing
@@ -1019,7 +1034,7 @@ initial exchange).
 
 ---
 
-## Known Limitations (v1 Implementation)
+## Known Limitations
 
 The following limitations exist in the current implementation relative to the
 design described in this document. They are documented here to guide future
@@ -1079,26 +1094,27 @@ expires and has no peer with a fresher root declaration is partitioned. It
 becomes its own root and announces, allowing the partition to converge
 independently.
 
-### Known Limitation: Limited Stability Mechanisms
+### Known Limitation: Remaining Stability Gaps
 
-The implementation includes basic hysteresis (`PARENT_SWITCH_THRESHOLD = 1`
-depth difference required to switch parents), but the temporal stability
-mechanisms described in the design are not implemented:
+The primary stability mechanisms are implemented:
 
-- No hold timer on parent changes (minimum time before next switch)
+- **Cost-based hysteresis** (`parent_hysteresis = 0.2`): requires 20%
+  effective depth improvement to switch parents under the same root
+- **Hold-down timer** (`hold_down_secs = 30`): suppresses non-mandatory
+  re-evaluation after a parent switch, allowing MMP metrics to stabilize
+- **Periodic re-evaluation** (`reeval_interval_secs = 60`): catches link
+  degradation after tree stabilization independent of TreeAnnounce traffic
+
+Remaining gaps:
+
 - No sequence number advancement rate limiting
-- No announcement suppression during transient topology changes
 - No minimum stable state duration before re-announcing
 
-**Impact**: Rapid topology changes (e.g., a flapping link) could cause
-excessive announcement traffic and repeated coordinate recomputation.
-Currently mitigated by per-peer rate limiting on TreeAnnounce sends, but
-the source node is not throttled.
-
-**Proposed fix**: Add a hold-down timer (e.g., 5-10s) after each parent
-change during which further parent switches are suppressed unless the current
-parent is lost entirely. Track announcement rate and suppress if exceeding a
-threshold.
+**Impact**: A rapidly flapping link could still cause moderate announcement
+traffic. The hold-down timer limits the rate of parent switches (at most
+one non-mandatory switch per 30s), and per-peer rate limiting (500ms)
+bounds announcement frequency, but the source node's announcement rate is
+not independently throttled.
 
 ### Known Limitation: Integration Test Gaps
 
@@ -1123,7 +1139,7 @@ The gossip-based spanning tree protocol achieves distributed coordination
 through:
 
 1. **Deterministic root election** - Smallest node_addr, no negotiation needed
-2. **Local parent selection** - Each node independently chooses best path to root
+2. **Cost-aware parent selection** - Each node independently chooses lowest effective depth to root using local link metrics
 3. **CRDT merge semantics** - Conflicts resolved by sequence number, then timestamp
 4. **Bounded state** - O(peers × depth) entries per node, not O(network size)
 5. **Depth-proportional convergence** - Scales with tree height, not node count

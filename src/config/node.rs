@@ -190,23 +190,44 @@ pub struct TreeConfig {
     /// Per-peer TreeAnnounce rate limit in ms (`node.tree.announce_min_interval_ms`).
     #[serde(default = "TreeConfig::default_announce_min_interval_ms")]
     pub announce_min_interval_ms: u64,
-    /// Min depth improvement to switch parents (`node.tree.parent_switch_threshold`).
-    #[serde(default = "TreeConfig::default_parent_switch_threshold")]
-    pub parent_switch_threshold: usize,
+    /// Hysteresis factor for cost-based parent re-selection (`node.tree.parent_hysteresis`).
+    ///
+    /// Only switch parents when the candidate's effective_depth is better than
+    /// `current_effective_depth * (1.0 - parent_hysteresis)`. Range: 0.0-1.0.
+    /// Set to 0.0 to disable hysteresis (switch on any improvement).
+    #[serde(default = "TreeConfig::default_parent_hysteresis")]
+    pub parent_hysteresis: f64,
+    /// Hold-down period after parent switch in seconds (`node.tree.hold_down_secs`).
+    ///
+    /// After switching parents, suppress re-evaluation for this duration to allow
+    /// MMP metrics to stabilize on the new link. Set to 0 to disable.
+    #[serde(default = "TreeConfig::default_hold_down_secs")]
+    pub hold_down_secs: u64,
+    /// Periodic parent re-evaluation interval in seconds (`node.tree.reeval_interval_secs`).
+    ///
+    /// How often to re-evaluate parent selection based on current MMP link costs,
+    /// independent of TreeAnnounce traffic. Catches link degradation after the
+    /// tree has stabilized. Set to 0 to disable.
+    #[serde(default = "TreeConfig::default_reeval_interval_secs")]
+    pub reeval_interval_secs: u64,
 }
 
 impl Default for TreeConfig {
     fn default() -> Self {
         Self {
             announce_min_interval_ms: 500,
-            parent_switch_threshold: 1,
+            parent_hysteresis: 0.2,
+            hold_down_secs: 30,
+            reeval_interval_secs: 60,
         }
     }
 }
 
 impl TreeConfig {
     fn default_announce_min_interval_ms() -> u64 { 500 }
-    fn default_parent_switch_threshold() -> usize { 1 }
+    fn default_parent_hysteresis() -> f64 { 0.2 }
+    fn default_hold_down_secs() -> u64 { 30 }
+    fn default_reeval_interval_secs() -> u64 { 60 }
 }
 
 /// Bloom filter (`node.bloom.*`).

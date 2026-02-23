@@ -470,11 +470,22 @@ impl ActivePeer {
 
     /// Link cost for routing decisions.
     ///
-    /// Returns a scalar cost where lower is better. Currently returns a
-    /// constant (all links equal). Future versions will compute from RTT,
-    /// loss rate, and throughput measurements.
+    /// Returns a scalar cost where lower is better (1.0 = ideal).
+    /// Computed as RTT-weighted ETX: `etx * (1.0 + srtt_ms / 100.0)`.
+    ///
+    /// Returns 1.0 (optimistic default) when MMP metrics are not yet
+    /// available, matching depth-only parent selection behavior.
     pub fn link_cost(&self) -> f64 {
-        1.0
+        match self.mmp() {
+            Some(mmp) => {
+                let etx = mmp.metrics.etx;
+                match mmp.metrics.srtt_ms() {
+                    Some(srtt_ms) => etx * (1.0 + srtt_ms / 100.0),
+                    None => 1.0,
+                }
+            }
+            None => 1.0,
+        }
     }
 
     /// When this peer was authenticated.

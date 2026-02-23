@@ -337,6 +337,10 @@ pub struct Node {
     /// are exhausted.
     retry_pending: HashMap<NodeAddr, retry::RetryState>,
 
+    // === Periodic Parent Re-evaluation ===
+    /// Timestamp of last periodic parent re-evaluation (for pacing).
+    last_parent_reeval: Option<std::time::Instant>,
+
     // === Display Names ===
     /// Human-readable names for configured peers (alias or short npub).
     /// Populated at startup from peer config.
@@ -368,7 +372,8 @@ impl Node {
 
         // Initialize tree state with signed self-declaration
         let mut tree_state = TreeState::new(node_addr);
-        tree_state.set_parent_switch_threshold(config.node.tree.parent_switch_threshold);
+        tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
+        tree_state.set_hold_down(config.node.tree.hold_down_secs);
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
@@ -432,6 +437,7 @@ impl Node {
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
             retry_pending: HashMap::new(),
+            last_parent_reeval: None,
             peer_aliases: HashMap::new(),
         })
     }
@@ -451,7 +457,8 @@ impl Node {
 
         // Initialize tree state with signed self-declaration
         let mut tree_state = TreeState::new(node_addr);
-        tree_state.set_parent_switch_threshold(config.node.tree.parent_switch_threshold);
+        tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
+        tree_state.set_hold_down(config.node.tree.hold_down_secs);
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
@@ -518,6 +525,7 @@ impl Node {
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
             retry_pending: HashMap::new(),
+            last_parent_reeval: None,
             peer_aliases: HashMap::new(),
         }
     }

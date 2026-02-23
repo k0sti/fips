@@ -3,6 +3,8 @@
 //! Handles building, sending, and receiving TreeAnnounce messages,
 //! including periodic root refresh and rate-limited propagation.
 
+use std::collections::HashMap;
+
 use crate::protocol::TreeAnnounce;
 use crate::NodeAddr;
 
@@ -194,8 +196,11 @@ impl Node {
             self.bloom_state.mark_update_needed(*from);
         }
 
-        // Re-evaluate parent selection
-        if let Some(new_parent) = self.tree_state.evaluate_parent() {
+        // Re-evaluate parent selection with current link costs
+        let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .collect();
+        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
             let new_seq = self.tree_state.my_declaration().sequence() + 1;
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -268,9 +273,73 @@ impl Node {
 
     /// Periodic tree maintenance, called from the tick handler.
     ///
-    /// Sends pending rate-limited announces.
+    /// Sends pending rate-limited announces and checks for periodic
+    /// parent re-evaluation based on current MMP link costs.
     pub(super) async fn check_tree_state(&mut self) {
         self.send_pending_tree_announces().await;
+        self.check_periodic_parent_reeval().await;
+    }
+
+    /// Periodic parent re-evaluation based on current MMP link costs.
+    ///
+    /// Self-paces using `last_parent_reeval` and the configured
+    /// `reeval_interval_secs`. When a better parent is found, follows
+    /// the same switch flow as TreeAnnounce-triggered switches.
+    async fn check_periodic_parent_reeval(&mut self) {
+        let interval_secs = self.config.node.tree.reeval_interval_secs;
+        if interval_secs == 0 {
+            return;
+        }
+
+        // Need at least 2 peers for a meaningful comparison
+        if self.peers.len() < 2 {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let interval = std::time::Duration::from_secs(interval_secs);
+
+        if let Some(last) = self.last_parent_reeval {
+            if now.duration_since(last) < interval {
+                return;
+            }
+        }
+
+        self.last_parent_reeval = Some(now);
+
+        let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .collect();
+
+        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
+            let new_seq = self.tree_state.my_declaration().sequence() + 1;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            self.tree_state.set_parent(new_parent, new_seq, timestamp);
+            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
+                return;
+            }
+            self.tree_state.recompute_coords();
+            self.coord_cache.clear();
+
+            info!(
+                new_parent = %self.peer_display_name(&new_parent),
+                new_seq = new_seq,
+                new_root = %self.tree_state.root(),
+                depth = self.tree_state.my_coords().depth(),
+                trigger = "periodic",
+                "Parent switched via periodic cost re-evaluation"
+            );
+
+            self.send_tree_announce_to_all().await;
+
+            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+            self.bloom_state.mark_all_updates_needed(all_peers);
+        }
     }
 
     /// Handle tree state cleanup when a peer is removed.
@@ -286,7 +355,10 @@ impl Node {
         self.tree_state.remove_peer(node_addr);
 
         if was_parent {
-            let changed = self.tree_state.handle_parent_lost();
+            let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+                .map(|(addr, peer)| (*addr, peer.link_cost()))
+                .collect();
+            let changed = self.tree_state.handle_parent_lost(&peer_costs);
             if changed {
                 // Re-sign the new declaration
                 if let Err(e) = self.tree_state.sign_declaration(&self.identity) {

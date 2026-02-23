@@ -50,9 +50,24 @@ class NetemMutationConfig:
 
 
 @dataclass
+class LinkPolicyOverride:
+    """Per-edge netem policy override.
+
+    Edges are specified as "nXX-nYY" strings in canonical form (sorted
+    alphabetically). Either ``policy`` (inline) or ``policy_name``
+    (reference to a named mutation policy) must be set, not both.
+    """
+
+    edges: list[str] = field(default_factory=list)
+    policy: NetemPolicy | None = None
+    policy_name: str | None = None
+
+
+@dataclass
 class NetemConfig:
     enabled: bool = False
     default_policy: NetemPolicy = field(default_factory=NetemPolicy)
+    link_policies: list[LinkPolicyOverride] = field(default_factory=list)
     mutation: NetemMutationConfig = field(default_factory=NetemMutationConfig)
 
 
@@ -115,6 +130,10 @@ class Scenario:
     node_churn: NodeChurnConfig = field(default_factory=NodeChurnConfig)
     bandwidth: BandwidthConfig = field(default_factory=BandwidthConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    # Raw YAML dict appended to each generated FIPS node config.
+    # Allows scenarios to override any FIPS config parameter
+    # (e.g., node.tree.reeval_interval_secs).
+    fips_overrides: dict = field(default_factory=dict)
 
 
 def _parse_range(data, name: str) -> Range:
@@ -173,6 +192,16 @@ def load_scenario(path: str) -> Scenario:
     s.netem.enabled = nc.get("enabled", False)
     if "default_policy" in nc:
         s.netem.default_policy = _parse_netem_policy(nc["default_policy"])
+    if "link_policies" in nc:
+        for lp_data in nc["link_policies"]:
+            override = LinkPolicyOverride(
+                edges=lp_data.get("edges", []),
+            )
+            if "policy" in lp_data:
+                override.policy = _parse_netem_policy(lp_data["policy"])
+            if "policy_name" in lp_data:
+                override.policy_name = lp_data["policy_name"]
+            s.netem.link_policies.append(override)
     if "mutation" in nc:
         mc = nc["mutation"]
         s.netem.mutation.interval_secs = _parse_range(
@@ -233,6 +262,9 @@ def load_scenario(path: str) -> Scenario:
     s.logging.rust_log = lg.get("rust_log", "info")
     s.logging.output_dir = lg.get("output_dir", "./sim-results")
 
+    # FIPS config overrides (raw YAML dict appended to node configs)
+    s.fips_overrides = raw.get("fips_overrides", {})
+
     # Validation
     _validate(s)
 
@@ -245,10 +277,44 @@ def _validate(s: Scenario):
         raise ValueError("topology.num_nodes must be >= 2")
     if s.topology.num_nodes > 250:
         raise ValueError("topology.num_nodes must be <= 250 (subnet limit)")
-    if s.topology.algorithm not in ("random_geometric", "erdos_renyi", "chain"):
+    if s.topology.algorithm not in ("random_geometric", "erdos_renyi", "chain", "explicit"):
         raise ValueError(f"Unknown topology algorithm: {s.topology.algorithm}")
+    if s.topology.algorithm == "explicit":
+        adj = s.topology.params.get("adjacency")
+        if not adj or not isinstance(adj, list):
+            raise ValueError("explicit topology requires params.adjacency list")
+        node_ids = set()
+        for i, pair in enumerate(adj):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise ValueError(
+                    f"explicit adjacency[{i}]: expected [nodeA, nodeB], got {pair}"
+                )
+            node_ids.update(str(p) for p in pair)
+        if len(node_ids) != s.topology.num_nodes:
+            raise ValueError(
+                f"explicit adjacency references {len(node_ids)} nodes "
+                f"but num_nodes is {s.topology.num_nodes}"
+            )
     if s.duration_secs < 1:
         raise ValueError("duration_secs must be >= 1")
+
+    # Validate link_policies
+    for i, lp in enumerate(s.netem.link_policies):
+        if not lp.edges:
+            raise ValueError(f"netem.link_policies[{i}]: edges list is empty")
+        if lp.policy is not None and lp.policy_name is not None:
+            raise ValueError(
+                f"netem.link_policies[{i}]: specify policy or policy_name, not both"
+            )
+        if lp.policy is None and lp.policy_name is None:
+            raise ValueError(
+                f"netem.link_policies[{i}]: must specify policy or policy_name"
+            )
+        if lp.policy_name and lp.policy_name not in s.netem.mutation.policies:
+            raise ValueError(
+                f"netem.link_policies[{i}]: policy_name '{lp.policy_name}' "
+                f"not found in mutation.policies"
+            )
 
     # Validate ranges
     if s.netem.enabled and s.netem.mutation.policies:

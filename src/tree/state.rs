@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use super::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
 use crate::{Identity, NodeAddr};
@@ -24,8 +25,12 @@ pub struct TreeState {
     peer_declarations: HashMap<NodeAddr, ParentDeclaration>,
     /// Each peer's full ancestry to root.
     peer_ancestry: HashMap<NodeAddr, TreeCoordinate>,
-    /// Minimum depth improvement required to switch parents (same root).
-    parent_switch_threshold: usize,
+    /// Hysteresis factor for cost-based parent re-selection (0.0-1.0).
+    parent_hysteresis: f64,
+    /// Hold-down period after parent switch (0 = disabled).
+    hold_down: Duration,
+    /// Timestamp of last parent switch (for hold-down enforcement).
+    last_parent_switch: Option<Instant>,
 }
 
 impl TreeState {
@@ -48,7 +53,9 @@ impl TreeState {
             root: my_node_addr,
             peer_declarations: HashMap::new(),
             peer_ancestry: HashMap::new(),
-            parent_switch_threshold: 1,
+            parent_hysteresis: 0.0,
+            hold_down: Duration::ZERO,
+            last_parent_switch: None,
         }
     }
 
@@ -130,6 +137,7 @@ impl TreeState {
     /// Call this when switching parents. Updates the declaration and coordinates.
     pub fn set_parent(&mut self, parent_id: NodeAddr, sequence: u64, timestamp: u64) {
         self.my_declaration = ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
+        self.last_parent_switch = Some(Instant::now());
         // Coordinates will be recomputed when ancestry is available
     }
 
@@ -209,18 +217,25 @@ impl TreeState {
         }
     }
 
-    /// Set the parent switch threshold.
-    pub fn set_parent_switch_threshold(&mut self, threshold: usize) {
-        self.parent_switch_threshold = threshold;
+    /// Set the parent hysteresis factor (0.0-1.0).
+    pub fn set_parent_hysteresis(&mut self, hysteresis: f64) {
+        self.parent_hysteresis = hysteresis.clamp(0.0, 1.0);
+    }
+
+    /// Set the hold-down duration after parent switches.
+    pub fn set_hold_down(&mut self, secs: u64) {
+        self.hold_down = Duration::from_secs(secs);
     }
 
     /// Evaluate whether to switch parents based on current peer tree state.
     ///
-    /// v1 algorithm: depth-based, no latency/loss metrics.
+    /// Uses effective_depth (depth + link_cost) for parent comparison.
+    /// `peer_costs` maps each peer's NodeAddr to its link cost (from local
+    /// MMP measurements). Missing entries default to 1.0 (optimistic).
     ///
     /// Returns `Some(peer_node_addr)` if a parent switch is recommended,
     /// or `None` if the current parent is adequate.
-    pub fn evaluate_parent(&self) -> Option<NodeAddr> {
+    pub fn evaluate_parent(&self, peer_costs: &HashMap<NodeAddr, f64>) -> Option<NodeAddr> {
         if self.peer_ancestry.is_empty() {
             return None;
         }
@@ -248,29 +263,35 @@ impl TreeState {
             return None;
         }
 
-        // Among peers that reach the smallest root, find the shallowest
-        let mut best_peer: Option<(NodeAddr, usize)> = None; // (peer_addr, depth)
+        // Among peers that reach the smallest root, find the lowest effective_depth.
+        // effective_depth(peer) = peer.depth + link_cost_to_peer
+        let mut best_peer: Option<(NodeAddr, f64)> = None; // (peer_addr, effective_depth)
         for (peer_id, coords) in &self.peer_ancestry {
             if *coords.root_id() != smallest_root {
                 continue;
             }
-            let depth = coords.depth();
+            let cost = peer_costs.get(peer_id).copied().unwrap_or(1.0);
+            let eff_depth = coords.depth() as f64 + cost;
             match &best_peer {
-                None => best_peer = Some((*peer_id, depth)),
-                Some((_, best_depth)) => {
-                    if depth < *best_depth {
-                        best_peer = Some((*peer_id, depth));
+                None => best_peer = Some((*peer_id, eff_depth)),
+                Some((best_id, best_eff)) => {
+                    if eff_depth < *best_eff
+                        || (eff_depth == *best_eff && peer_id < best_id)
+                    {
+                        best_peer = Some((*peer_id, eff_depth));
                     }
                 }
             }
         }
 
-        let (best_peer_id, best_depth) = best_peer?;
+        let (best_peer_id, best_eff_depth) = best_peer?;
 
         // If already using this peer as parent, no switch needed
         if *self.my_declaration.parent_id() == best_peer_id && !self.is_root() {
             return None;
         }
+
+        // --- Mandatory switches (bypass hold-down and hysteresis) ---
 
         // If our current parent is gone from peer_ancestry, our path is broken — always switch
         if !self.is_root() && !self.peer_ancestry.contains_key(self.my_declaration.parent_id()) {
@@ -282,18 +303,36 @@ impl TreeState {
             return Some(best_peer_id);
         }
 
-        // Same root: require depth improvement ≥ threshold
+        // We're root but shouldn't be (peers have a smaller root) — always switch
         if self.is_root() {
-            // We're root but shouldn't be (peers have a smaller root) — always switch
             return Some(best_peer_id);
         }
 
-        // Compare depth: our current depth vs what we'd get through best_peer
-        // Our new depth would be best_depth + 1
-        let current_depth = self.my_coords.depth();
-        let proposed_depth = best_depth + 1;
+        // --- Hold-down: suppress non-mandatory re-evaluation after recent switch ---
 
-        if current_depth >= proposed_depth + self.parent_switch_threshold {
+        if !self.hold_down.is_zero()
+            && self
+                .last_parent_switch
+                .is_some_and(|last| last.elapsed() < self.hold_down)
+        {
+            return None;
+        }
+
+        // --- Same root, cost-aware comparison with hysteresis ---
+
+        // Current parent's effective_depth
+        let current_parent_cost = peer_costs
+            .get(self.my_declaration.parent_id())
+            .copied()
+            .unwrap_or(1.0);
+        let current_parent_coords = self.peer_ancestry.get(self.my_declaration.parent_id());
+        let current_parent_eff = match current_parent_coords {
+            Some(coords) => coords.depth() as f64 + current_parent_cost,
+            None => return Some(best_peer_id), // Parent has no coords — treat as lost
+        };
+
+        // Apply hysteresis: only switch if candidate is significantly better
+        if best_eff_depth < current_parent_eff * (1.0 - self.parent_hysteresis) {
             return Some(best_peer_id);
         }
 
@@ -306,9 +345,9 @@ impl TreeState {
     /// If none available, becomes its own root (increments sequence).
     ///
     /// Returns `true` if the tree state changed (caller should re-announce).
-    pub fn handle_parent_lost(&mut self) -> bool {
+    pub fn handle_parent_lost(&mut self, peer_costs: &HashMap<NodeAddr, f64>) -> bool {
         // Try to find an alternative parent
-        if let Some(new_parent) = self.evaluate_parent() {
+        if let Some(new_parent) = self.evaluate_parent(peer_costs) {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())

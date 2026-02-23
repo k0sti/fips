@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 fn make_node_addr(val: u8) -> NodeAddr {
@@ -378,7 +380,7 @@ fn test_evaluate_parent_picks_smallest_root() {
         make_coords(&[7, 2]),
     );
 
-    let result = state.evaluate_parent();
+    let result = state.evaluate_parent(&HashMap::new());
     assert_eq!(result, Some(peer3));
 }
 
@@ -404,7 +406,7 @@ fn test_evaluate_parent_prefers_shallowest_depth() {
         make_coords(&[2, 3, 4, 0]),
     );
 
-    let result = state.evaluate_parent();
+    let result = state.evaluate_parent(&HashMap::new());
     assert_eq!(result, Some(peer1));
 }
 
@@ -421,7 +423,7 @@ fn test_evaluate_parent_stays_root_when_smallest() {
         make_coords(&[1, 0]),
     );
 
-    assert_eq!(state.evaluate_parent(), None);
+    assert_eq!(state.evaluate_parent(&HashMap::new()), None);
 }
 
 #[test]
@@ -443,7 +445,7 @@ fn test_evaluate_parent_no_switch_when_already_best() {
     state.recompute_coords();
 
     // Now evaluate — should return None since peer1 is already our parent
-    assert_eq!(state.evaluate_parent(), None);
+    assert_eq!(state.evaluate_parent(&HashMap::new()), None);
 }
 
 #[test]
@@ -451,7 +453,7 @@ fn test_evaluate_parent_no_peers() {
     let my_node = make_node_addr(5);
     let state = TreeState::new(my_node);
 
-    assert_eq!(state.evaluate_parent(), None);
+    assert_eq!(state.evaluate_parent(&HashMap::new()), None);
 }
 
 #[test]
@@ -484,7 +486,7 @@ fn test_evaluate_parent_depth_threshold() {
         make_coords(&[3, 0]),
     );
 
-    let result = state.evaluate_parent();
+    let result = state.evaluate_parent(&HashMap::new());
     assert_eq!(result, Some(peer3));
 }
 
@@ -512,7 +514,7 @@ fn test_handle_parent_lost_finds_alternative() {
 
     // Remove peer1 (parent lost)
     state.remove_peer(&peer1);
-    let changed = state.handle_parent_lost();
+    let changed = state.handle_parent_lost(&HashMap::new());
 
     assert!(changed);
     // Should have switched to peer2
@@ -540,7 +542,7 @@ fn test_handle_parent_lost_becomes_root() {
 
     // Remove peer1 (only parent)
     state.remove_peer(&peer1);
-    let changed = state.handle_parent_lost();
+    let changed = state.handle_parent_lost(&HashMap::new());
 
     assert!(changed);
     assert!(state.is_root());
@@ -684,4 +686,424 @@ fn test_find_next_hop_best_of_multiple() {
 
     let dest = make_coords(&[7, 3, 1, 0]);
     assert_eq!(state.find_next_hop(&dest), Some(make_node_addr(3)));
+}
+
+// === Cost-based parent selection tests ===
+
+/// Build a peer_costs map from (addr_byte, cost) pairs.
+fn make_costs(entries: &[(u8, f64)]) -> HashMap<NodeAddr, f64> {
+    entries
+        .iter()
+        .map(|&(addr, cost)| (make_node_addr(addr), cost))
+        .collect()
+}
+
+#[test]
+fn test_effective_depth_selects_lower_cost_deeper_peer() {
+    // Peer A at depth 1 with high cost (LoRa), peer B at depth 2 with low cost (fiber).
+    // effective_depth(A) = 1 + 6.0 = 7.0
+    // effective_depth(B) = 2 + 1.01 = 3.01
+    // Should select B despite being deeper.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer_a = make_node_addr(1);
+    let peer_b = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    // Peer A: depth 1
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    // Peer B: depth 2
+    state.update_peer(
+        ParentDeclaration::new(peer_b, make_node_addr(3), 1, 1000),
+        make_coords(&[2, 3, 0]),
+    );
+
+    let costs = make_costs(&[(1, 6.0), (2, 1.01)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, Some(peer_b));
+}
+
+#[test]
+fn test_effective_depth_equal_cost_degenerates_to_depth() {
+    // Both peers at cost 1.0 (default). Should pick shallowest, same as v1.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer1 = make_node_addr(1);
+    let peer2 = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    // Peer 1: depth 1
+    state.update_peer(
+        ParentDeclaration::new(peer1, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    // Peer 2: depth 3
+    state.update_peer(
+        ParentDeclaration::new(peer2, make_node_addr(3), 1, 1000),
+        make_coords(&[2, 3, 4, 0]),
+    );
+
+    let costs = make_costs(&[(1, 1.0), (2, 1.0)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, Some(peer1));
+}
+
+#[test]
+fn test_effective_depth_tiebreak_by_node_addr() {
+    // Two peers with identical effective_depth. Smaller NodeAddr wins.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer1 = make_node_addr(1);
+    let peer2 = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    // Both at depth 1, cost 1.0 → effective_depth 2.0
+    state.update_peer(
+        ParentDeclaration::new(peer1, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer2, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    let costs = make_costs(&[(1, 1.0), (2, 1.0)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, Some(peer1)); // smaller NodeAddr
+}
+
+#[test]
+fn test_hysteresis_prevents_marginal_switch() {
+    // Current parent eff_depth 3.5, candidate 3.2.
+    // With 20% hysteresis, threshold = 3.5 * 0.8 = 2.8.
+    // 3.2 > 2.8, so no switch.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+    state.set_parent_hysteresis(0.2);
+
+    let peer_a = make_node_addr(1); // current parent
+    let peer_b = make_node_addr(2); // candidate
+    let root = make_node_addr(0);
+
+    // Peer A: depth 1, cost 2.5 → eff 3.5
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    // Peer B: depth 1, cost 2.2 → eff 3.2
+    state.update_peer(
+        ParentDeclaration::new(peer_b, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    // Set peer_a as current parent
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    let costs = make_costs(&[(1, 2.5), (2, 2.2)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, None); // marginal improvement blocked by hysteresis
+}
+
+#[test]
+fn test_hysteresis_allows_significant_switch() {
+    // Current parent eff_depth 7.0, candidate 3.01.
+    // With 20% hysteresis, threshold = 7.0 * 0.8 = 5.6.
+    // 3.01 < 5.6, so switch occurs.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+    state.set_parent_hysteresis(0.2);
+
+    let peer_a = make_node_addr(1); // current parent (LoRa)
+    let peer_b = make_node_addr(2); // candidate (fiber)
+    let root = make_node_addr(0);
+
+    // Peer A: depth 1, cost 6.0 → eff 7.0
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    // Peer B: depth 2, cost 1.01 → eff 3.01
+    state.update_peer(
+        ParentDeclaration::new(peer_b, make_node_addr(3), 1, 1000),
+        make_coords(&[2, 3, 0]),
+    );
+
+    // Set peer_a as current parent
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    let costs = make_costs(&[(1, 6.0), (2, 1.01)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, Some(peer_b));
+}
+
+#[test]
+fn test_cold_start_default_cost() {
+    // Peer with no cost entry in map gets default 1.0.
+    // This degenerates to depth-only selection.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer1 = make_node_addr(1);
+    let peer2 = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    // Peer 1: depth 1, peer 2: depth 3
+    state.update_peer(
+        ParentDeclaration::new(peer1, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer2, make_node_addr(3), 1, 1000),
+        make_coords(&[2, 3, 4, 0]),
+    );
+
+    // Empty cost map — all peers get default 1.0
+    let result = state.evaluate_parent(&HashMap::new());
+    assert_eq!(result, Some(peer1)); // shallowest wins
+}
+
+#[test]
+fn test_hold_down_suppresses_reeval() {
+    // After a parent switch, re-evaluation returns None during hold-down.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+    state.set_hold_down(60); // 60s hold-down
+
+    let peer_a = make_node_addr(1);
+    let peer_b = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer_b, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    // Switch to peer_a (sets last_parent_switch)
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    // Peer_b now offers better cost, but hold-down suppresses
+    let costs = make_costs(&[(1, 5.0), (2, 1.0)]);
+    state.set_parent_hysteresis(0.0); // no hysteresis, only hold-down
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, None); // suppressed by hold-down
+}
+
+#[test]
+fn test_mandatory_switch_bypasses_hold_down() {
+    // Parent loss during hold-down still triggers switch.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+    state.set_hold_down(60); // 60s hold-down
+
+    let peer_a = make_node_addr(1);
+    let peer_b = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer_b, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    // Switch to peer_a
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    // Remove peer_a (parent lost) — should bypass hold-down
+    state.remove_peer(&peer_a);
+    let result = state.evaluate_parent(&HashMap::new());
+    assert_eq!(result, Some(peer_b)); // mandatory switch
+}
+
+#[test]
+fn test_heterogeneous_7node_avoids_bottleneck() {
+    // 7-node topology simulating a mixed fiber/LoRa network:
+    //
+    //   0 (root)
+    //   ├── 1 (fiber, cost 1.01) — depth 1
+    //   │   ├── 3 (fiber, cost 1.01) — depth 2
+    //   │   └── 4 (fiber, cost 1.01) — depth 2
+    //   ├── 2 (LoRa, cost 6.0)  — depth 1
+    //   │   └── 5 (fiber, cost 1.01) — depth 2 (inherits LoRa bottleneck!)
+    //   └── 6 (wifi, cost 1.07) — depth 1
+    //
+    // Node 5 is connected to both node 2 (LoRa parent, depth 1) and
+    // node 1 (fiber, depth 1). Without cost-awareness, node 5 could
+    // pick node 2 as parent (both at depth 1, tiebreak by addr).
+    // With cost-awareness, node 5 should pick node 1 (eff 2.01) over
+    // node 2 (eff 7.0).
+
+    let root = make_node_addr(0);
+
+    // Test from node 5's perspective
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer1 = make_node_addr(1); // fiber peer at depth 1
+    let peer2 = make_node_addr(2); // LoRa peer at depth 1
+
+    // Both peers reach root 0 at depth 1
+    state.update_peer(
+        ParentDeclaration::new(peer1, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer2, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    // Without costs (all 1.0): picks peer 1 (smaller addr) — correct by luck
+    let result_no_cost = state.evaluate_parent(&HashMap::new());
+    assert_eq!(result_no_cost, Some(peer1));
+
+    // With costs: fiber (1.01) vs LoRa (6.0) — fiber wins definitively
+    let costs = make_costs(&[(1, 1.01), (2, 6.0)]);
+    let result_with_cost = state.evaluate_parent(&costs);
+    assert_eq!(result_with_cost, Some(peer1));
+
+    // Now test the critical case: node 5 currently has LoRa parent (peer 2).
+    // Even without hysteresis, it should want to switch to fiber (peer 1).
+    state.set_parent(peer2, 1, 1000);
+    state.recompute_coords();
+    assert_eq!(state.my_coords().depth(), 2); // depth 2 through LoRa peer
+
+    let result_switch = state.evaluate_parent(&costs);
+    assert_eq!(result_switch, Some(peer1)); // switches away from LoRa bottleneck
+
+    // With hysteresis enabled, still switches because the cost difference is large
+    state.set_parent_hysteresis(0.2);
+    // current_parent_eff = 1 + 6.0 = 7.0, best_eff = 1 + 1.01 = 2.01
+    // threshold = 7.0 * 0.8 = 5.6, 2.01 < 5.6 → switch
+    let result_hyst = state.evaluate_parent(&costs);
+    assert_eq!(result_hyst, Some(peer1));
+}
+
+// =====================================================================
+// Cost degradation tests (periodic re-evaluation scenarios)
+// =====================================================================
+//
+// These test evaluate_parent() with changing cost maps, validating the
+// scenarios that periodic re-evaluation is designed to catch: link
+// quality changes after the tree has stabilized.
+
+#[test]
+fn test_cost_degradation_triggers_switch() {
+    // Node 5 has two peers at depth 1. Initially both have similar costs
+    // (both fiber). After stabilization, peer A's link degrades (becomes
+    // LoRa-like). Re-evaluation with updated costs should trigger a switch.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+    state.set_parent_hysteresis(0.2);
+
+    let peer_a = make_node_addr(1);
+    let peer_b = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer_b, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    // Initial: both fiber-like costs. Node picks peer_a (smaller addr).
+    let initial_costs = make_costs(&[(1, 1.05), (2, 1.08)]);
+    let result = state.evaluate_parent(&initial_costs);
+    assert_eq!(result, Some(peer_a));
+
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    // Verify stable: no switch with same costs
+    let result = state.evaluate_parent(&initial_costs);
+    assert_eq!(result, None);
+
+    // Peer A's link degrades significantly (LoRa-like latency + loss)
+    // current_parent_eff = 1 + 6.0 = 7.0
+    // best_eff = 1 + 1.08 = 2.08
+    // threshold = 7.0 * 0.8 = 5.6, 2.08 < 5.6 → switch
+    let degraded_costs = make_costs(&[(1, 6.0), (2, 1.08)]);
+    let result = state.evaluate_parent(&degraded_costs);
+    assert_eq!(result, Some(peer_b));
+}
+
+#[test]
+fn test_cost_improvement_within_hysteresis_no_switch() {
+    // Node 5 has parent peer_a. Peer_b's cost improves slightly but
+    // stays within the hysteresis band. Re-evaluation should not switch.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+    state.set_parent_hysteresis(0.2);
+
+    let peer_a = make_node_addr(1);
+    let peer_b = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer_b, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    // Peer B slightly better: cost 1.5 vs peer A cost 2.0
+    // current_parent_eff = 1 + 2.0 = 3.0
+    // best_eff = 1 + 1.5 = 2.5
+    // threshold = 3.0 * 0.8 = 2.4, 2.5 > 2.4 → no switch
+    let costs = make_costs(&[(1, 2.0), (2, 1.5)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_single_peer_no_reeval_benefit() {
+    // With only one peer, evaluate_parent should select it initially,
+    // but once it's our parent, re-evaluation returns None regardless
+    // of cost changes (no alternative exists).
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer_a = make_node_addr(1);
+    let root = make_node_addr(0);
+
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+
+    // Initial selection: picks the only peer
+    let costs = make_costs(&[(1, 1.05)]);
+    let result = state.evaluate_parent(&costs);
+    assert_eq!(result, Some(peer_a));
+
+    state.set_parent(peer_a, 1, 1000);
+    state.recompute_coords();
+
+    // Even with terrible cost, no switch (no alternative)
+    let bad_costs = make_costs(&[(1, 50.0)]);
+    let result = state.evaluate_parent(&bad_costs);
+    assert_eq!(result, None);
 }

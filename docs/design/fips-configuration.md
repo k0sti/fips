@@ -148,7 +148,9 @@ Controls tree construction and parent selection.
 | Parameter                              | Type  | Default | Description                                      |
 |----------------------------------------|-------|---------|--------------------------------------------------|
 | `node.tree.announce_min_interval_ms`   | u64   | `500`   | Per-peer TreeAnnounce rate limit                 |
-| `node.tree.parent_switch_threshold`    | usize | `1`     | Min depth improvement required to switch parents |
+| `node.tree.parent_hysteresis`          | f64   | `0.2`   | Cost improvement fraction required for same-root parent switch (0.0–1.0) |
+| `node.tree.hold_down_secs`             | u64   | `30`    | Suppress non-mandatory re-evaluation after parent switch |
+| `node.tree.reeval_interval_secs`       | u64   | `60`    | Periodic cost-based parent re-evaluation interval (0 = disabled) |
 
 ### Bloom Filter (`node.bloom.*`)
 
@@ -346,7 +348,9 @@ node:
     recent_expiry_secs: 10
   tree:
     announce_min_interval_ms: 500
-    parent_switch_threshold: 1
+    parent_hysteresis: 0.2              # cost improvement fraction for parent switch
+    hold_down_secs: 30                  # suppress re-evaluation after switch
+    reeval_interval_secs: 60            # periodic cost-based re-evaluation (0 = disabled)
   bloom:
     update_debounce_ms: 500
   session:
