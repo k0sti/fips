@@ -731,7 +731,14 @@ impl Node {
                 "CoordsRequired response rate-limited, skipping standalone CoordsWarmup");
         }
 
-        self.maybe_initiate_lookup(&msg.dest_addr).await;
+        // Only trigger discovery if we have the target's identity cached —
+        // otherwise we can't verify the LookupResponse proof.
+        if self.has_cached_identity(&msg.dest_addr) {
+            self.maybe_initiate_lookup(&msg.dest_addr).await;
+        } else {
+            debug!(dest = %msg.dest_addr,
+                "Skipping discovery after CoordsRequired: no cached identity for target");
+        }
 
         // Reset coords warmup counter so the next N packets also include
         // COORDS_PRESENT, re-warming transit caches along the path.
@@ -783,8 +790,16 @@ impl Node {
         // Invalidate stale cached coordinates
         self.coord_cache.remove(&msg.dest_addr);
 
-        // Trigger re-discovery to get fresh coordinates
-        self.maybe_initiate_lookup(&msg.dest_addr).await;
+        // Trigger re-discovery to get fresh coordinates, but only if we have
+        // the target's identity cached — otherwise we can't verify the
+        // LookupResponse proof. This avoids a race when the XK responder
+        // receives PathBroken before msg3 completes (identity unknown).
+        if self.has_cached_identity(&msg.dest_addr) {
+            self.maybe_initiate_lookup(&msg.dest_addr).await;
+        } else {
+            debug!(dest = %msg.dest_addr,
+                "Skipping discovery after PathBroken: no cached identity for target");
+        }
 
         // Reset coords warmup counter so the next N packets include
         // COORDS_PRESENT, re-warming transit caches along the new path.

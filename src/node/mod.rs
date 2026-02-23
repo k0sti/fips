@@ -963,6 +963,13 @@ impl Node {
         }
     }
 
+    /// Check if a node's identity is in the cache (without LRU touch).
+    pub(crate) fn has_cached_identity(&self, addr: &NodeAddr) -> bool {
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&addr.as_bytes()[0..15]);
+        self.identity_cache.contains_key(&prefix)
+    }
+
     /// Number of identity cache entries.
     pub fn identity_cache_len(&self) -> usize {
         self.identity_cache.len()

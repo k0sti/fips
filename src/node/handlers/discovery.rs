@@ -7,7 +7,7 @@
 use crate::node::{Node, RecentRequest};
 use crate::protocol::{LookupRequest, LookupResponse};
 use crate::{NodeAddr, PeerIdentity};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, trace, warn};
 
 impl Node {
     /// Handle an incoming LookupRequest from a peer.
@@ -153,10 +153,10 @@ impl Node {
             let target_pubkey = match self.lookup_by_fips_prefix(&prefix) {
                 Some((_addr, pubkey)) => pubkey,
                 None => {
-                    error!(
+                    warn!(
                         request_id = response.request_id,
                         target = %self.peer_display_name(&target),
-                        "identity_cache miss for lookup target — this is a bug"
+                        "identity_cache miss for lookup target, cannot verify proof"
                     );
                     return;
                 }
