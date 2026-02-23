@@ -1,5 +1,6 @@
 //! Encrypted frame handling (hot path).
 
+use crate::noise::NoiseError;
 use crate::node::Node;
 use crate::node::wire::{EncryptedHeader, strip_inner_header, FLAG_CE, FLAG_SP};
 use crate::transport::ReceivedPacket;
@@ -63,12 +64,41 @@ impl Node {
         ) {
             Ok(p) => p,
             Err(e) => {
-                debug!(
-                    peer = %self.peer_display_name(&node_addr),
-                    counter = header.counter,
-                    error = %e,
-                    "Decryption failed"
-                );
+                if matches!(e, NoiseError::ReplayDetected(_)) {
+                    // Suppress repeated replay detections during link transitions.
+                    // Re-borrow peer mutably for suppression counter update.
+                    if let Some(peer) = self.peers.get_mut(&node_addr) {
+                        let count = peer.increment_replay_suppressed();
+                        if count <= 3 {
+                            debug!(
+                                peer = %self.peer_display_name(&node_addr),
+                                counter = header.counter,
+                                error = %e,
+                                "Decryption failed"
+                            );
+                        } else if count == 4 {
+                            debug!(
+                                peer = %self.peer_display_name(&node_addr),
+                                "Suppressing further replay detection messages"
+                            );
+                        }
+                        // count > 4: silently suppress
+                    } else {
+                        debug!(
+                            peer = %self.peer_display_name(&node_addr),
+                            counter = header.counter,
+                            error = %e,
+                            "Decryption failed"
+                        );
+                    }
+                } else {
+                    debug!(
+                        peer = %self.peer_display_name(&node_addr),
+                        counter = header.counter,
+                        error = %e,
+                        "Decryption failed"
+                    );
+                }
                 return;
             }
         };

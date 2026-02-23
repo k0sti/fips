@@ -143,6 +143,10 @@ pub struct ActivePeer {
     /// Wire-format msg2 for resend on duplicate msg1 (responder only).
     /// Cleared after the handshake timeout window.
     handshake_msg2: Option<Vec<u8>>,
+
+    // === Replay Detection Suppression ===
+    /// Number of replay detections suppressed since last session reset.
+    replay_suppressed_count: u32,
 }
 
 impl ActivePeer {
@@ -177,6 +181,7 @@ impl ActivePeer {
             mmp: None,
             last_heartbeat_sent: None,
             handshake_msg2: None,
+            replay_suppressed_count: 0,
         }
     }
 
@@ -240,6 +245,7 @@ impl ActivePeer {
             mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
             last_heartbeat_sent: None,
             handshake_msg2: None,
+            replay_suppressed_count: 0,
         }
     }
 
@@ -339,12 +345,14 @@ impl ActivePeer {
     /// This replaces the entire session so both nodes use matching keys.
     ///
     /// Returns the old our_index so the caller can update peers_by_index.
+    /// Also resets the replay suppression counter since the session changed.
     pub fn replace_session(
         &mut self,
         new_session: NoiseSession,
         new_our_index: SessionIndex,
         new_their_index: SessionIndex,
     ) -> Option<SessionIndex> {
+        self.reset_replay_suppressed();
         let old_our_index = self.our_index;
         self.noise_session = Some(new_session);
         self.our_index = Some(new_our_index);
@@ -385,6 +393,26 @@ impl ActivePeer {
     /// Clear stored msg2 (no longer needed after handshake window).
     pub fn clear_handshake_msg2(&mut self) {
         self.handshake_msg2 = None;
+    }
+
+    // === Replay Detection Suppression ===
+
+    /// Increment replay suppression counter. Returns the new count.
+    pub fn increment_replay_suppressed(&mut self) -> u32 {
+        self.replay_suppressed_count += 1;
+        self.replay_suppressed_count
+    }
+
+    /// Reset replay suppression counter, returning previous count.
+    pub fn reset_replay_suppressed(&mut self) -> u32 {
+        let count = self.replay_suppressed_count;
+        self.replay_suppressed_count = 0;
+        count
+    }
+
+    /// Current replay suppression count.
+    pub fn replay_suppressed_count(&self) -> u32 {
+        self.replay_suppressed_count
     }
 
     // === Epoch Accessors ===
@@ -793,5 +821,32 @@ mod tests {
 
         assert_eq!(peer.link_stats().packets_sent, 1);
         assert_eq!(peer.link_stats().packets_recv, 1);
+    }
+
+    #[test]
+    fn test_replay_suppression_counter() {
+        let identity = make_peer_identity();
+        let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+
+        // Initial count is zero
+        assert_eq!(peer.replay_suppressed_count(), 0);
+
+        // Increment returns new count
+        assert_eq!(peer.increment_replay_suppressed(), 1);
+        assert_eq!(peer.increment_replay_suppressed(), 2);
+        assert_eq!(peer.increment_replay_suppressed(), 3);
+        assert_eq!(peer.replay_suppressed_count(), 3);
+
+        // Reset returns previous count and zeroes it
+        assert_eq!(peer.reset_replay_suppressed(), 3);
+        assert_eq!(peer.replay_suppressed_count(), 0);
+
+        // Can increment again after reset
+        assert_eq!(peer.increment_replay_suppressed(), 1);
+        assert_eq!(peer.replay_suppressed_count(), 1);
+
+        // Reset when zero returns zero
+        peer.reset_replay_suppressed();
+        assert_eq!(peer.reset_replay_suppressed(), 0);
     }
 }

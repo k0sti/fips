@@ -98,6 +98,16 @@ impl Node {
             }
         };
 
+        // Log suppressed replay detection summary before teardown
+        let suppressed = peer.replay_suppressed_count();
+        if suppressed > 0 {
+            debug!(
+                peer = %self.peer_display_name(node_addr),
+                count = suppressed,
+                "Suppressed replay detections during link transition"
+            );
+        }
+
         // MMP teardown log (before we drop the peer)
         if let Some(mmp) = peer.mmp() {
             let name = self.peer_aliases.get(node_addr)

@@ -450,6 +450,7 @@ impl Node {
                     };
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                    let suppressed = peer.replay_suppressed_count();
                     let old_our_index = peer.replace_session(
                         outbound_session,
                         outbound_our_index,
@@ -466,6 +467,14 @@ impl Node {
                         (transport_id, outbound_our_index.as_u32()),
                         peer_node_addr,
                     );
+
+                    if suppressed > 0 {
+                        debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            count = suppressed,
+                            "Suppressed replay detections during link transition"
+                        );
+                    }
 
                     info!(
                         peer = %self.peer_display_name(&peer_node_addr),
