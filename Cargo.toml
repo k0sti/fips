@@ -13,7 +13,7 @@ secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
 sha2 = "0.10"
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
-rand = "0.8"
+rand = "0.10.0"
 thiserror = "2.0"
 bech32 = "0.11"
 serde = { version = "1.0", features = ["derive"] }
@@ -24,22 +24,18 @@ hex = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tun = { version = "0.7", features = ["async"] }
+tun = { version = "0.8.5", features = ["async"] }
 libc = "0.2"
-rtnetlink = "0.14"
+rtnetlink = "0.20.0"
 tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time"] }
 futures = "0.3"
-simple-dns = "0.9"
-socket2 = { version = "0.5", features = ["all"] }
+simple-dns = "0.11.2"
+socket2 = { version = "0.6.2", features = ["all"] }
 
 [dev-dependencies]
 tempfile = "3.15"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [[bin]]
 name = "fipsctl"
 path = "src/bin/fipsctl.rs"
-
-[[bench]]
-name = "bloom"
-harness = false

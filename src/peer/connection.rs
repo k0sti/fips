@@ -583,7 +583,7 @@ impl fmt::Debug for PeerConnection {
 mod tests {
     use super::*;
     use crate::Identity;
-    use rand::RngCore;
+    use rand::Rng;
 
     fn make_peer_identity() -> PeerIdentity {
         let identity = Identity::generate();
@@ -597,7 +597,7 @@ mod tests {
 
     fn make_epoch() -> [u8; 8] {
         let mut epoch = [0u8; 8];
-        rand::thread_rng().fill_bytes(&mut epoch);
+        rand::rng().fill_bytes(&mut epoch);
         epoch
     }
 

@@ -19,7 +19,7 @@
 //! [0x00][receiver_idx:4 LE][counter:8 LE][ciphertext+tag]
 //! ```
 
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -105,10 +105,10 @@ impl IndexAllocator {
     /// currently in use. Returns error if allocation fails after
     /// max_attempts tries (indicates too many active sessions).
     pub fn allocate(&mut self) -> Result<SessionIndex, IndexError> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..self.max_attempts {
-            let candidate = rng.r#gen::<u32>();
+            let candidate = rng.random::<u32>();
             if !self.in_use.contains(&candidate) {
                 self.in_use.insert(candidate);
                 return Ok(SessionIndex(candidate));

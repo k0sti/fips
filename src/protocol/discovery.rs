@@ -61,8 +61,8 @@ impl LookupRequest {
         ttl: u8,
         min_mtu: u16,
     ) -> Self {
-        use rand::Rng;
-        let request_id = rand::thread_rng().r#gen();
+        use rand::RngExt;
+        let request_id = rand::rng().random();
         Self::new(request_id, target, origin, origin_coords, ttl, min_mtu)
     }
 
@@ -428,7 +428,11 @@ mod tests {
 
         // Create a dummy signature for testing
         let secp = Secp256k1::new();
-        let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
+        let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
+            .expect("32 random bytes is a valid secret key");
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
         let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
         use sha2::Digest;
         let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();
@@ -457,7 +461,11 @@ mod tests {
         let coords = make_coords(&[42, 1, 0]);
 
         let secp = Secp256k1::new();
-        let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
+        let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
+            .expect("32 random bytes is a valid secret key");
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
         let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
         use sha2::Digest;
         let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();

@@ -6,7 +6,7 @@
 
 use crate::{FipsAddress, TunConfig};
 use futures::TryStreamExt;
-use rtnetlink::{new_connection, Handle};
+use rtnetlink::{new_connection, Handle, LinkUnspec, RouteMessageBuilder};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::Ipv6Addr;
@@ -443,22 +443,26 @@ async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(),
     // Set MTU
     handle
         .link()
-        .set(index)
-        .mtu(mtu as u32)
+        .change(LinkUnspec::new_with_index(index).mtu(mtu as u32).build())
         .execute()
         .await?;
 
     // Bring interface up
-    handle.link().set(index).up().execute().await?;
+    handle
+        .link()
+        .change(LinkUnspec::new_with_index(index).up().build())
+        .execute()
+        .await?;
 
     // Add route for fd00::/8 (FIPS address space) via this interface
     let fd_prefix: Ipv6Addr = "fd00::".parse().unwrap();
-    handle
-        .route()
-        .add()
-        .v6()
+    let route = RouteMessageBuilder::<Ipv6Addr>::new()
         .destination_prefix(fd_prefix, 8)
         .output_interface(index)
+        .build();
+    handle
+        .route()
+        .add(route)
         .execute()
         .await
         .map_err(|e| TunError::Configure(format!("failed to add fd00::/8 route: {}", e)))?;

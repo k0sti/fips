@@ -499,7 +499,7 @@ async fn drain_to_quiescence(nodes: &mut [TestNode]) {
 #[tokio::test]
 async fn test_session_100_nodes() {
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use std::sync::mpsc;
     use std::time::Instant;
 
@@ -533,9 +533,9 @@ async fn test_session_100_nodes() {
     let mut rng = StdRng::seed_from_u64(SEED + 1);
     let mut session_pairs: Vec<(usize, usize)> = Vec::with_capacity(NUM_NODES);
     for src in 0..NUM_NODES {
-        let mut dst = rng.gen_range(0..NUM_NODES);
+        let mut dst = rng.random_range(0..NUM_NODES);
         while dst == src {
-            dst = rng.gen_range(0..NUM_NODES);
+            dst = rng.random_range(0..NUM_NODES);
         }
         session_pairs.push((src, dst));
     }
@@ -1192,10 +1192,10 @@ fn make_noise_session(
 
     // Set epochs for both sides (required for handshake message encryption)
     let mut init_epoch = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut init_epoch);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut init_epoch);
     initiator.set_local_epoch(init_epoch);
     let mut resp_epoch = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut resp_epoch);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
     responder.set_local_epoch(resp_epoch);
 
     let msg1 = initiator.write_message_1().unwrap();

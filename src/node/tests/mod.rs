@@ -56,7 +56,7 @@ pub(super) fn make_completed_connection(
     let mut resp_conn = PeerConnection::inbound(LinkId::new(999), current_time_ms);
     let peer_keypair = peer_identity_full.keypair();
     let mut resp_epoch = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut resp_epoch);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
     let msg2 = resp_conn
         .receive_handshake_init(peer_keypair, resp_epoch, &msg1, current_time_ms)
         .unwrap();

@@ -316,7 +316,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
 /// then adds extra edges up to the target count.
 pub(super) fn generate_random_edges(n: usize, target_edges: usize, seed: u64) -> Vec<(usize, usize)> {
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     let mut rng = StdRng::seed_from_u64(seed);
     let mut edges = Vec::new();
@@ -328,11 +328,11 @@ pub(super) fn generate_random_edges(n: usize, target_edges: usize, seed: u64) ->
     let mut connected_count = 1;
 
     while connected_count < n {
-        let from = rng.gen_range(0..n);
+        let from = rng.random_range(0..n);
         if !connected[from] {
             continue;
         }
-        let to = rng.gen_range(0..n);
+        let to = rng.random_range(0..n);
         if connected[to] || from == to {
             continue;
         }
@@ -347,8 +347,8 @@ pub(super) fn generate_random_edges(n: usize, target_edges: usize, seed: u64) ->
     // Add random extra edges up to target
     let mut attempts = 0;
     while edges.len() < target_edges && attempts < target_edges * 10 {
-        let a = rng.gen_range(0..n);
-        let b = rng.gen_range(0..n);
+        let a = rng.random_range(0..n);
+        let b = rng.random_range(0..n);
         attempts += 1;
         if a == b || adj[a][b] {
             continue;

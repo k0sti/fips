@@ -20,9 +20,11 @@ pub struct Identity {
 impl Identity {
     /// Create a new random identity.
     pub fn generate() -> Self {
-        let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
-        Self::from_keypair(keypair)
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
+        let secret_key = SecretKey::from_slice(&secret_bytes)
+            .expect("32 random bytes is a valid secret key");
+        Self::from_secret_key(secret_key)
     }
 
     /// Create an identity from an existing keypair.

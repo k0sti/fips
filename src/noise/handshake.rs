@@ -5,7 +5,7 @@ use super::{
     XK_HANDSHAKE_MSG1_SIZE, XK_HANDSHAKE_MSG2_SIZE, XK_HANDSHAKE_MSG3_SIZE,
 };
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::Rng;
 use secp256k1::{ecdh::shared_secret_point, Keypair, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -292,7 +292,7 @@ impl HandshakeState {
 
     /// Generate ephemeral keypair.
     fn generate_ephemeral(&mut self) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut secret_bytes = [0u8; 32];
         rng.fill_bytes(&mut secret_bytes);
 
