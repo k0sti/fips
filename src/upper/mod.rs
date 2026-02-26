@@ -6,8 +6,13 @@
 //! signaling and neighbor discovery).
 
 pub mod config;
+#[cfg(feature = "dns")]
 pub mod dns;
+#[cfg(feature = "tun-device")]
 pub mod icmp;
+#[cfg(feature = "tun-device")]
 pub mod icmp_rate_limit;
+#[cfg(feature = "tun-device")]
 pub mod tcp_mss;
+#[cfg(feature = "tun-device")]
 pub mod tun;

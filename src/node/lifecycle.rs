@@ -5,6 +5,7 @@ use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
 use crate::transport::{packet_channel, Link, LinkDirection, TransportAddr, TransportId};
 use crate::upper::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
+#[allow(unused_imports)]
 use crate::node::wire::build_msg1;
 use crate::{NodeAddr, PeerIdentity};
 use std::thread;
@@ -426,6 +427,7 @@ impl Node {
         }
 
         // Initialize DNS responder (independent of TUN)
+        #[cfg(feature = "dns")]
         if self.config.dns.enabled {
             let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
             match tokio::net::UdpSocket::bind(&bind).await {
@@ -464,6 +466,7 @@ impl Node {
         info!(state = %self.state, "Node stopping");
 
         // Stop DNS responder
+        #[cfg(feature = "dns")]
         if let Some(handle) = self.dns_task.take() {
             handle.abort();
             debug!("DNS responder stopped");

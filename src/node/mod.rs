@@ -28,7 +28,7 @@ use crate::transport::{
     Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ethernet"))]
 use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
@@ -314,8 +314,10 @@ pub struct Node {
 
     // === DNS Responder ===
     /// Receiver for resolved identities from the DNS responder.
+    #[cfg(feature = "dns")]
     dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
     /// DNS responder task handle.
+    #[cfg(feature = "dns")]
     dns_task: Option<tokio::task::JoinHandle<()>>,
 
     // === Index-Based Session Dispatch ===
@@ -438,7 +440,9 @@ impl Node {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            #[cfg(feature = "dns")]
             dns_identity_rx: None,
+            #[cfg(feature = "dns")]
             dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
@@ -531,7 +535,9 @@ impl Node {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            #[cfg(feature = "dns")]
             dns_identity_rx: None,
+            #[cfg(feature = "dns")]
             dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
@@ -579,7 +585,7 @@ impl Node {
         }
 
         // Create Ethernet transport instances
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "ethernet"))]
         {
             let eth_instances: Vec<_> = self
                 .config
@@ -645,11 +651,11 @@ impl Node {
             })?;
 
         // Parse the MAC address
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "ethernet"))]
         let mac = crate::transport::ethernet::parse_mac_string(mac_str).map_err(|e| {
             NodeError::NoTransportForType(format!("invalid MAC in '{}': {}", addr_str, e))
         })?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "ethernet")))]
         let mac: [u8; 6] = {
             let _ = mac_str;
             return Err(NodeError::NoTransportForType(

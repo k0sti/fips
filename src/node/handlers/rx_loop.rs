@@ -1,6 +1,8 @@
 //! RX event loop and packet dispatch.
 
+#[cfg(feature = "control")]
 use crate::control::ControlSocket;
+#[cfg(feature = "control")]
 use crate::control::queries;
 use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
@@ -45,6 +47,7 @@ impl Node {
 
         // Take the DNS identity receiver, or create a dummy channel (when DNS
         // is disabled). Same pattern as TUN outbound.
+        #[cfg(feature = "dns")]
         let (mut dns_identity_rx, _dns_guard) = match self.dns_identity_rx.take() {
             Some(rx) => (rx, None),
             None => {
@@ -52,30 +55,45 @@ impl Node {
                 (rx, Some(tx))
             }
         };
+        #[cfg(not(feature = "dns"))]
+        let (mut dns_identity_rx, _dns_guard) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+            (rx, Some(tx))
+        };
 
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.node.tick_interval_secs));
 
         // Set up control socket channel
+        #[cfg(feature = "control")]
         let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<
             crate::control::ControlMessage,
         >(32);
 
-        if self.config.node.control.enabled {
-            let config = self.config.node.control.clone();
-            let tx = control_tx.clone();
-            tokio::spawn(async move {
-                match ControlSocket::bind(&config) {
-                    Ok(socket) => {
-                        socket.accept_loop(tx).await;
+        #[cfg(feature = "control")]
+        {
+            if self.config.node.control.enabled {
+                let config = self.config.node.control.clone();
+                let tx = control_tx.clone();
+                tokio::spawn(async move {
+                    match ControlSocket::bind(&config) {
+                        Ok(socket) => {
+                            socket.accept_loop(tx).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to bind control socket");
+                        }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to bind control socket");
-                    }
-                }
-            });
+                });
+            }
+            // Drop unused sender to avoid keeping channel open if control is disabled
+            drop(control_tx);
         }
-        // Drop unused sender to avoid keeping channel open if control is disabled
-        drop(control_tx);
+
+        #[cfg(not(feature = "control"))]
+        let (mut control_rx, _control_guard) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+            (rx, Some(tx))
+        };
 
         info!("RX event loop started");
 
@@ -90,16 +108,23 @@ impl Node {
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {
                     self.handle_tun_outbound(ipv6_packet).await;
                 }
-                Some(identity) = dns_identity_rx.recv() => {
-                    debug!(
-                        node_addr = %identity.node_addr,
-                        "Registering identity from DNS resolution"
-                    );
-                    self.register_identity(identity.node_addr, identity.pubkey);
+                Some(_identity) = dns_identity_rx.recv() => {
+                    #[cfg(feature = "dns")]
+                    {
+                        debug!(
+                            node_addr = %_identity.node_addr,
+                            "Registering identity from DNS resolution"
+                        );
+                        self.register_identity(_identity.node_addr, _identity.pubkey);
+                    }
                 }
-                Some((request, response_tx)) = control_rx.recv() => {
-                    let response = queries::dispatch(self, &request.command);
-                    let _ = response_tx.send(response);
+                Some(_control_msg) = control_rx.recv() => {
+                    #[cfg(feature = "control")]
+                    {
+                        let (request, response_tx) = _control_msg;
+                        let response = queries::dispatch(self, &request.command);
+                        let _ = response_tx.send(response);
+                    }
                 }
                 _ = tick.tick() => {
                     self.check_timeouts();

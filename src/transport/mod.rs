@@ -6,12 +6,12 @@
 
 pub mod udp;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ethernet"))]
 pub mod ethernet;
 
 use secp256k1::XOnlyPublicKey;
 use udp::UdpTransport;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ethernet"))]
 use ethernet::EthernetTransport;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -792,7 +792,7 @@ pub enum TransportHandle {
     /// UDP/IP transport.
     Udp(UdpTransport),
     /// Raw Ethernet transport.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "ethernet"))]
     Ethernet(EthernetTransport),
 }
 
@@ -801,7 +801,7 @@ impl TransportHandle {
     pub async fn start(&mut self) -> Result<(), TransportError> {
         match self {
             TransportHandle::Udp(t) => t.start_async().await,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.start_async().await,
         }
     }
@@ -810,7 +810,7 @@ impl TransportHandle {
     pub async fn stop(&mut self) -> Result<(), TransportError> {
         match self {
             TransportHandle::Udp(t) => t.stop_async().await,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.stop_async().await,
         }
     }
@@ -819,7 +819,7 @@ impl TransportHandle {
     pub async fn send(&self, addr: &TransportAddr, data: &[u8]) -> Result<usize, TransportError> {
         match self {
             TransportHandle::Udp(t) => t.send_async(addr, data).await,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.send_async(addr, data).await,
         }
     }
@@ -828,7 +828,7 @@ impl TransportHandle {
     pub fn transport_id(&self) -> TransportId {
         match self {
             TransportHandle::Udp(t) => t.transport_id(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.transport_id(),
         }
     }
@@ -837,7 +837,7 @@ impl TransportHandle {
     pub fn name(&self) -> Option<&str> {
         match self {
             TransportHandle::Udp(t) => t.name(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.name(),
         }
     }
@@ -846,7 +846,7 @@ impl TransportHandle {
     pub fn transport_type(&self) -> &TransportType {
         match self {
             TransportHandle::Udp(t) => t.transport_type(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.transport_type(),
         }
     }
@@ -855,7 +855,7 @@ impl TransportHandle {
     pub fn state(&self) -> TransportState {
         match self {
             TransportHandle::Udp(t) => t.state(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.state(),
         }
     }
@@ -864,7 +864,7 @@ impl TransportHandle {
     pub fn mtu(&self) -> u16 {
         match self {
             TransportHandle::Udp(t) => t.mtu(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.mtu(),
         }
     }
@@ -876,7 +876,7 @@ impl TransportHandle {
     pub fn link_mtu(&self, addr: &TransportAddr) -> u16 {
         match self {
             TransportHandle::Udp(t) => t.link_mtu(addr),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.link_mtu(addr),
         }
     }
@@ -885,7 +885,7 @@ impl TransportHandle {
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         match self {
             TransportHandle::Udp(t) => t.local_addr(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(_) => None,
         }
     }
@@ -894,7 +894,7 @@ impl TransportHandle {
     pub fn interface_name(&self) -> Option<&str> {
         match self {
             TransportHandle::Udp(_) => None,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => Some(t.interface_name()),
         }
     }
@@ -903,7 +903,7 @@ impl TransportHandle {
     pub fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> {
         match self {
             TransportHandle::Udp(t) => t.discover(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.discover(),
         }
     }
@@ -912,7 +912,7 @@ impl TransportHandle {
     pub fn auto_connect(&self) -> bool {
         match self {
             TransportHandle::Udp(t) => t.auto_connect(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.auto_connect(),
         }
     }
@@ -921,7 +921,7 @@ impl TransportHandle {
     pub fn accept_connections(&self) -> bool {
         match self {
             TransportHandle::Udp(t) => t.accept_connections(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ethernet"))]
             TransportHandle::Ethernet(t) => t.accept_connections(),
         }
     }

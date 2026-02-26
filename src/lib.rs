@@ -6,11 +6,13 @@
 pub mod bloom;
 pub mod cache;
 pub mod config;
+#[cfg(feature = "control")]
 pub mod control;
 pub mod identity;
 pub mod mmp;
 pub mod noise;
 pub mod utils;
+#[cfg(feature = "tun-device")]
 pub mod node;
 pub mod peer;
 pub mod protocol;
@@ -59,5 +61,5 @@ pub use peer::{
 };
 
 // Re-export node types
+#[cfg(feature = "tun-device")]
 pub use node::{Node, NodeError, NodeState};
-

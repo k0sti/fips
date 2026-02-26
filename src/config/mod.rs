@@ -148,12 +148,14 @@ impl Config {
         // System config (lowest priority)
         paths.push(PathBuf::from("/etc/fips").join(CONFIG_FILENAME));
 
-        // User config directory
+        // User config directory (requires dirs crate)
+        #[cfg(feature = "cli")]
         if let Some(config_dir) = dirs::config_dir() {
             paths.push(config_dir.join("fips").join(CONFIG_FILENAME));
         }
 
-        // Home directory (legacy location)
+        // Home directory (legacy location, requires dirs crate)
+        #[cfg(feature = "cli")]
         if let Some(home_dir) = dirs::home_dir() {
             paths.push(home_dir.join(".fips.yaml"));
         }
