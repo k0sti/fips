@@ -739,9 +739,12 @@ for wireless mesh routing and is used in protocols including
 and [Babel](https://www.irif.fr/~jch/software/babel/). FIPS computes ETX
 per-link from MMP loss measurements for future use in candidate ranking.
 
-The CE (Congestion Experienced) echo flag reserves space for
+The CE (Congestion Experienced) echo flag provides hop-by-hop
 [ECN](https://en.wikipedia.org/wiki/Explicit_Congestion_Notification)
-signaling, following the TCP/IP ECN echo pattern (RFC 3168).
+signaling, following the TCP/IP ECN echo pattern (RFC 3168). Transit nodes
+detect congestion via MMP loss/ETX metrics or kernel buffer drops and set
+the CE flag on forwarded frames; destination nodes mark ECN-capable IPv6
+packets accordingly.
 
 ### Cryptographic Primitives
 

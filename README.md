@@ -30,7 +30,7 @@ sessions across the mesh.
 
 - **Self-organizing mesh routing** — spanning tree coordinates and bloom
   filter candidate selection, no global routing tables
-- **Multi-transport** — UDP/IP overlay today; designed for Ethernet,
+- **Multi-transport** — UDP, TCP, and Ethernet today; designed for
   Bluetooth, serial, radio, and Tor
 - **Noise encryption** — hop-by-hop link encryption plus independent
   end-to-end session encryption
@@ -100,7 +100,10 @@ peers:                                 # peers:
 ```
 
 The `nsec` field accepts bech32 (`nsec1...`) or hex-encoded secret keys.
-Omit it entirely for an ephemeral identity that changes each restart.
+Omit `nsec` for an ephemeral identity that changes each restart, or set
+`node.identity.persistent: true` to auto-generate and reuse a stable
+identity via key file (see
+[fips-configuration.md](docs/design/fips-configuration.md#identity-nodeidentity)).
 
 See [docs/design/fips-configuration.md](docs/design/fips-configuration.md) for
 the full configuration reference.
@@ -180,7 +183,7 @@ testing/      Docker-based integration test harnesses
 ## Status & Roadmap
 
 FIPS is at **v0.1.0 (alpha)**. The core protocol works end-to-end over
-UDP/IP overlays but has not been tested beyond small meshes.
+UDP, TCP, and Ethernet but has not been tested beyond small meshes.
 
 ### What works today
 

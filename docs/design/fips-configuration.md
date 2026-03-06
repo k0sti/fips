@@ -70,7 +70,19 @@ handle infrastructure concerns only.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.identity.nsec` | string | *(generate random)* | Hex-encoded secret key. If omitted, an ephemeral identity is generated on each start. |
+| `node.identity.nsec` | string | *(none)* | Secret key in nsec (bech32) or hex format. If omitted, behavior depends on `persistent`. |
+| `node.identity.persistent` | bool | `false` | Persist identity across restarts via key file. |
+
+Identity resolution follows a three-tier priority:
+
+1. **Explicit `nsec`** in config — always used when present, regardless of `persistent`
+2. **Persistent key file** — when `persistent: true` and no `nsec`, loads from `fips.key`
+   adjacent to the config file; if no key file exists, generates a new keypair and saves it
+3. **Ephemeral** — when `persistent: false` (default) and no `nsec`, generates a fresh
+   keypair on each start
+
+Key files (`fips.key` with mode 0600, `fips.pub` with mode 0644) are written adjacent
+to the highest-priority config file for operator visibility, even in ephemeral mode.
 
 ### General
 
@@ -442,7 +454,8 @@ The full YAML structure with all defaults:
 ```yaml
 node:
   identity:
-    nsec: null                       # hex secret key (null = generate ephemeral)
+    nsec: null                       # secret key in nsec or hex (null = depends on persistent)
+    persistent: false                # true = load/save fips.key; false = ephemeral each start
   leaf_only: false
   tick_interval_secs: 1
   base_rtt_ms: 100
