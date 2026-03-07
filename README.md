@@ -57,7 +57,7 @@ sessions across the mesh.
 ### Build
 
 ```
-git clone https://github.com/jmcorgan/fips.git
+git clone https://github.com/fips-network/fips.git
 cd fips
 cargo build --release
 ```
