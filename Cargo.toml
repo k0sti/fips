@@ -37,6 +37,30 @@ futures = "0.3"
 simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
 
+[package.metadata.deb]
+maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"
+copyright = "2026 Johnathan Corgan"
+license-file = ["LICENSE", "0"]
+section = "net"
+priority = "optional"
+depends = "libc6, systemd"
+extended-description = """\
+FIPS is a distributed, decentralized network routing protocol for mesh \
+nodes connecting over arbitrary transports including UDP, TCP, and Ethernet. \
+It provides encrypted peer-to-peer connectivity with automatic key management, \
+TUN-based virtual networking, and .fips DNS resolution."""
+maintainer-scripts = "packaging/debian/"
+assets = [
+    ["target/release/fips", "/usr/bin/", "755"],
+    ["target/release/fipsctl", "/usr/bin/", "755"],
+    ["target/release/fipstop", "/usr/bin/", "755"],
+    ["packaging/common/fips.yaml", "/etc/fips/fips.yaml", "600"],
+    ["packaging/debian/fips.service", "/lib/systemd/system/fips.service", "644"],
+    ["packaging/debian/fips-dns.service", "/lib/systemd/system/fips-dns.service", "644"],
+    ["packaging/debian/fips.tmpfiles", "/usr/lib/tmpfiles.d/fips.conf", "644"],
+]
+conf-files = ["/etc/fips/fips.yaml"]
+
 [dev-dependencies]
 tempfile = "3.15"
 criterion = { version = "0.8.2", features = ["html_reports"] }

@@ -1,0 +1,34 @@
+#!/bin/sh
+# FIPS post-install script for Debian/Ubuntu
+set -e
+
+case "$1" in
+    configure)
+        # Create fips system group for control socket access
+        if ! getent group fips >/dev/null 2>&1; then
+            groupadd --system fips
+        fi
+
+        # Ensure runtime directory exists with correct ownership
+        if [ -d /run/systemd/system ]; then
+            systemd-tmpfiles --create /usr/lib/tmpfiles.d/fips.conf 2>/dev/null || true
+        fi
+
+        # Reload systemd and enable services
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable fips.service 2>/dev/null || true
+            systemctl enable fips-dns.service 2>/dev/null || true
+
+            # On upgrade, restart services that were running before
+            if [ -n "$2" ]; then
+                systemctl start fips.service 2>/dev/null || true
+                systemctl start fips-dns.service 2>/dev/null || true
+            fi
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

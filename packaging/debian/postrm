@@ -1,0 +1,25 @@
+#!/bin/sh
+# FIPS post-removal script for Debian/Ubuntu
+set -e
+
+case "$1" in
+    purge)
+        # Remove configuration and identity keys
+        rm -rf /etc/fips/
+
+        # Remove tmpfiles.d entry
+        rm -f /usr/lib/tmpfiles.d/fips.conf
+
+        # Remove runtime directory
+        rm -rf /run/fips/
+
+        # Remove fips system group
+        if getent group fips >/dev/null 2>&1; then
+            groupdel fips 2>/dev/null || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
