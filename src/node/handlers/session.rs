@@ -897,13 +897,10 @@ impl Node {
             mmp.path_mtu.update_interval_from_srtt(srtt_ms);
         }
 
-        // Update reverse delivery ratio from our own receiver state
+        // Update reverse delivery ratio from our own receiver state, using per-interval deltas.
         let our_recv_packets = mmp.receiver.cumulative_packets_recv();
         let peer_highest = mmp.receiver.highest_counter();
-        if peer_highest > 0 {
-            let reverse_ratio = (our_recv_packets as f64) / (peer_highest as f64);
-            mmp.metrics.set_delivery_ratio_reverse(reverse_ratio);
-        }
+        mmp.metrics.update_reverse_delivery(our_recv_packets, peer_highest);
 
         trace!(
             src = %peer_name,

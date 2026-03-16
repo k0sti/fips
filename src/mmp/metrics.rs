@@ -45,6 +45,14 @@ pub struct MmpMetrics {
     prev_rr_reorder: u32,
     /// Time of previous ReceiverReport (for goodput rate computation).
     prev_rr_time: Option<Instant>,
+
+    // --- State for reverse delivery ratio delta computation ---
+    /// Previous reverse-side cumulative packets received (our receiver state).
+    prev_reverse_packets: u64,
+    /// Previous reverse-side highest counter (our receiver state).
+    prev_reverse_highest: u64,
+    /// Whether we have a previous reverse-side snapshot for delta computation.
+    has_prev_reverse: bool,
 }
 
 impl MmpMetrics {
@@ -61,6 +69,9 @@ impl MmpMetrics {
         self.prev_rr_reorder = 0;
         self.prev_rr_time = None;
         self.delivery_ratio_forward = 1.0;
+        self.prev_reverse_packets = 0;
+        self.prev_reverse_highest = 0;
+        self.has_prev_reverse = false;
         // Keep srtt, etx, trends, goodput_bps — they'll refresh from data
     }
 
@@ -82,6 +93,9 @@ impl MmpMetrics {
             prev_rr_ecn_ce: 0,
             prev_rr_reorder: 0,
             prev_rr_time: None,
+            prev_reverse_packets: 0,
+            prev_reverse_highest: 0,
+            has_prev_reverse: false,
         }
     }
 
@@ -168,11 +182,26 @@ impl MmpMetrics {
         !had_srtt && self.srtt.initialized()
     }
 
-    /// Update the reverse delivery ratio (from our own receiver state about the peer's traffic).
-    pub fn set_delivery_ratio_reverse(&mut self, ratio: f64) {
-        self.delivery_ratio_reverse = ratio.clamp(0.0, 1.0);
-        self.etx = compute_etx(self.delivery_ratio_forward, self.delivery_ratio_reverse);
-        self.etx_trend.update(self.etx);
+    /// Update the reverse delivery ratio from our own receiver state.
+    ///
+    /// Computes a per-interval delta (same as forward ratio) rather than
+    /// a lifetime cumulative ratio, so ETX responds to recent conditions.
+    pub fn update_reverse_delivery(&mut self, our_recv_packets: u64, peer_highest: u64) {
+        if self.has_prev_reverse {
+            let counter_span = peer_highest.saturating_sub(self.prev_reverse_highest);
+            let packets_delta = our_recv_packets.saturating_sub(self.prev_reverse_packets);
+
+            if counter_span > 0 {
+                let delivery = (packets_delta as f64) / (counter_span as f64);
+                self.delivery_ratio_reverse = delivery.clamp(0.0, 1.0);
+                self.etx = compute_etx(self.delivery_ratio_forward, self.delivery_ratio_reverse);
+                self.etx_trend.update(self.etx);
+            }
+        }
+
+        self.prev_reverse_packets = our_recv_packets;
+        self.prev_reverse_highest = peer_highest;
+        self.has_prev_reverse = true;
     }
 
     /// Current smoothed RTT in milliseconds, or `None` if not yet measured.
@@ -295,9 +324,15 @@ mod tests {
         let mut m = MmpMetrics::new();
         assert_eq!(m.etx, 1.0); // initial: perfect
 
-        // Simulate some loss
+        // Simulate some loss via forward ratio
         m.delivery_ratio_forward = 0.9;
-        m.set_delivery_ratio_reverse(0.95);
+
+        // First call establishes the baseline (no ETX update yet)
+        m.update_reverse_delivery(100, 100);
+        assert_eq!(m.etx, 1.0); // still perfect — baseline only
+
+        // Second call: 190 of 200 frames received (5% loss)
+        m.update_reverse_delivery(290, 300);
         assert!(m.etx > 1.0);
         assert!(m.etx < 2.0);
     }
@@ -341,5 +376,48 @@ mod tests {
         m.process_receiver_report(&rr2, 0, t0 + Duration::from_secs(1));
         assert!(m.goodput_bps() > 90_000.0, "goodput={}, expected ~100000", m.goodput_bps());
         assert!(m.goodput_bps() < 110_000.0, "goodput={}, expected ~100000", m.goodput_bps());
+    }
+
+    #[test]
+    fn test_reverse_delivery_delta() {
+        let mut m = MmpMetrics::new();
+
+        // First call: baseline only, no ratio update
+        m.update_reverse_delivery(100, 100);
+        assert_eq!(m.delivery_ratio_reverse, 1.0); // unchanged from default
+
+        // Second call: perfect delivery (200 new frames, all received)
+        m.update_reverse_delivery(300, 300);
+        assert!((m.delivery_ratio_reverse - 1.0).abs() < 0.001);
+
+        // Third call: 50% loss (100 frames sent, 50 received)
+        m.update_reverse_delivery(350, 400);
+        assert!((m.delivery_ratio_reverse - 0.5).abs() < 0.001,
+            "reverse={}, expected 0.5", m.delivery_ratio_reverse);
+    }
+
+    #[test]
+    fn test_reverse_delivery_rekey_reset() {
+        let mut m = MmpMetrics::new();
+
+        // Establish baseline and one measurement
+        m.update_reverse_delivery(100, 100);
+        m.update_reverse_delivery(300, 300);
+        assert!((m.delivery_ratio_reverse - 1.0).abs() < 0.001);
+
+        // Rekey resets reverse state
+        m.reset_for_rekey();
+
+        // First call after rekey: baseline only
+        m.update_reverse_delivery(50, 50);
+        // delivery_ratio_reverse was reset to 1.0 by reset_for_rekey's
+        // clearing of delivery_ratio_forward; reverse is not explicitly
+        // reset — but the delta state is, so next call computes fresh.
+        assert_eq!(m.delivery_ratio_reverse, 1.0);
+
+        // Second call after rekey: 80% delivery
+        m.update_reverse_delivery(90, 100);
+        assert!((m.delivery_ratio_reverse - 0.8).abs() < 0.001,
+            "reverse={}, expected 0.8", m.delivery_ratio_reverse);
     }
 }
