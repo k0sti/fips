@@ -5,23 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-03-22
 
 ### Added
 
+#### Operator Tooling
+
+- `fipsctl connect` and `disconnect` commands for runtime peer
+  management via control socket, with hostname resolution from
+  `/etc/fips/hosts`
+
 #### IPv6 Adapter
 
-- Pre-seed identity cache from configured peer npubs at startup, so TUN
-  packets can be dispatched immediately without waiting for handshake
-  completion ([@v0l](https://github.com/v0l))
+- Pre-seed identity cache from configured peer npubs at startup, so TUN packets can be dispatched immediately without waiting for handshake completion ([@v0l](https://github.com/v0l))
 
 #### Mesh Peer Transports
 
-- Tor transport with SOCKS5 outbound, directory-mode onion service
-  inbound, and optional control port monitoring
+- New Tor transport with SOCKS5 and directory-mode onion service for anonymous inbound and outbound peering
 - DNS hostname support in peer addresses for UDP and TCP transports
-- Non-blocking transport connect for connection-oriented transports
-  (TCP, Tor)
+- Non-blocking transport connect for connection-oriented transports (TCP, Tor)
+
+#### Packaging and Deployment
+
+- Reproducible build infrastructure: Rust toolchain pinning via
+  `rust-toolchain.toml`, `SOURCE_DATE_EPOCH` in CI and packaging
+  scripts, deterministic archive timestamps
+- Top-level packaging Makefile for unified build across formats
+- Kubernetes sidecar deployment example with Nostr relay demo
+- Nostr release publishing in OpenWrt package workflow
+- SHA-256 hash output in CI build and OpenWrt workflows
+
+#### Testing and CI
+
+- Maelstrom chaos scenario with dynamic topology mutation and
+  ephemeral node identities via connect/disconnect commands
+- Consolidated Docker test harness infrastructure
+
+### Changed
+
+- Discovery protocol: replace flooding with bloom-filter-guided tree
+  routing. Includes originator retry (T=0/T=5s/T=10s), exponential
+  backoff after timeouts and bloom misses, and transit-side per-target
+  rate limiting. Removed 257-byte visited bloom filter from LookupRequest wire format. *This is a breaking change; nodes running versions prior to this release will not be compatible.*
 
 ### Fixed
 
@@ -29,10 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   causing resolvers to give up without trying AAAA. Now returns NOERROR
   with empty answers for non-AAAA queries on resolvable names.
   (#9, reported by [@alopatindev](https://github.com/alopatindev))
-- Stale end-to-end session left in session table after peer removal blocked
-  session re-establishment on reconnect — `remove_active_peer` now cleans
-  up `self.sessions` and `self.pending_tun_packets`.
-  (#5, [@v0l](https://github.com/v0l))
+- Stale end-to-end session left in session table after peer removal blocked session re-establishment on reconnect — `remove_active_peer` now cleans up `self.sessions` and `self.pending_tun_packets`. (#5, [@v0l](https://github.com/v0l))
 - `schedule_reconnect` reset exponential backoff to zero on each link-dead
   cycle instead of preserving accumulated retry count.
   (#5, [@v0l](https://github.com/v0l))

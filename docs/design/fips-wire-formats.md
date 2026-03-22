@@ -255,7 +255,11 @@ With link overhead: 1,072 bytes.
 
 ### LookupRequest (0x30)
 
-Coordinate discovery request, flooded through the mesh.
+Coordinate discovery request, routed through the spanning tree via
+bloom-filter-guided forwarding. Each transit node forwards only to tree
+peers (parent + children) whose bloom filter contains the target.
+Request_id dedup in recent_requests handles edge cases from tree
+restructuring.
 
 ![LookupRequest](diagrams/lookup-request.svg)
 
@@ -269,20 +273,19 @@ Coordinate discovery request, flooded through the mesh.
 | 42 | min_mtu | 2 bytes LE | Minimum transport MTU the origin requires (0 = no requirement) |
 | 44 | origin_coords_cnt | 2 bytes LE | Number of coordinate entries |
 | 46 | origin_coords | 16 x n bytes | Requester's ancestry (NodeAddr only) |
-| 46 + 16n | visited_hash_cnt | 1 byte | Hash count for visited filter |
-| 47 + 16n | visited_bits | 256 bytes | Compact bloom of visited nodes |
 
-**Size**: `303 + (n x 16)` bytes, where n = origin depth + 1
+**Size**: `46 + (n x 16)` bytes, where n = origin depth + 1
 
 | Origin Depth | Payload |
 | ------------ | ------- |
-| 3 | 351 bytes |
-| 5 | 383 bytes |
-| 10 | 463 bytes |
+| 3 | 110 bytes |
+| 5 | 142 bytes |
+| 10 | 222 bytes |
 
 ### LookupResponse (0x31)
 
-Coordinate discovery response, greedy-routed back to requester.
+Coordinate discovery response, reverse-path routed back to the
+requester via the transit nodes that forwarded the request.
 
 ![LookupResponse](diagrams/lookup-response.svg)
 

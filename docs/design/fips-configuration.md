@@ -56,9 +56,11 @@ peers:       # Static peer list
 | `node.control.enabled` | bool | `true` | Enable the Unix domain control socket |
 | `node.control.socket_path` | string | *(auto)* | Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock`, then `/run/fips/control.sock` (if root), then `/tmp/fips-control.sock` |
 
-The control socket provides read-only access to node state via the
-`fipsctl` command-line tool. See the project
-[README](../../README.md#inspect) for the command list.
+The control socket provides access to node state and runtime management
+via the `fipsctl` command-line tool. In addition to read-only status
+queries, `fipsctl connect` and `fipsctl disconnect` enable runtime peer
+management. See the project [README](../../README.md#inspect) for the
+command list.
 
 All tunable protocol parameters live under `node.*`, organized as sysctl-style
 dotted paths. The top-level sections (`tun`, `dns`, `transports`, `peers`)
@@ -144,13 +146,18 @@ Controls caching of tree coordinates and identity mappings.
 
 ### Discovery Protocol (`node.discovery.*`)
 
-Controls flood-based node discovery (LookupRequest/LookupResponse).
+Controls bloom-guided node discovery (LookupRequest/LookupResponse).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.discovery.ttl` | u8 | `64` | Hop limit for LookupRequest flood |
+| `node.discovery.ttl` | u8 | `64` | Hop limit for LookupRequest forwarding |
 | `node.discovery.timeout_secs` | u64 | `10` | Lookup completion timeout |
 | `node.discovery.recent_expiry_secs` | u64 | `10` | Dedup cache expiry for recent request IDs |
+| `node.discovery.retry_interval_secs` | u64 | `5` | Retry interval within the timeout window; after this interval without a response, resend the lookup |
+| `node.discovery.max_attempts` | u8 | `2` | Max attempts per lookup (1 = no retry, 2 = one retry) |
+| `node.discovery.backoff_base_secs` | u64 | `30` | Base for exponential backoff after lookup failure; doubles per consecutive failure |
+| `node.discovery.backoff_max_secs` | u64 | `300` | Cap on exponential backoff (5 minutes) |
+| `node.discovery.forward_min_interval_secs` | u64 | `2` | Transit-side rate limiting: minimum interval between forwarded lookups for the same target |
 
 ### Spanning Tree (`node.tree.*`)
 
@@ -616,6 +623,11 @@ node:
     ttl: 64
     timeout_secs: 10
     recent_expiry_secs: 10
+    retry_interval_secs: 5
+    max_attempts: 2
+    backoff_base_secs: 30
+    backoff_max_secs: 300
+    forward_min_interval_secs: 2
   tree:
     announce_min_interval_ms: 500
     parent_hysteresis: 0.2              # cost improvement fraction for parent switch

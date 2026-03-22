@@ -330,7 +330,9 @@ fresh SessionSetup re-warms transit caches (still within their 300s TTL).
 ## Discovery Protocol
 
 Discovery resolves a destination's tree coordinates so that multi-hop routing
-can proceed.
+can proceed. Requests are forwarded using **bloom-guided tree routing** —
+only to tree peers (parent + children) whose bloom filter contains the
+target — producing single-path forwarding through the spanning tree.
 
 ### When Discovery Is Needed
 
@@ -347,17 +349,70 @@ The source creates a LookupRequest containing:
 - **origin**: The requester's node_addr
 - **origin_coords**: The requester's current tree coordinates (so the
   response can route back)
-- **TTL**: Bounds the flood radius
+- **TTL**: Bounds the forwarding radius
 
-The request floods through the mesh: each node decrements TTL, adds itself
-to a visited filter (preventing loops on a single path), and forwards to all
-peers not in the visited filter. Bloom filters may help direct the flood
-toward likely candidates.
+### Bloom-Guided Tree Routing
 
-**Deduplication**: Nodes maintain a short-lived request_id dedup cache
-(default 10s window) to drop convergent duplicates (the same request
-arriving via different paths). This is a protocol requirement, not an
-optimization.
+Rather than flooding to all peers, the request is forwarded only to **tree
+peers** (parent + children) whose bloom filter contains the target. Because
+bloom filters propagate along tree edges with split-horizon exclusion,
+typically only one tree peer matches — producing a single directed path
+through the spanning tree toward the target's subtree. This reduces
+discovery traffic by roughly 90% compared to flooding.
+
+If no tree peer's bloom filter matches the target, the request falls back
+to **non-tree peers** whose bloom filter contains the target. This recovers
+from dead ends caused by stale bloom filters, tree restructuring, or transit
+node failures. If no peer at all has a bloom match, the request is dropped
+at that node.
+
+**Loop prevention**: The spanning tree is inherently loop-free, so tree-only
+forwarding cannot loop. The `request_id` dedup cache (default 10s window)
+provides defense-in-depth, catching edge cases during tree restructuring
+where a request might arrive via both tree and fallback paths.
+
+### Retry Logic
+
+Single-path forwarding is more fragile than flooding — if any transit node
+on the path has a stale bloom filter or loses a link, the request fails.
+To compensate, the originator retries:
+
+- **T=0**: Initial lookup sent
+- **T=5s**: Retry if no response (configurable via `retry_interval_secs`)
+- **T=10s**: Timeout, fail (configurable via `timeout_secs`)
+
+The default `max_attempts` is 2 (initial + one retry). Each retry generates
+a fresh `request_id` and re-evaluates bloom filter matches, so it can take
+a different path if the tree has restructured.
+
+### Originator Backoff
+
+After a lookup times out or no peer's bloom filter contains the target, the
+originator enters **exponential backoff** before re-attempting discovery for
+the same target:
+
+- **Base delay**: 30s (configurable via `backoff_base_secs`)
+- **Multiplier**: 2x per consecutive failure
+- **Cap**: 300s (configurable via `backoff_max_secs`)
+
+Backoff is **reset on topology changes** that might make previously
+unreachable targets reachable: parent switch, new peer connection, first
+RTT measurement from MMP, or peer reconnection.
+
+### Bloom Filter Pre-Check
+
+Before initiating a lookup, the originator checks whether *any* peer's
+bloom filter contains the target. If no peer advertises reachability, the
+lookup is skipped entirely and recorded as a failure for backoff purposes.
+This avoids wasting network resources when the target is not in the mesh.
+
+### Transit-Side Rate Limiting
+
+Transit nodes enforce a per-target minimum interval (default 2s, configurable
+via `forward_min_interval_secs`) for forwarded lookups. This is
+defense-in-depth against misbehaving nodes that generate fresh `request_id`s
+at high rate to bypass dedup. The rate limiter collapses rapid-fire lookups
+for the same target regardless of `request_id`.
 
 ### LookupResponse
 
@@ -373,13 +428,20 @@ direct peer), a LookupResponse is created containing:
   authenticates that the response is genuine and the target holds the
   claimed tree position
 
-The response routes back to the requester using reverse-path routing as the
-primary mechanism: each transit node looks up the request_id in its
+The response routes back to the requester using **reverse-path routing** as
+the primary mechanism: each transit node looks up the `request_id` in its
 `recent_requests` table to find the peer that forwarded the original request,
 and sends the response back through that peer. This ensures the response
 follows the same path as the request. Greedy tree routing toward the
-origin_coords is used only as a fallback if the reverse-path entry has
+`origin_coords` is used only as a fallback if the reverse-path entry has
 expired.
+
+**Response-forwarded flag**: Each `recent_requests` entry tracks whether a
+response has already been forwarded for that `request_id`. If a second
+response arrives (e.g., from convergent request paths that reached the
+target via different routes), the transit node drops it. This prevents
+response routing loops where multiple responses for the same request
+circulate through the network.
 
 **Proof verification**: The source verifies the Schnorr proof upon receipt,
 confirming that the target actually signed the response. The proof covers
@@ -390,12 +452,14 @@ annotation modified at each hop.
 
 ### Discovery Outcome
 
-On receiving a LookupResponse, the source caches the target's coordinates.
-Subsequent routing to that destination can proceed via the normal
-`find_next_hop()` priority chain.
+On receiving a verified LookupResponse, the source caches the target's
+coordinates and clears any backoff state for that target. Subsequent routing
+to that destination can proceed via the normal `find_next_hop()` priority
+chain.
 
-If discovery times out (no response), queued packets receive ICMPv6
-Destination Unreachable.
+If discovery times out (no response after all retry attempts), queued
+packets receive ICMPv6 Destination Unreachable and the target enters
+backoff.
 
 ## SessionSetup Self-Bootstrapping
 
@@ -467,7 +531,7 @@ coordinates for the destination. It cannot make a forwarding decision.
 2. Reset CP warmup counter — subsequent data packets piggyback coordinates
    when possible, or trigger additional CoordsWarmup messages when
    piggybacking would exceed the transport MTU
-3. Initiate discovery (LookupRequest flood) for the destination
+3. Initiate discovery (bloom-guided LookupRequest) for the destination
 4. When discovery completes, warmup counter resets again (covers timing gap)
 
 The crypto session remains active throughout — only routing state is
@@ -553,8 +617,9 @@ sequence:
    identity cache with NodeAddr + PublicKey
 2. **Session initiation attempt**: Fails because no coordinates are cached
    for the destination
-3. **Discovery**: LookupRequest floods through the mesh; LookupResponse
-   returns the destination's coordinates
+3. **Discovery**: LookupRequest routes through the spanning tree via
+   bloom-guided forwarding; LookupResponse returns the destination's
+   coordinates
 4. **Session establishment**: SessionSetup carries coordinates, warming
    transit caches along the path
 5. **Warmup**: First N data packets include CP flag, reinforcing transit
@@ -643,7 +708,7 @@ routing decisions but retains its own end-to-end encryption and identity.
 | ------- | ------------ | ---- | ---------- |
 | TreeAnnounce | Variable (depth-dependent) | Topology changes | No (peer-to-peer) |
 | FilterAnnounce | ~1 KB | Topology changes | No (peer-to-peer) |
-| LookupRequest | ~300 bytes | First contact, recovery | Yes (flood) |
+| LookupRequest | ~300 bytes | First contact, recovery | Yes (bloom-guided tree) |
 | LookupResponse | ~400 bytes | Response to discovery | Yes (greedy routed) |
 | SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
 | SessionDatagram + SessionAck | ~170 bytes | Session confirmation | Yes (routed) |
@@ -696,10 +761,14 @@ recovery).
 | Flap dampening (hysteresis + hold-down) | **Implemented** |
 | Link liveness (dead timeout) | **Implemented** |
 | Discovery request deduplication | **Implemented** |
+| Discovery bloom-guided tree routing | **Implemented** |
+| Discovery retry logic | **Implemented** |
+| Discovery originator backoff | **Implemented** |
+| Discovery transit-side rate limiting | **Implemented** |
+| Discovery response-forwarded dedup | **Implemented** |
 | Leaf-only operation | Under development |
 | Link cost in parent selection (ETX) | **Implemented** |
 | Link cost in candidate ranking | **Implemented** |
-| Discovery path accumulation | Future direction |
 
 ## References
 
