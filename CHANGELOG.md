@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Linux release artifact workflow: builds x86_64 and aarch64 tarballs
+  and `.deb` packages on `v*` tag push, with SHA-256 checksums
+- AUR publish workflow for tagged stable releases
+
 ### Fixed
 
 - Control socket path detection in fipsctl and fipstop now checks for
@@ -15,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error instead of a misleading "No such file" fallback to
   `$XDG_RUNTIME_DIR` ([#30](https://github.com/jmcorgan/fips/issues/30),
   reported by [@Sebastix](https://github.com/Sebastix))
+- OpenWrt ipk build excluded BLE feature that requires D-Bus, which is
+  unavailable on OpenWrt targets
+- IPv6 routing policy rule added at TUN setup to protect `fd00::/8`
+  from interception by Tailscale's table 52 default route
 
 ## [0.2.0] - 2026-03-22
 
