@@ -4,9 +4,11 @@ use super::{Node, NodeError, NodeState};
 use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
 use crate::transport::{packet_channel, Link, LinkDirection, LinkId, TransportAddr, TransportId};
+#[cfg(feature = "tun-support")]
 use crate::upper::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
 use crate::node::wire::build_msg1;
 use crate::{NodeAddr, PeerIdentity};
+#[cfg(feature = "tun-support")]
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -566,80 +568,86 @@ impl Node {
         // This allows handshake messages to be sent before we start accepting packets
         self.initiate_peer_connections().await;
 
-        // Initialize TUN interface last, after transports and peers are ready
-        if self.config.tun.enabled {
-            let address = *self.identity.address();
-            match TunDevice::create(&self.config.tun, address).await {
-                Ok(device) => {
-                    let mtu = device.mtu();
-                    let name = device.name().to_string();
-                    let our_addr = *device.address();
+        #[cfg(feature = "tun-support")]
+        {
+            // Initialize TUN interface last, after transports and peers are ready
+            if self.config.tun.enabled {
+                let address = *self.identity.address();
+                match TunDevice::create(&self.config.tun, address).await {
+                    Ok(device) => {
+                        let mtu = device.mtu();
+                        let name = device.name().to_string();
+                        let our_addr = *device.address();
 
-                    info!("TUN device active:");
-                    info!("     name: {}", name);
-                    info!("  address: {}", device.address());
-                    info!("      mtu: {}", mtu);
+                        info!("TUN device active:");
+                        info!("     name: {}", name);
+                        info!("  address: {}", device.address());
+                        info!("      mtu: {}", mtu);
 
-                    // Calculate max MSS for TCP clamping
-                    let effective_mtu = self.effective_ipv6_mtu();
-                    let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
-                    
-                    info!("effective MTU: {} bytes", effective_mtu);
-                    debug!("   max TCP MSS: {} bytes", max_mss);
+                        // Calculate max MSS for TCP clamping
+                        let effective_mtu = self.effective_ipv6_mtu();
+                        let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
 
-                    // Create writer (dups the fd for independent write access)
-                    let (writer, tun_tx) = device.create_writer(max_mss)?;
+                        info!("effective MTU: {} bytes", effective_mtu);
+                        debug!("   max TCP MSS: {} bytes", max_mss);
 
-                    // Spawn writer thread
-                    let writer_handle = thread::spawn(move || {
-                        writer.run();
-                    });
+                        // Create writer (dups the fd for independent write access)
+                        let (writer, tun_tx) = device.create_writer(max_mss)?;
 
-                    // Clone tun_tx for the reader
-                    let reader_tun_tx = tun_tx.clone();
+                        // Spawn writer thread
+                        let writer_handle = thread::spawn(move || {
+                            writer.run();
+                        });
 
-                    // Create outbound channel for TUN reader → Node
-                    let tun_channel_size = self.config.node.buffers.tun_channel;
-                    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
+                        // Clone tun_tx for the reader
+                        let reader_tun_tx = tun_tx.clone();
 
-                    // Spawn reader thread
-                    let transport_mtu = self.transport_mtu();
-                    let reader_handle = thread::spawn(move || {
-                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu);
-                    });
+                        // Create outbound channel for TUN reader → Node
+                        let tun_channel_size = self.config.node.buffers.tun_channel;
+                        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
 
-                    self.tun_state = TunState::Active;
-                    self.tun_name = Some(name);
-                    self.tun_tx = Some(tun_tx);
-                    self.tun_outbound_rx = Some(outbound_rx);
-                    self.tun_reader_handle = Some(reader_handle);
-                    self.tun_writer_handle = Some(writer_handle);
-                }
-                Err(e) => {
-                    self.tun_state = TunState::Failed;
-                    warn!(error = %e, "Failed to initialize TUN, continuing without it");
+                        // Spawn reader thread
+                        let transport_mtu = self.transport_mtu();
+                        let reader_handle = thread::spawn(move || {
+                            run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu);
+                        });
+
+                        self.tun_state = TunState::Active;
+                        self.tun_name = Some(name);
+                        self.tun_tx = Some(tun_tx);
+                        self.tun_outbound_rx = Some(outbound_rx);
+                        self.tun_reader_handle = Some(reader_handle);
+                        self.tun_writer_handle = Some(writer_handle);
+                    }
+                    Err(e) => {
+                        self.tun_state = TunState::Failed;
+                        warn!(error = %e, "Failed to initialize TUN, continuing without it");
+                    }
                 }
             }
         }
 
-        // Initialize DNS responder (independent of TUN)
-        if self.config.dns.enabled {
-            let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
-            match tokio::net::UdpSocket::bind(&bind).await {
-                Ok(socket) => {
-                    let dns_channel_size = self.config.node.buffers.dns_channel;
-                    let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
-                    let dns_ttl = self.config.dns.ttl();
-                    let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
-                    let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
-                    let reloader = crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
-                    info!(bind = %bind, hosts = reloader.hosts().len(), "DNS responder started for .fips domain (auto-reload enabled)");
-                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(socket, identity_tx, dns_ttl, reloader));
-                    self.dns_identity_rx = Some(identity_rx);
-                    self.dns_task = Some(handle);
-                }
-                Err(e) => {
-                    warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+        #[cfg(feature = "tun-support")]
+        {
+            // Initialize DNS responder (independent of TUN)
+            if self.config.dns.enabled {
+                let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
+                match tokio::net::UdpSocket::bind(&bind).await {
+                    Ok(socket) => {
+                        let dns_channel_size = self.config.node.buffers.dns_channel;
+                        let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
+                        let dns_ttl = self.config.dns.ttl();
+                        let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
+                        let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
+                        let reloader = crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
+                        info!(bind = %bind, hosts = reloader.hosts().len(), "DNS responder started for .fips domain (auto-reload enabled)");
+                        let handle = tokio::spawn(crate::upper::dns::run_dns_responder(socket, identity_tx, dns_ttl, reloader));
+                        self.dns_identity_rx = Some(identity_rx);
+                        self.dns_task = Some(handle);
+                    }
+                    Err(e) => {
+                        warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+                    }
                 }
             }
         }
@@ -663,10 +671,13 @@ impl Node {
         self.state = NodeState::Stopping;
         info!(state = %self.state, "Node stopping");
 
-        // Stop DNS responder
-        if let Some(handle) = self.dns_task.take() {
-            handle.abort();
-            debug!("DNS responder stopped");
+        #[cfg(feature = "tun-support")]
+        {
+            // Stop DNS responder
+            if let Some(handle) = self.dns_task.take() {
+                handle.abort();
+                debug!("DNS responder stopped");
+            }
         }
 
         // Send disconnect notifications to all active peers before closing transports
@@ -697,27 +708,30 @@ impl Node {
         self.packet_tx.take();
         self.packet_rx.take();
 
-        // Shutdown TUN interface
-        if let Some(name) = self.tun_name.take() {
-            info!(name = %name, "Shutting down TUN interface");
+        #[cfg(feature = "tun-support")]
+        {
+            // Shutdown TUN interface
+            if let Some(name) = self.tun_name.take() {
+                info!(name = %name, "Shutting down TUN interface");
 
-            // Drop the tun_tx to signal the writer to stop
-            self.tun_tx.take();
+                // Drop the tun_tx to signal the writer to stop
+                self.tun_tx.take();
 
-            // Delete the interface (causes reader to get EFAULT)
-            if let Err(e) = shutdown_tun_interface(&name).await {
-                warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
+                // Delete the interface (causes reader to get EFAULT)
+                if let Err(e) = shutdown_tun_interface(&name).await {
+                    warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
+                }
+
+                // Wait for threads to finish
+                if let Some(handle) = self.tun_reader_handle.take() {
+                    let _ = handle.join();
+                }
+                if let Some(handle) = self.tun_writer_handle.take() {
+                    let _ = handle.join();
+                }
+
+                self.tun_state = TunState::Disabled;
             }
-
-            // Wait for threads to finish
-            if let Some(handle) = self.tun_reader_handle.take() {
-                let _ = handle.join();
-            }
-            if let Some(handle) = self.tun_writer_handle.take() {
-                let _ = handle.join();
-            }
-
-            self.tun_state = TunState::Disabled;
         }
 
         self.state = NodeState::Stopped;
