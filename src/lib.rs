@@ -17,7 +17,42 @@ pub mod peer;
 pub mod protocol;
 pub mod transport;
 pub mod tree;
+#[cfg(feature = "tun-support")]
 pub mod upper;
+
+// When tun-support is disabled, provide the config types directly
+// (they're simple serde structs with no platform-specific deps)
+#[cfg(not(feature = "tun-support"))]
+pub mod upper {
+    pub mod config {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+        pub struct DnsConfig {
+            #[serde(default)]
+            pub enabled: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub bind_addr: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub port: Option<u16>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub ttl: Option<u32>,
+        }
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+        pub struct TunConfig {
+            #[serde(default)]
+            pub enabled: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub name: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub mtu: Option<u16>,
+        }
+    }
+}
+
+#[cfg(not(feature = "tun-support"))]
+pub use upper::config::{DnsConfig, TunConfig};
 
 // Re-export identity types
 pub use identity::{
@@ -27,6 +62,7 @@ pub use identity::{
 
 // Re-export config types
 pub use config::{Config, ConfigError, IdentityConfig, TorConfig, UdpConfig};
+#[cfg(feature = "tun-support")]
 pub use upper::config::{DnsConfig, TunConfig};
 
 // Re-export tree types
