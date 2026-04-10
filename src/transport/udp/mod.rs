@@ -83,6 +83,13 @@ impl UdpTransport {
         self.accept_connections_override = Some(accept_connections);
     }
 
+    /// Get the raw fd of the bound UDP socket (for Android VpnService.protect).
+    ///
+    /// Returns `None` if the transport hasn't been started yet.
+    pub fn socket_fd(&self) -> Option<i32> {
+        self.socket.as_ref().map(|s| s.as_raw_fd() as i32)
+    }
+
     /// Get the instance name (if configured as a named instance).
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()

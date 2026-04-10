@@ -903,6 +903,16 @@ impl TransportHandle {
         }
     }
 
+    /// Get the raw socket fd (only meaningful for UDP transports).
+    ///
+    /// Returns `None` for non-UDP transports or if the socket isn't bound yet.
+    pub fn socket_fd(&self) -> Option<i32> {
+        match self {
+            TransportHandle::Udp(t) => t.socket_fd(),
+            _ => None,
+        }
+    }
+
     /// Get the transport ID.
     pub fn transport_id(&self) -> TransportId {
         match self {

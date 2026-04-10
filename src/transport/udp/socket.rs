@@ -217,6 +217,11 @@ pub struct AsyncUdpSocket {
 }
 
 impl AsyncUdpSocket {
+    /// Get the raw file descriptor of the underlying socket.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+
     /// Send a payload to a destination address.
     pub async fn send_to(
         &self,

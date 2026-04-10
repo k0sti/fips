@@ -1642,6 +1642,40 @@ impl Node {
         self.tun_tx.as_ref()
     }
 
+    /// Collect raw fds of all bound transport sockets.
+    ///
+    /// On Android, each fd must be passed to `VpnService.protect()` before
+    /// the TUN interface is established, otherwise outbound mesh UDP packets
+    /// would loop back through the VPN.
+    pub fn transport_socket_fds(&self) -> Vec<i32> {
+        self.transports
+            .values()
+            .filter_map(|h| h.socket_fd())
+            .collect()
+    }
+
+    /// Inject external TUN channels (for mobile embeddings without a real TUN device).
+    ///
+    /// Creates the channel pairs and installs the node-side ends (`tun_tx` for
+    /// inbound-to-TUN packets, `tun_outbound_rx` for outbound-from-TUN packets).
+    /// Returns the caller's ends: an outbound sender and an inbound receiver.
+    ///
+    /// Must be called after `start()` but before `run_rx_loop()`.
+    #[cfg(feature = "tun-support")]
+    pub fn set_tun_channels(
+        &mut self,
+    ) -> (tokio::sync::mpsc::Sender<Vec<u8>>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        // Outbound: TUN reader → Node (tokio mpsc, consumed by rx_loop select!)
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
+        // Inbound: Node → TUN writer (std mpsc, read by blocking TunAdapter thread)
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+
+        self.tun_outbound_rx = Some(outbound_rx);
+        self.tun_tx = Some(inbound_tx);
+
+        (outbound_tx, inbound_rx)
+    }
+
     // === Sending ===
 
     /// Encrypt and send a link-layer message to an authenticated peer.
