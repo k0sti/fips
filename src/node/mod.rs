@@ -1676,6 +1676,27 @@ impl Node {
         (outbound_tx, inbound_rx)
     }
 
+    /// Install a pre-created DNS identity channel for mobile embedding.
+    ///
+    /// Mirrors [`Self::set_tun_channels`] for DNS: when the embedding
+    /// application handles DNS packets externally (e.g., TUN-level
+    /// interception on Android, since userspace cannot bind port 53),
+    /// it needs a way to push `DnsResolvedIdentity` records into the node
+    /// so [`Self::register_identity`] is called during the rx loop and the
+    /// node can route packets to freshly-resolved peers.
+    ///
+    /// Returns the sender; callers clone it into their DNS handler.  The
+    /// receiver is stored on the node and consumed by `rx_loop`.
+    ///
+    /// Must be called before `run_rx_loop()`, otherwise the rx loop will
+    /// substitute a dummy channel and the returned tx will be unused.
+    #[cfg(feature = "tun-support")]
+    pub fn set_dns_identity_channel(&mut self) -> crate::upper::dns::DnsIdentityTx {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        self.dns_identity_rx = Some(rx);
+        tx
+    }
+
     // === Sending ===
 
     /// Encrypt and send a link-layer message to an authenticated peer.
